@@ -40,32 +40,3 @@ def read_excel_sheets(filepath):
     xls.close()
 
     return data_dict
-
-def check_CW_location(path, start, stop):
-    file_ls = utils.get_files_in_folder(path)
-    for file in file_ls:
-        if "C3" in file:
-            light, tarr = read_trc_data(file)
-            plt.figure()
-            plt.plot(tarr*1e3, light)
-            plt.plot(tarr[start:stop]*1e3, light[start:stop])# plot range to take average
-            plt.ylabel('Light')
-            plt.legend()
-
-def get_power_solenoid(pressure, start, stop):
-    path = r"C:\data\epfl\diagnostic-source\CRDS\scope-trc\solAnt"
-    file_ls = utils.get_files_in_folder(path)
-    pwr_arr = np.array([])
-
-    for file in file_ls:
-        if str(pressure)+"mT" in file:
-            if "C3" in file:
-                power = utils.get_number_before_keyword(file, "W")
-                light, tarr = read_trc_data(file)
-                lavg = np.average(light[start:stop]) * 1e3 # take average light signal conver V to mV
-                pwr = cbp.ltop_solenoid(lavg, pressure) # Calibrated power according to CW light signal
-                print(f'Power = {pwr} W')
-
-                pwr_arr = np.append(pwr_arr, [power,pwr])
-
-    return pwr_arr

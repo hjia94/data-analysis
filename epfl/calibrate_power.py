@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 import numpy as np
+import data_analysis_utils as utils
+from read_scope_data import read_trc_data
 
 #======================================================================================
 '''
@@ -79,38 +81,26 @@ def ltop_birdcage(light_level, pres, rt_data=False):
     
 #======================================================================================
 
-def ltop_solenoid(light_level, pres, ver=0, rt_data=False):
+def ltop_solenoid(light_level, pres, rt_data=False):
     '''
-    same as above for solenoid antenna
-    ver -- The photodiode was moved on Thursday Jun.1st before CRDS data aqcuisition because camera was reinstalled to check laser profile
-    Therefore, data taken on May.31 should use ver=1 
+    Same as above for solenoid antenna
     '''
-    if pres == 0.5:  # 0.5mTorr flow 0.007
-        ydata = np.array([70, 160, 270, 400, 530])
+    calibration_data = {
+        0.5: np.array([70, 160, 270, 400, 530]),  # 0.5mTorr flow 0.007
+        1: np.array([80, 150, 250, 370, 510]),    # 1 mTorr flow 0.012
+        5: np.array([40, 110, 200, 320, 450]),    # 5 mTorr flow 0.06
+        10: np.array([80, 160, 250, 380]),        # 10 mTorr flow 0.12
+        15: np.array([60, 150, 250, 380]),        # 15 mTorr flow 0.16
+        20: np.array([120, 210, 320]),            # 20 mTorr flow 0.19
+        25: np.array([110, 200, 310]),            # 25 mTorr flow 0.21
+        35: np.array([100, 190, 290])             # 35 mTorr flow 0.25
+    }
 
-    if pres == 1:    # 1 mTorr flow 0.012
-        ydata = np.array([80, 150, 250, 370, 510])
+    if pres not in calibration_data:
+        print('Invalid pressure value')
+        return None
 
-    if pres == 5:    # 5 mTorr flow 0.06
-        if ver == 0:
-            ydata = np.array([40, 110, 200, 320, 450])
-        else:
-            ydata = np.array([45, 120, 230, 360, 520])
-
-    if pres == 10:  # 10 mTorr flow 0.12
-        ydata = np.array([80, 160, 250, 380])
-
-    if pres == 15:  # 15 mTorr flow 0.16
-        ydata = np.array([60, 150, 250, 380])
-
-    if pres == 20:   # 20 mTor flow 0.19
-        ydata = np.array([120, 210, 320])
-
-    if pres == 25:   # 25 mTorr flow 0.21
-        ydata = np.array([110, 200, 310])
-
-    if pres == 35:  # 35 mTorr flow 0.25
-        ydata = np.array([100, 190, 290])
+    ydata = calibration_data[pres]
 
     for pwrarr in pwr_dic:
         if len(ydata) == len(pwrarr):
@@ -121,23 +111,42 @@ def ltop_solenoid(light_level, pres, ver=0, rt_data=False):
     if False:
         plt.figure()
         plt.scatter(ydata, xdata)
-
-        fxarr = numpy.linspace(ydata[0],ydata[2],100)
+        fxarr = np.linspace(ydata[0], ydata[2], 100)
         plt.plot(fxarr, func(fxarr, *popt))
         plt.show()
-    
+
     if light_level < np.min(ydata):
-        print ('Input value lower than calibration data range')
-        return 0
+        print('Warning: Input value lower than calibration data range')
+
     if light_level > np.max(ydata):
-        print ('Input value higher than calibration data range')
-        return 999
+        print('Warning: Input value higher than calibration data range')
+
 
     if rt_data:
         return func(light_level, *popt), ydata
     else:
         return func(light_level, *popt)
     
+#======================================================================================
+
+def get_power_solenoid(pressure, start, stop):
+    path = r"C:\data\epfl\diagnostic-source\CRDS\scope-trc\solAnt"
+    file_ls = utils.get_files_in_folder(path, modified_date='2023-06-01', omit_keyword='water')
+    pwr_arr = np.empty((0, 2))
+
+    for file in file_ls:
+        if '-'+str(pressure)+"mT" in file:
+            if "C3" in file:
+                power = utils.get_number_before_keyword(file, "W")
+                light, tarr = read_trc_data(file)
+                lavg = np.average(light[start:stop]) * 1e3 # take average light signal conver V to mV
+                pwr = ltop_solenoid(lavg, pressure) # Calibrated power according to CW light signal
+                print(f'Power = {pwr} W')
+
+                pwr_arr = np.append(pwr_arr, np.array([[power,pwr]]), axis=0)
+
+    return pwr_arr
+
 #===============================================================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===============================================================================================================================================
