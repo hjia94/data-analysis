@@ -10,33 +10,23 @@ import calibrate_power as cbp
 import data_analysis_utils as utils
 from read_scope_data import read_trc_data
 
-def read_excel_sheets(filepath):
-    """
-    Read an Excel file and extract columns with non-zero values from each sheet.
 
-    Parameters:
-    filepath (str): The path to the Excel file.
+def get_sheet_names(filepath):
+    xls = pd.ExcelFile(filepath)
+    sheetname_ls = xls.sheet_names
+    xls.close()
+    return sheetname_ls
 
-    Returns:
-    dict: A dictionary containing the sheet names as keys and the columns with non-zero values as values.
-    """
-    data_dict = {}
+def read_excel_sheets(filepath, sheet_name, col_num):
 
     # Read the Excel file
     xls = pd.ExcelFile(filepath)
-    print(xls.sheet_names)
 
-    # Iterate over each sheet in the Excel file
-    for sheet_name in xls.sheet_names:
-        # Read the sheet into a DataFrame
-        df = pd.read_excel(filepath, sheet_name=sheet_name)
-        col_list = df.columns.tolist()
-        # # Get the selected columns as a NumPy array
-        selected_columns = df[['time, s - Plot 0', '1/c.tau, 1/cm - Plot 0']].values
-
-        # Add the selected columns to the data dictionary
-        data_dict[sheet_name] = selected_columns
+    # Read the sheet into a DataFrame
+    df = pd.read_excel(filepath, sheet_name=sheet_name)
+    # # Get the selected columns as a NumPy array
+    selected_columns = df.iloc[:, col_num].values
 
     xls.close()
 
-    return data_dict
+    return selected_columns

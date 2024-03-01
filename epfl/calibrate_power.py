@@ -135,15 +135,22 @@ def get_power_solenoid(pressure, start, stop):
     pwr_arr = np.empty((0, 2))
 
     for file in file_ls:
-        if '-'+str(pressure)+"mT" in file:
-            if "C3" in file:
-                power = utils.get_number_before_keyword(file, "W")
-                light, tarr = read_trc_data(file)
-                lavg = np.average(light[start:stop]) * 1e3 # take average light signal conver V to mV
-                pwr = ltop_solenoid(lavg, pressure) # Calibrated power according to CW light signal
-                print(f'Power = {pwr} W')
+        if "C3" in file and '-'+str(pressure)+'mT' in file:
+            power = utils.get_number_before_keyword(file, "W")
+            
+            light, tarr = read_trc_data(file)
+            lavg = np.average(light[start:stop]) * 1e3 # take average light signal conver V to mV
+            
+            # Calibrated power according to CW light signal
+            if pressure == 26: # 26mTorr is not in calibration data
+                pwr = ltop_solenoid(lavg, 25)
+            elif pressure == 36: # 36mTorr is not in calibration data
+                pwr = ltop_solenoid(lavg, 35)
+            else:
+                pwr = ltop_solenoid(lavg, pressure)
 
-                pwr_arr = np.append(pwr_arr, np.array([[power,pwr]]), axis=0)
+            print(f'Listed power = {power}W  cal power = {pwr}W')
+            pwr_arr = np.append(pwr_arr, np.array([[power,pwr]]), axis=0)
 
     return pwr_arr
 
