@@ -60,7 +60,7 @@ def read_trc_data(file_path, list_some_header_info=False):
 
 	data_size = int( (int(first_11[2:]) - 346) / 2)
 	if data_size != len(header.time_array):
-		print('Time array length from header %i does not equal %i from first 11 bytes' %(len(h.time_array), data_size))
+		print('Time array length from header %i does not equal %i from first 11 bytes' %(len(header.time_array), data_size))
 		data_size = len(header.time_array)
 
 	if list_some_header_info:

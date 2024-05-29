@@ -232,23 +232,16 @@ def density_from_phase_steve(tarr, refch, plach):
 
 if __name__ == '__main__':
 
-	ifn = r"C:\data\LAPD\interferometer_samples\C1-topo-22-12-05-00000.trc"
+	# modify testing for Linux
+	st1 = time.time()
+
+	ifn = "C:\data\LAPD\interferometer_samples\C1-topo-22-12-05-00000.trc"
 	refch, tarr = read_trc_data(ifn)
 
-	ifn = r"C:\data\LAPD\interferometer_samples\C2-topo-22-12-05-00000.trc"
+	ifn = "C:\data\LAPD\interferometer_samples\C2-topo-22-12-05-00000.trc"
 	plach, tarr = read_trc_data(ifn)
-	plt.figure()
 
-	st1 = time.time()
 	t_ms, ne = density_from_phase(tarr, refch, plach)
 	st2 = time.time()
-	plt.plot(t_ms, ne)
+
 	print('Pat: ', st2-st1)
-
-	st3 = time.time()
-	t_ms, ne = density_from_phase_steve(tarr, refch, plach)
-	st4 = time.time()
-	plt.plot(t_ms, ne)
-	print('Steve: ', st4-st3)
-
-	plt.show()
