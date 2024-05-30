@@ -36,7 +36,7 @@ from scipy import signal
 from scipy.ndimage import uniform_filter1d
 from matplotlib import mlab
 
-from read_scope_data import read_trc_data
+from read_scope_data import read_trc_data, read_trc_data_simplified
 import time
 
 #============================================================================
@@ -229,19 +229,27 @@ def density_from_phase_steve(tarr, refch, plach):
 #===============================================================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===============================================================================================================================================
+# sudo mount.cifs //192.168.7.61/interf /home/smbshare -o username=LECROYUSER_2
 
 if __name__ == '__main__':
 
 	# modify testing for Linux
 	st1 = time.time()
 
-	ifn = "C:\data\LAPD\interferometer_samples\C1-topo-22-12-05-00000.trc"
-	refch, tarr = read_trc_data(ifn)
+	ifn = "/home/interfpi/C1-topo-22-12-05-00000.trc"
+	refch, tarr = read_trc_data_simplified(ifn)
 
-	ifn = "C:\data\LAPD\interferometer_samples\C2-topo-22-12-05-00000.trc"
-	plach, tarr = read_trc_data(ifn)
-
-	t_ms, ne = density_from_phase(tarr, refch, plach)
+	ifn = "/home/interfpi/C2-topo-22-12-05-00000.trc"
+	plach, tarr = read_trc_data_simplified(ifn)
 	st2 = time.time()
 
-	print('Pat: ', st2-st1)
+	t_ms, ne = density_from_phase(tarr, refch, plach)
+	st3 = time.time()
+
+	print('Reading time: ', st2-st1)
+	print('Analyzing time: ', st3-st2)
+	print('Total time: ', st3-st1)
+	
+	plt.figure()
+	plt.plot(t_ms, ne)
+	plt.show()
