@@ -31,7 +31,7 @@ Feb.2024 update:
 import numpy as np
 import struct
 
-from LeCroy_Scope_Header import LeCroy_Scope_Header
+from LeCroy_Scope_Header import LeCroy_Scope_Header, time_gain_and_offset
 
 #======================================================================================
 
@@ -61,7 +61,7 @@ def read_trc_data(file_path, list_some_header_info=False):
 	data_size = int( (int(first_11[2:]) - 346) / 2)
 	if data_size != len(header.time_array):
 		print('Time array length from header %i does not equal %i from first 11 bytes' %(len(header.time_array), data_size))
-		data_size = len(header.time_array)
+	data_size = len(header.time_array)
 
 	if list_some_header_info:
 		print("dt =", header.dt)
@@ -74,8 +74,28 @@ def read_trc_data(file_path, list_some_header_info=False):
 
 	print('Reading data...')
 	fmt = f"={data_size}h"
-	data = np.array(struct.unpack(fmt, data_bytes), dtype=float)
-	data = data * header.hdr.vertical_gain - header.hdr.vertical_offset
+	data = np.frombuffer(data_bytes, dtype=fmt)
+	data = data[0,:] * header.hdr.vertical_gain - header.hdr.vertical_offset
+
+	print('Done')
+
+	return data, header.time_array # signal, time array
+
+#======================================================================================
+def read_trc_data_simplified(file_path):
+
+	with open(file_path, mode='rb') as file: # rb -> read binary
+		file_content = file.read()
+
+	hdr_bytes = file_content[11:11+346]
+	header = decode_header_info(hdr_bytes)
+	data_size = len(header.time_array)
+	
+	print('Reading data...')
+	data_bytes = file_content[11+346:]
+	fmt = f"={data_size}h"
+	data = np.frombuffer(data_bytes, dtype=fmt)
+	data = data[0,:] * header.hdr.vertical_gain - header.hdr.vertical_offset
 
 	print('Done')
 
