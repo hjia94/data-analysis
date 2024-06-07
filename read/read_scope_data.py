@@ -31,7 +31,7 @@ Feb.2024 update:
 import numpy as np
 import struct
 
-from LeCroy_Scope_Header import LeCroy_Scope_Header, time_gain_and_offset
+from LeCroy_Scope_Header import LeCroy_Scope_Header
 
 #======================================================================================
 
@@ -91,13 +91,10 @@ def read_trc_data_simplified(file_path):
 	header = decode_header_info(hdr_bytes)
 	data_size = len(header.time_array)
 	
-	print('Reading data...')
 	data_bytes = file_content[11+346:]
 	fmt = f"={data_size}h"
 	data = np.frombuffer(data_bytes, dtype=fmt)
 	data = data[0,:] * header.hdr.vertical_gain - header.hdr.vertical_offset
-
-	print('Done')
 
 	return data, header.time_array # signal, time array
 

@@ -1,10 +1,11 @@
 import math
-import numpy
+import numpy as np
 import h5py
 
 from bapsflib import lapd
 import matplotlib.pyplot as plt
 
+#===============================================================================================================================================
 
 def show_info(f):
     f.overview.print()
@@ -40,8 +41,6 @@ def read_probe_motion(f, number):
 
     return pos_array, xpos, ypos, zpos, npos, nshot
 
-
-
 def read_data(f, board_num, chan_num, index_arr=None, adc='SIS 3302'):
 
     digitizer = list(f.digitizers)[0]
@@ -64,11 +63,35 @@ def data_time(f, board_num, chan_num, adc='SIS 3302'):
     data = f.read_data(board_num,chan_num, 0, add_controls=[('6K Compumotor',3)], digitizer=digitizer, adc=adc, config_name=config_name)
 
     nt = data['signal'].shape[1]
-    tarr = numpy.arange(nt) * data.dt
+    tarr = np.arange(nt) * data.dt
     
     return nt, data.dt, tarr
 
+#===============================================================================================================================================
+def unpack_datarun_sequence(f):
 
+    sequence_list = f['Raw data + config/Data run sequence/Data run sequence']
+    message_array = np.array([])
+    status_array = np.array([])
+    timestamp_array = np.array([])
+
+    for i in range(len(sequence_list)):
+        output = sequence_list[i]
+
+        # Extract elements
+        message = output[0].decode('utf-8')  # Convert bytes to string
+        message_array = np.append(message_array, message)
+
+        # Don't know what output[1] is
+        # output[2] seems to be an index
+
+        status = output[3].decode('utf-8')  # Convert bytes to string
+        status_array = np.append(status_array, status)
+
+        timestamp = output[4]
+        timestamp_array = np.append(timestamp_array, timestamp)
+
+    return message_array, status_array, timestamp_array
 #===============================================================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===============================================================================================================================================
