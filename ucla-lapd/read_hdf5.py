@@ -10,62 +10,138 @@ import matplotlib.pyplot as plt
 def show_info(f):
     f.overview.print()
 
-def read_probe_motion(f, number):
+def read_probe_motion(f):
 
-    pr = f.controls['6K Compumotor'].configs[number]
+    pr_ls = list(f.controls['6K Compumotor'].configs)
+    
+    # Check number of probes
+    if len(pr_ls) == 0:
+        print('No probe found.')
+    elif len(pr_ls) == 1:
+        print('One probe found.')
+    elif len(pr_ls) == 2:
+        print('2 probes found.')
+    else:
+        print('More than 2 probes found. Check code before proceeding.')
 
-    print(pr['probe']['probe type'], pr['probe']['probe name'])
+    for pr_number in pr_ls:
+        # Read probe information
+        pr = f.controls['6K Compumotor'].configs[pr_number]
+        print(pr['probe']['probe type'], pr['probe']['probe name'],' at port ', pr['probe']['port'])
 
-    motion = list(pr['motion lists'].values())[0]
+        motion_ls = list(pr['motion lists'].values())
+        if len(motion_ls) == 1:
+            motion = motion_ls[0]
+        else:
+            print('More than one motion list found. Check code before proceeding.')
 
-    nx = motion['npoints'][0]
-    ny = motion['npoints'][1]
-    nz = motion['npoints'][2]
+        if len(pr['motion lists']) == 1:
+            print('Only one motion list found:', list(pr['motion lists'].keys())[0])
+            
+        npos = motion['data motion count']
+        print('Number of positions:', npos)
 
-    # dx = motion['delta'][0]
-    # dy = motion['delta'][1]
-    # dz = motion['delta'][2]
+        pos_array = f.read_controls([('6K Compumotor', pr_number)])['xyz'] # contains position for each shot
 
-    # x0 = motion['center'][0]
-    # y0 = motion['center'][1]
-    # z0 = motion['center'][2] + pr['probe']['z']
+        # Check number of shots per position by looking at how many times each position is repeated
+        unique_elements, counts = np.unique(pos_array, return_counts=True)
+        nshot = np.argmax(np.bincount(counts)) # number of shot per position
+        print('Number of shots per position:', nshot)
 
-    pos_array = f.read_controls([('6K Compumotor', 3)])['xyz']
+        # If two or more probes are used; typically one probe moves first and the other moves after the first probe finishes taking data
+        # TODO: Only tested with the case of two probes using same motion list
+        this_pr_first = not np.all(pos_array[0] == pos_array[nshot])
+        if this_pr_first:
+            st_count = 0
+            print('This probe moves first in the data run sequence')
+        else:
+            st_count = counts[-2]
+            print('This probe moves after previous probe finish taking data')
+        
+        pos_array = pos_array[st_count:st_count+nshot*npos] # only keep moving positions
+        
+        #====Set up xpos/ypos/zpos arrays using motion list information====
+        nx = int(motion['npoints'][0])
+        ny = int(motion['npoints'][1])
+        nz = int(motion['npoints'][2])
 
-    npos = motion['data motion count']
-    nshot = int(len(pos_array) / npos)
+        dx = round(motion['delta'][0], 2)
+        dy = round(motion['delta'][1], 2)
+        dz = round(motion['delta'][2], 2)
 
-    xpos = pos_array[::nshot][:nx,0]
-    ypos = pos_array[::nshot][::ny,1]
-    zpos = pr['probe']['z']
+        x0 = round(motion['center'][0], 2)
+        y0 = round(motion['center'][1], 2)
+        z0 = round(motion['center'][2] + pr['probe']['z'], 2)
+
+        xpos = np.linspace(x0 - (nx-1)*dx/2, x0 + (nx-1)*dx/2, nx).astype(float)
+        ypos = np.linspace(y0 - (ny-1)*dy/2, y0 + (ny-1)*dy/2, ny).astype(float)
+        zpos = np.linspace(z0 - (nz-1)*dz/2, z0 + (nz-1)*dz/2, nz).astype(float)
 
     return pos_array, xpos, ypos, zpos, npos, nshot
 
-def read_data(f, board_num, chan_num, index_arr=None, adc='SIS 3302'):
+def read_digitizer_config(f):
+    
+    grp = f['/Raw data + config/SIS crate']
 
-    digitizer = list(f.digitizers)[0]
+    for k in grp.keys():
+        if 'siscf' in k:
+            grp = grp[k]
+            print("SIS Crate activated:")
+            break
+        else:
+            print('SIS configuration not found?')
 
-    config_name = f.digitizers[digitizer].active_configs[0]
+    attributes = grp.attrs
+    for attr_name in attributes:
+        if 'board types' in attr_name:
+            bt_ls = attributes[attr_name]
+        if 'config indices' in attr_name:
+            ci_ls = attributes[attr_name]
+
+    digi_dict = {}
+    for k in grp.keys():
+        if 'configurations' in k:
+            if '3302' in k:
+                adc = 'SIS 3302'
+                board_num = int(k.split('configurations[')[1].split(']')[0]) + 1
+                print('3302 board', board_num)
+                digi_dict[board_num] = []
+
+                for i in range(1,9):
+                    enabled = grp[k].attrs['Enabled '+ str(i)]
+                    enabled = enabled.decode('utf-8')
+                    if enabled == 'TRUE':
+                        digi_dict[board_num].append(i)
+
+                    ch_des = grp[k].attrs['Data type '+ str(i)]
+                    print('Channel %i -- active: %s -- description: %s' % (i, enabled, ch_des.decode('utf-8')))
+
+    return adc, digi_dict
+
+
+def read_data(f, board_num, chan_num, index_arr=None, adc='SIS 3302', control=None):
+
+    digi_ls = list(f.digitizers)
+    if len(digi_ls) == 1:
+        digitizer = digi_ls[0]
+    else:
+        print('More than one digitizer found. The first one has been selected.')
+
+    config_ls = f.digitizers[digitizer].active_configs
+    if len(config_ls) == 1:
+        config_name = config_ls[0]
+    else:
+        print('More than one configuration found. The first one has been selected.')
     
     if index_arr == None:
-        data = f.read_data(board_num,chan_num, add_controls=[('6K Compumotor',3)], digitizer=digitizer, adc=adc, config_name=config_name)
+        data = f.read_data(board_num,chan_num, add_controls=control, digitizer=digitizer, adc=adc, config_name=config_name)
     else:
-        data = f.read_data(board_num,chan_num, index=index_arr, add_controls=[('6K Compumotor',3)], digitizer=digitizer, adc=adc, config_name=config_name)
-
-    return data['signal']
-
-def data_time(f, board_num, chan_num, adc='SIS 3302'):
-
-    digitizer = list(f.digitizers)[0]
-
-    config_name = f.digitizers[digitizer].active_configs[0]
-        
-    data = f.read_data(board_num,chan_num, 0, add_controls=[('6K Compumotor',3)], digitizer=digitizer, adc=adc, config_name=config_name)
+        data = f.read_data(board_num,chan_num, index=index_arr, add_controls=control, digitizer=digitizer, adc=adc, config_name=config_name)
 
     nt = data['signal'].shape[1]
     tarr = np.arange(nt) * data.dt
     
-    return nt, data.dt, tarr
+    return data, tarr
 
 #===============================================================================================================================================
 def unpack_datarun_sequence(f):
