@@ -13,6 +13,8 @@ import read_hdf5 as rh
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
 
 #===============================================================================================================================================
+colors = ['r', 'g', 'b', 'c', 'm', 'y', 'k']
+#===============================================================================================================================================
 
 def get_Isat_ratio(f, adc, npos, nshot, R=9.7, bg_tind=60000):
     '''
@@ -48,3 +50,17 @@ def get_Isat_ratio(f, adc, npos, nshot, R=9.7, bg_tind=60000):
         Isat_UR_dic[bd] = Isat_UR
 
     return tarr, Isat_UL_dic, Isat_UR_dic, I_ratio
+
+#===============================================================================================================================================
+def setup_2subplots(xlabel='radial position (cm)', ylabel='Isat (A)', title_A='port 27', title_B='port 24', grid=True):
+
+    fig, ax = plt.subplots(2, sharex=True)
+    ax[0].set_title(title_A)
+    ax[1].set_title(title_B)
+    ax[1].set_xlabel(xlabel)
+    ax[0].set_ylabel(ylabel)
+    ax[1].set_ylabel(ylabel)
+    ax[0].grid(grid)
+    ax[1].grid(grid)
+
+    return ax
