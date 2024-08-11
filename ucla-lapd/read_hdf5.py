@@ -178,6 +178,22 @@ def read_magnetic_field(f):
 
     return Bdata[0], port_ls
 
+def read_interferometer_old(f):
+    '''
+    TODO: need to fix returned density factor
+    '''
+    int_data = f.read_msi('Interferometer array')
+    int_dic = int_data.info
+    int_arr = int_data['signal'][:,1]
+    den_factor = int_dic['n_bar_L'][1] * 1e-2
+
+    t0 = int_dic['t0'][1]
+    dt = int_dic['dt'][1]
+
+    nt = int_arr.shape[1]
+    int_tarr = np.linspace(t0, t0+dt*nt, nt)
+
+    return int_arr, int_tarr, den_factor
 #===============================================================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===============================================================================================================================================
