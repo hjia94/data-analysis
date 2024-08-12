@@ -70,6 +70,9 @@ def analyze_IV(voltage, current, plot = False):
 	Output:
 		Vp, Te, ne
 	"""
+	if plot:
+		plt.figure()
+		plt.plot(voltage,current, label='Original')
 
 	# Take XX% of the current and fit a linear line
 	dif1 = [(np.max(current) - np.min(current))*0.01 + np.min(current), (np.max(current) - np.min(current))*0 + np.min(current)]
@@ -86,15 +89,15 @@ def analyze_IV(voltage, current, plot = False):
 	y = c[0] * voltage + c[1]
 
 	if plot:
-		plt.figure()
-		plt.plot(voltage,current)
-		plt.plot(voltage,y)
+		plt.plot(voltage,y, label='Isat Fit')
 
 	current -= y
+	if plot:
+		plt.plot(voltage, current, label='Subtracted')
 
 	# Define the portion of the signal to fit
-	portion_start = int(len(current) * 0.2)  # Start at 20% of the signal
-	portion_end = int(len(current) * 0.8)    # End at 80% of the signal
+	portion_start = int(len(current) * 0.1)  # Start at 20% of the signal
+	portion_end = int(len(current) * 0.5)    # End at 80% of the signal
 	Inew_cropped = current[portion_start:portion_end]
 	Vnew_cropped = voltage[portion_start:portion_end]
 
@@ -134,9 +137,9 @@ def analyze_IV(voltage, current, plot = False):
 
 	# Example output: Te calculation for exponential fit
 	Te = 1 / best_fit_params[1]
-	print(f"Te = {Te:.2f} eV")
-	if Te > 10:
-		raise Exception('Te is very high')
+	# print(f"Te = {Te:.2f} eV")
+	# if Te > 10:
+		# raise Exception('Te is very high')
 
 
 	# Defines which region is the transition
@@ -190,9 +193,9 @@ def analyze_IV(voltage, current, plot = False):
 		ne = 0
 		raise Exception('Te is negative')
 
-	print ('Esat=%.2g'%(I), 'A/cm^2')
-	print ('ne=%.2g'%(ne*1e-6), 'cm^3')
-	print ('Plasma potential=%.2f'%(Vp), 'V \n')
+	# print ('Esat=%.2g'%(I), 'A/cm^2')
+	# print ('ne=%.2g'%(ne*1e-6), 'cm^3')
+	# print ('Plasma potential=%.2f'%(Vp), 'V \n')
 
 	return (Vp, Te, ne)
 
