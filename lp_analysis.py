@@ -129,6 +129,7 @@ def analyze_IV(voltage, current, plot = False):
 	if plot:
 		plt.plot(voltage, exponential_func(voltage, *best_fit_params), label='Exponential Fit')
 		plt.legend()
+		plt.ylim(top = np.max(current) * 1.1, bottom = np.min(current) * 1.1)
 		plt.xlabel('Voltage (V)')
 		plt.ylabel('Current (A)')
 		plt.show()
