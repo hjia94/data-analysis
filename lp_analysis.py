@@ -23,6 +23,7 @@ import warnings
 from scipy.signal import savgol_filter, medfilt
 from scipy.optimize import curve_fit
 from scipy import integrate, interpolate, ndimage, constants, optimize
+from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
 
 
@@ -33,12 +34,17 @@ me = constants.electron_mass # electron mass (kg)
 mi = constants.proton_mass # proton mass (kg)
 
 epsilon = constants.epsilon_0 #permittivity (F/m)
+
 #===============================================================================================================================================
+def ion_sound_speed(Te, Ti, mi=mi):
+	'''
+	Compute ion sound speed in cm/s
+	'''
+	gamma = 5/3 # adiabatic index; monoatomic gas is 5/3
+	cs = np.sqrt((qe * (Te + gamma*Ti)) / (mi))
+	return cs*1e2
 
-def analyze_Isat(Iisat, area, Te): #Iisat in A, Te in eV
-
-	cs = math.sqrt((qe * Te) / (40 * mi)) # Ion sound speed in m/s
-	n = Iisat / (cs * qe * area) #Iisat = density*ion sound speed*q*area
+def collision(n):
 
 	n0 = 3.3e20 #neutral density (Van der Waal calculation ~10^23)
 	xs = 8.6e-20 #e-n collision cross section for elastic collision in m^-3
@@ -46,9 +52,43 @@ def analyze_Isat(Iisat, area, Te): #Iisat in A, Te in eV
 	ve = n0 * xs * vth 	# collision frequency (equation from NRL)
 	sigma = n * qe**2 / (me * ve)
 
-	print(cs)
-	print ('Collision frequency: %.2E' %(ve))
-	return n*1e-6, sigma # density unit m^-3 to cm^-3
+	return ve, sigma
+
+def collision_ee(Te, ne):
+	return 2.91 * 10**-6 * ne/Te**(3/2) * 10
+
+def collision_en(Te, ng, tfn = r"C:\data\cross-section\num.txt"):
+	'''
+	return collision frequency from electron neutral collision cross section
+	Cross section data comes from LXCAT
+	Neutral gas density calculated from ideal gas law (see collision-Oct2019.xlsx)
+	'''    
+	
+	data = np.loadtxt(tfn) # Read cross section info from txt file
+
+	f = interpolate.interp1d(data[:,0], data[:,1]) # Interpolation return f(Te)
+	sig = f(Te) # collision cross section in m^2
+	mfp = 1/(ng * sig) # unit is m if ng is m^-3
+
+	Vth = 4.19e5 * np.sqrt(Te) # Thermal velocity (unit:m/s, see NRL)
+
+	return sig, mfp, Vth/mfp
+
+def conductivity(ne, nu, w): # conductivity from e-n collision
+
+	wpe = 5.64e4 * np.sqrt(ne) # ne in cm^-3, wpe in rad/sec
+
+	nume = epsilon * wpe**2 * nu # in rad/sec
+	deno = w**2 + nu**2
+
+	return  nume / deno
+#===============================================================================================================================================
+
+def analyze_Isat(Iisat, cs): #Iisat in A/cm^2, cs in cm/s
+
+	n = Iisat / (cs * qe) #Iisat = density*ion sound speed*q*area
+
+	return n
 
 def analyze_Esat(Iesat, area, Te): # Esat in mA, Te in eV 
 	'''
@@ -231,7 +271,7 @@ def find_Vp(ss_V, ss_dIdV, magic_num=10):
 
 #----------------------------------------------------------------------------------------------------
 
-def EEDF(dIdV, phi, area, smooth_interval=0):
+def EEDF(dIdV, phi, area):
 	# Electron energy distribution function for 1D geometry => proportional to first derivative of IV curve
 	# See Scott Robertson's paper for detail calculation
 
@@ -249,19 +289,23 @@ def EEDF(dIdV, phi, area, smooth_interval=0):
 
 #----------------------------------------------------------------------------------------------------
 
-def derivative(V, I, wl=9, threshold=8):
+def derivative(V, I, sigma=15, th=0.8, smth=True):
+	'''
+	sigma: smoothing factor for gaussian filter
+	threshold: threshold for finding max dIdV
+	'''
+	max_value = np.max(I)
+	threshold = th * max_value
+	exceed_index = np.where(I > threshold)[0][0]
 
 	dIdV = np.gradient(I, V)
-	ss_dIdV =  medfilt(dIdV, wl)
-	a = abs(dIdV - ss_dIdV)
-	
-	b = np.argwhere( a > np.std(a)*threshold)
+	ss_dIdV = gaussian_filter1d(dIdV, sigma=sigma)
+	max_ind = np.argmax(abs(ss_dIdV[:exceed_index])) # Find max dIdV before threshold
 
-	dIdV[b] = ss_dIdV[b]
-
-	max_ind = np.argmax(dIdV)
-
-	return dIdV, max_ind
+	if smth:
+		return ss_dIdV, max_ind
+	else:
+		return dIdV, max_ind
 
 #----------------------------------------------------------------------------------------------------
 
@@ -359,39 +403,7 @@ def particle_number(popt, lower_bound, upper_boud):
 
 	return math.sqrt(2/me) * yne
 
-#----------------------------------------------------------------------------------------------------
-def collision_ee(Te, ne):
-	return 2.91 * 10**-6 * ne/Te**(3/2) * 10
 
-#----------------------------------------------------------------------------------------------------
-
-def collision(Te, ng, tfn = r"C:\data\cross-section\num.txt"):
-	'''
-	return collision frequency from electron neutral collision cross section
-	Cross section data comes from LXCAT
-	Neutral gas density calculated from ideal gas law (see collision-Oct2019.xlsx)
-	'''    
-	
-	data = np.loadtxt(tfn) # Read cross section info from txt file
-
-	f = interpolate.interp1d(data[:,0], data[:,1]) # Interpolation return f(Te)
-	sig = f(Te) # collision cross section in m^2
-	mfp = 1/(ng * sig) # unit is m if ng is m^-3
-
-	Vth = 4.19e5 * np.sqrt(Te) # Thermal velocity (unit:m/s, see NRL)
-
-	return sig, mfp, Vth/mfp # e-n collision frequency
-
-#----------------------------------------------------------------------------------------------------
-
-def conductivity(ne, nu, w): # conductivity from e-n collision
-
-	wpe = 5.64e4 * np.sqrt(ne) # ne in cm^-3, wpe in rad/sec
-
-	nume = epsilon * wpe**2 * nu # in rad/sec
-	deno = w**2 + nu**2
-
-	return  nume / deno
 
 
 #===========================================================================================================

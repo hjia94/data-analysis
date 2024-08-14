@@ -134,20 +134,20 @@ def find_Te(Vswp, Iswp, plot=False):
         Te_ls.append(Te)
     return Te_ls
 
-def get_Te(Vsweep, Isweep, position_range, nshot):
+def get_Te_all(Vsweep, Isweep, position_range, nshot):
 
     # Preallocate arrays for Te values
-    Te_dic = np.zeros((4, len(position_range), nshot))  # Assuming nshot and positions in the range
+    Te_arr = np.zeros((4, len(position_range), nshot))  # Assuming nshot and positions in the range
 
     for pos_idx, pos in enumerate(position_range):
         Vswp = Vsweep[pos]
         for j in range(nshot):
             Iswp = Isweep[pos, j]
-            Te_dic[:, pos_idx, j] = find_Te(Vswp, Iswp)
+            Te_arr[:, pos_idx, j] = find_Te(Vswp, Iswp)
 
     # Calculate mean and standard deviation along the shots axis
-    Te_avg = np.mean(Te_dic, axis=2)
-    Te_err = np.std(Te_dic, axis=2)
+    Te_avg = np.mean(Te_arr, axis=2)
+    Te_err = np.std(Te_arr, axis=2)
 
     return Te_avg, Te_err
 #===============================================================================================================================================
