@@ -289,23 +289,19 @@ def EEDF(dIdV, phi, area):
 
 #----------------------------------------------------------------------------------------------------
 
-def derivative(V, I, sigma=15, th=0.8, smth=True):
+def derivative(I, V, sigma=30, smth=True):
 	'''
 	sigma: smoothing factor for gaussian filter
 	threshold: threshold for finding max dIdV
 	'''
-	max_value = np.max(I)
-	threshold = th * max_value
-	exceed_index = np.where(I > threshold)[0][0]
-
-	dIdV = np.gradient(I, V)
-	ss_dIdV = gaussian_filter1d(dIdV, sigma=sigma)
-	max_ind = np.argmax(abs(ss_dIdV[:exceed_index])) # Find max dIdV before threshold
+	dIdV = np.gradient(I, V, axis=-1)
+	ss_dIdV = gaussian_filter1d(dIdV, sigma, axis=-1)
+	max_inds = np.argmax(ss_dIdV, axis=-1)
 
 	if smth:
-		return ss_dIdV, max_ind
+		return ss_dIdV, max_inds
 	else:
-		return dIdV, max_ind
+		return dIdV, max_inds
 
 #----------------------------------------------------------------------------------------------------
 
