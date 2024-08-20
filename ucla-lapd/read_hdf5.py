@@ -24,6 +24,7 @@ def read_probe_motion(f):
     else:
         print('More than 2 probes found. Check code before proceeding.')
 
+    pos_array = {}
     for pr_number in pr_ls:
         # Read probe information
         pr = f.controls['6K Compumotor'].configs[pr_number]
@@ -41,16 +42,16 @@ def read_probe_motion(f):
         npos = motion['data motion count']
         print('Number of positions:', npos)
 
-        pos_array = f.read_controls([('6K Compumotor', pr_number)])['xyz'] # contains position for each shot
+        pos_array[pr_number] = f.read_controls([('6K Compumotor', pr_number)])['xyz'] # contains position for each shot
 
         # Check number of shots per position by looking at how many times each position is repeated
-        unique_elements, counts = np.unique(pos_array, return_counts=True)
+        unique_elements, counts = np.unique(pos_array[pr_number], return_counts=True)
         nshot = np.argmax(np.bincount(counts)) # number of shot per position
         print('Number of shots per position:', nshot)
 
         # If two or more probes are used; typically one probe moves first and the other moves after the first probe finishes taking data
         # TODO: Only tested with the case of two probes using same motion list
-        this_pr_first = not np.all(pos_array[0] == pos_array[nshot])
+        this_pr_first = not np.all(pos_array[pr_number][0] == pos_array[pr_number][nshot])
         if this_pr_first:
             st_count = 0
             print('This probe moves first in the data run sequence')
@@ -58,7 +59,7 @@ def read_probe_motion(f):
             st_count = counts[-2]
             print('This probe moves after previous probe finish taking data')
         
-        pos_array = pos_array[st_count:st_count+nshot*npos] # only keep moving positions
+        # pos_array = pos_array[st_count:st_count+nshot*npos] # only keep moving positions
         
         #====Set up xpos/ypos/zpos arrays using motion list information====
         nx = int(motion['npoints'][0])

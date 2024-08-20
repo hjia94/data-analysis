@@ -43,7 +43,7 @@ def init_read(ifn):
         plt.legend()
         plt.tight_layout()
 
-    return adc, xpos, ypos, zpos, npos, nshot, int_arr, int_tarr
+    return adc, pos_array, xpos, ypos, zpos, npos, nshot, int_arr, int_tarr
 
 
 def get_Isat_ratio(f, adc, npos, nshot, area, R=[10,10], bg_tind=60000):
@@ -83,7 +83,7 @@ def get_Isat_ratio(f, adc, npos, nshot, area, R=[10,10], bg_tind=60000):
         Isat_UR = Isat_UR - np.mean(Isat_UR[:,:,bg_tind:], axis=-1, keepdims=True) # subtract background
         Isat_UR = gaussian_filter1d(Isat_UR, 25, axis=-1)
 
-        I_ratio[bd] = np.mean(Isat_UL/Isat_UR, axis=1)
+        I_ratio[bd] = np.mean((Isat_UL-Isat_UR)/(Isat_UL+Isat_UR), axis=1)
         Isat_UL_dic[bd] = Isat_UL
         Isat_UR_dic[bd] = Isat_UR
 
