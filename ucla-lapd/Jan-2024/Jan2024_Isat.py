@@ -43,10 +43,10 @@ def init_read(ifn):
         plt.legend()
         plt.tight_layout()
 
-    return adc, pos_array, xpos, ypos, zpos, npos, nshot, int_arr, int_tarr
+    return adc, digi_dict, pos_array, xpos, ypos, zpos, npos, nshot, int_arr, int_tarr
 
 
-def get_Isat_ratio(f, adc, npos, nshot, area, R=[10,10], bg_tind=60000):
+def get_Isat_ratio(f, adc, digi_dict, npos, nshot, area, chL=1, chR=2, R=[10,10], bg_tind=60000):
     '''
     Inputs:
     npos    -- number of positions
@@ -63,7 +63,7 @@ def get_Isat_ratio(f, adc, npos, nshot, area, R=[10,10], bg_tind=60000):
     Isat_UR_dic = {}
     I_ratio = {}
 
-    for bd in [1,2]:
+    for bd in digi_dict.keys():
 
         control = [('6K Compumotor', bd)]
         if bd == 1:
@@ -73,12 +73,12 @@ def get_Isat_ratio(f, adc, npos, nshot, area, R=[10,10], bg_tind=60000):
             st_ind = npos*nshot
             A = area['M1']
 
-        data, tarr = rh.read_data(f, bd, 1, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=control)
+        data, tarr = rh.read_data(f, bd, chL, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=control)
         Isat_UL = data['signal'].reshape((npos, nshot, -1)) / (R[bd-1] * A[0])
         Isat_UL = Isat_UL - np.mean(Isat_UL[:,:,bg_tind:], axis=-1, keepdims=True) # subtract background
         Isat_UL = gaussian_filter1d(Isat_UL, 25, axis=-1)
 
-        data, tarr = rh.read_data(f, bd, 2, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=control)
+        data, tarr = rh.read_data(f, bd, chR, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=control)
         Isat_UR = data['signal'].reshape((npos, nshot, -1)) / (R[bd-1] * A[1])
         Isat_UR = Isat_UR - np.mean(Isat_UR[:,:,bg_tind:], axis=-1, keepdims=True) # subtract background
         Isat_UR = gaussian_filter1d(Isat_UR, 25, axis=-1)

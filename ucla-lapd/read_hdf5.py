@@ -140,7 +140,7 @@ def read_data(f, board_num, chan_num, index_arr=None, adc='SIS 3302', control=No
         data = f.read_data(board_num,chan_num, index=index_arr, add_controls=control, digitizer=digitizer, adc=adc, config_name=config_name)
 
     nt = data['signal'].shape[1]
-    tarr = np.arange(nt) * data.dt
+    tarr = np.arange(nt) * data.dt.value
     
     return data, tarr
 
