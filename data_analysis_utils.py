@@ -16,6 +16,8 @@ import re
 import numpy as np
 from datetime import datetime
 
+import scipy.constants as const
+
 def get_files_in_folder(folder_path, modified_date=None, omit_keyword=None):
     """
     Get a list of all files in a given folder and its subfolders.
@@ -101,3 +103,18 @@ def read_from_npy(npy_file_path):
         return None
     data = np.load(npy_file_path, allow_pickle=True)
     return data
+
+#===============================================================================================================================================
+
+def ion_sound_speed(Te, Ti, mi=const.m_p):
+    '''
+    Compute ion sound speed in m/s
+    input:
+    Te: electron temperature in eV
+    Ti: ion temperature in eV
+    mi: ion mass in kg
+    '''
+    gamma = 5/3 # adiabatic index; monoatomic gas is 5/3
+    cs = np.sqrt((const.e * (Te + gamma*Ti)) / (mi))
+
+    return cs

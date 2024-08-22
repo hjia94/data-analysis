@@ -36,14 +36,6 @@ mi = constants.proton_mass # proton mass (kg)
 epsilon = constants.epsilon_0 #permittivity (F/m)
 
 #===============================================================================================================================================
-def ion_sound_speed(Te, Ti, mi=mi):
-	'''
-	Compute ion sound speed in cm/s
-	'''
-	gamma = 5/3 # adiabatic index; monoatomic gas is 5/3
-	cs = np.sqrt((qe * (Te + gamma*Ti)) / (mi))
-	return cs*1e2
-
 def collision(n):
 
 	n0 = 3.3e20 #neutral density (Van der Waal calculation ~10^23)
