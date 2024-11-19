@@ -14,7 +14,11 @@ Included functions:
 import os
 import re
 import numpy as np
+
 from datetime import datetime
+from dataclasses import dataclass
+from typing import Tuple, Optional
+from numpy.typing import NDArray
 
 import scipy.constants as const
 
@@ -118,3 +122,146 @@ def ion_sound_speed(Te, Ti, mi=const.m_p):
     cs = np.sqrt((const.e * (Te + gamma*Ti)) / (mi))
 
     return cs
+
+#===============================================================================================================================================
+'''
+PhotonPulse and Photons classes pulse-width analysis 
+Original code from Pat written for McPhereson spectrometer data.
+Performs pulse detection and analysis on photon pulses.
+Can be used for data obtained from any PMT in general.
+The PhotonPulse and Photons classes are used for analyzing photon pulses in time series data, typically from PMT signals.
+
+Example usage:
+    times = np.array([...])
+    signal = np.array([...])
+
+    detector = Photons(times, signal)
+    detector.reduce_pulses()
+
+    # Get results
+    pulse_times, pulse_areas = detector.get_pulse_arrays()
+    print(f"Detected {detector.pulse_count} pulses")
+
+    # Access individual pulses
+    for pulse in detector.pulses:
+        print(f"Pulse at {pulse.time}ms with area {pulse.area}")
+'''
+@dataclass
+class PhotonPulse:
+    """Represents a single photon pulse detection."""
+    time: float  # Average time of pulse (ms)
+    area: float  # Integrated area of pulse
+    width: float # Temporal width of pulse (ms)
+
+class Photons:
+    """Analyzes photon pulses in time series data.
+    
+    Attributes:
+        offset (float): Baseline offset of the signal
+        std_dev (float): Standard deviation of the baseline
+        dt (float): Time step between samples
+        threshold (float): Detection threshold for pulses
+        pulses (list[PhotonPulse]): Detected photon pulses
+    """
+    
+    def __init__(self, 
+                 times: NDArray[np.float64], 
+                 signal: NDArray[np.float64], 
+                 threshold_multiplier: float = 7.0,
+                 negative_pulses: bool = False):
+        """Initialize photon pulse detector.
+        
+        Args:
+            times: Time array in milliseconds
+            signal: Signal amplitude array
+            threshold_multiplier: Number of standard deviations above baseline for detection
+            negative_pulses: If True, detect negative-going pulses instead of positive
+        
+        Raises:
+            ValueError: If input arrays have different lengths or are empty
+        """
+        if len(times) != len(signal):
+            raise ValueError("Time and signal arrays must have same length")
+        if len(times) == 0:
+            raise ValueError("Input arrays cannot be empty")
+            
+        self.times = times
+        self.signal = signal
+        self._compute_signal_properties()
+        self._detect_pulses(threshold_multiplier, negative_pulses)
+        
+    def _compute_signal_properties(self, baseline_fraction: float = 0.05) -> None:
+        """Compute baseline properties of the signal."""
+        n_points = len(self.signal)
+        n1 = int((1 - baseline_fraction) * n_points)
+        n2 = n_points
+        
+        self.offset = np.mean(self.signal[n1:n2])
+        self.std_dev = np.std(self.signal[n1:n2])
+        self.dt = np.mean(np.diff(self.times[n1:n2]))
+        
+    def _detect_pulses(self, threshold_multiplier: float, negative_pulses: bool) -> None:
+        """Detect pulses above/below threshold."""
+        self.threshold = self.std_dev * threshold_multiplier
+        
+        if negative_pulses:
+            mask = self.signal < (self.offset - self.threshold)
+            amplitudes = self.offset - self.signal[mask]
+        else:
+            mask = self.signal > (self.offset + self.threshold)
+            amplitudes = self.signal[mask] - self.offset
+            
+        self.pulse_times = self.times[mask]
+        self.pulse_amplitudes = amplitudes
+        
+    def reduce_pulses(self, max_gap: Optional[float] = None) -> None:
+        """Combine adjacent pulse points into single pulses.
+        
+        Args:
+            max_gap: Maximum time gap (ms) between adjacent points to be considered 
+                    same pulse. Defaults to 1.5 * dt if None.
+        """
+        if max_gap is None:
+            max_gap = 1.5 * self.dt
+            
+        self.pulses = []
+        i = 0
+        while i < len(self.pulse_times):
+            # Start new pulse
+            pulse_points = [i]
+            
+            # Add adjacent points
+            while (i < len(self.pulse_times) - 1 and 
+                   self.pulse_times[i + 1] - self.pulse_times[i] <= max_gap):
+                i += 1
+                pulse_points.append(i)
+                
+            # Create pulse object
+            times = self.pulse_times[pulse_points]
+            amplitudes = self.pulse_amplitudes[pulse_points]
+            
+            pulse = PhotonPulse(
+                time=np.mean(times),
+                area=np.sum(amplitudes),
+                width=times[-1] - times[0]
+            )
+            self.pulses.append(pulse)
+            i += 1
+            
+    @property
+    def pulse_count(self) -> int:
+        """Return number of detected pulses."""
+        return len(self.pulses)
+    
+    def get_pulse_arrays(self) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Return arrays of pulse times and areas.
+        
+        Returns:
+            Tuple containing (times_array, areas_array)
+        """
+        if not hasattr(self, 'pulses'):
+            raise RuntimeError("Must call reduce_pulses() before getting arrays")
+            
+        times = np.array([p.time for p in self.pulses])
+        areas = np.array([p.area for p in self.pulses])
+        return times, areas
