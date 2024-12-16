@@ -21,6 +21,7 @@ from typing import Tuple, Optional
 from numpy.typing import NDArray
 
 import scipy.constants as const
+from read_network_analyzer_data import read_NA_data
 
 def get_files_in_folder(folder_path, modified_date=None, omit_keyword=None):
     """
@@ -265,3 +266,10 @@ class Photons:
         times = np.array([p.time for p in self.pulses])
         areas = np.array([p.area for p in self.pulses])
         return times, areas
+    
+
+#===============================================================================================================================================
+def get_Bdot_calibration(filepath):
+    data_dict = read_NA_data(filepath)
+    
+    return data_dict
