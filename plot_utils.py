@@ -325,18 +325,38 @@ def plot_shots_grid(
 # Photon Counting Functions
 #==============================================================================
 
-def plot_counts_per_bin(pulse_times, bin_width_ms=5.0, figsize=(10,6)):
+def plot_counts_per_bin(pulse_times, pulse_areas, bin_width_ms=5.0, 
+                    amplitude_min=None, amplitude_max=None, figsize=(10,6)):
     """
-    Plot total counts in each time bin.
+    Plot total counts in each time bin with optional amplitude threshold filtering.
     
     Args:
         pulse_times (np.ndarray): Array of pulse arrival times in milliseconds
+        pulse_areas (np.ndarray): Array of pulse areas/amplitudes
         bin_width_ms (float): Width of time bins in milliseconds
+        amplitude_min (float, optional): Minimum amplitude threshold for counting pulses
+        amplitude_max (float, optional): Maximum amplitude threshold for counting pulses
         figsize (tuple): Figure size (width, height) in inches
     
     Returns:
         tuple: (bin_centers, counts) arrays where counts shows total counts in each bin
     """
+    # Apply amplitude thresholds if specified
+    if amplitude_min is not None or amplitude_max is not None:
+        # Initialize mask as all True
+        mask = np.ones_like(pulse_times, dtype=bool)
+        
+        # Apply min threshold if specified
+        if amplitude_min is not None:
+            mask &= (pulse_areas >= amplitude_min)
+            
+        # Apply max threshold if specified
+        if amplitude_max is not None:
+            mask &= (pulse_areas <= amplitude_max)
+            
+        pulse_times = pulse_times[mask]
+        pulse_areas = pulse_areas[mask]
+    
     # Create time bins
     bins = np.arange(min(pulse_times), max(pulse_times) + bin_width_ms, bin_width_ms)
     bin_centers = (bins[:-1] + bins[1:])/2
@@ -348,22 +368,35 @@ def plot_counts_per_bin(pulse_times, bin_width_ms=5.0, figsize=(10,6)):
     plt.figure(figsize=figsize)
     
     # Plot counts per bin as a bar plot
-    plt.bar(bin_centers, counts, width=bin_width_ms*0.9, alpha=0.7)
+    plt.plot(bin_centers, counts)
     
     # Add labels and title
     plt.xlabel('Time (ms)')
     plt.ylabel('Counts per Bin')
-    plt.title(f'Photon Counts per {bin_width_ms} ms')
+    title = f'Photon Counts per {bin_width_ms} ms'
+    if amplitude_min is not None or amplitude_max is not None:
+        threshold_text = ''
+        if amplitude_min is not None:
+            threshold_text += f'Min: {amplitude_min:.3f}'
+        if amplitude_max is not None:
+            if threshold_text:
+                threshold_text += ', '
+            threshold_text += f'Max: {amplitude_max:.3f}'
+        title += f'\nAmplitude Thresholds: {threshold_text}'
+    plt.title(title)
     plt.grid(True)
     
-    # Add count rate information
+    # Add count rate and signal level information
     total_time = max(pulse_times) - min(pulse_times)
     count_rate = len(pulse_times) / (total_time/1000)  # Convert ms to s for rate
-    plt.text(0.02, 0.98, 
-             f'Average Count Rate: {count_rate:.1f} counts/s\n' + 
-             f'Total Counts: {len(pulse_times)}', 
-             transform=plt.gca().transAxes, 
-             verticalalignment='top')
+    info_text = (f'Average Count Rate: {count_rate:.1f} counts/s\n'
+                f'Total Counts: {len(pulse_times)}\n'
+                f'Min Signal: {min(pulse_areas):.3f}\n'
+                f'Max Signal: {max(pulse_areas):.3f}')
+    plt.text(0.02, 0.98, info_text,
+             transform=plt.gca().transAxes,
+             verticalalignment='top',
+             bbox=dict(facecolor='white', alpha=0.8))
 
     
     return bin_centers, counts
