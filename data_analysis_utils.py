@@ -265,8 +265,57 @@ class Photons:
         times = np.array([p.time for p in self.pulses])
         areas = np.array([p.area for p in self.pulses])
         return times, areas
-    
 
+#===============================================================================================================================================
+def calculate_stft(time_array, signal, samples_per_fft, overlap_fraction, window, freq_min=None, freq_max=None):
+    # Calculate basic parameters
+    dt = time_array[1] - time_array[0]  # Time step
+    
+    # Calculate overlap and hop size
+    overlap = int(samples_per_fft * overlap_fraction)
+    hop = samples_per_fft - overlap
+    
+    # Calculate resolutions
+    time_resolution = dt * hop  # Time between successive FFTs
+    freq_resolution = 1.0 / (dt * samples_per_fft)  # Frequency resolution
+    
+    # Create window function
+    if window.lower() == 'hanning':
+        win = np.hanning(samples_per_fft)
+    elif window.lower() == 'blackman':
+        win = np.blackman(samples_per_fft)
+    else:
+        win = np.ones(samples_per_fft)
+    
+    # Pad signal if necessary
+    pad_length = (samples_per_fft - len(signal)) % hop
+    if pad_length > 0:
+        signal = np.pad(signal, (0, pad_length), mode='constant')
+    
+    # Create strided array of segments using numpy's stride tricks
+    shape = (samples_per_fft, (len(signal) - samples_per_fft) // hop + 1)
+    strides = (signal.strides[0], signal.strides[0] * hop)
+    segments = np.lib.stride_tricks.as_strided(signal, shape=shape, strides=strides)
+    
+    # Apply window to all segments at once
+    segments = segments.T * win
+    
+    # Compute FFT for all segments at once
+    stft_matrix = np.fft.rfft(segments, axis=1)
+    
+    # Compute magnitude (normalized)
+    stft_matrix = 2.0/samples_per_fft * np.abs(stft_matrix)
+    
+    # Create frequency array
+    freq = np.fft.rfftfreq(samples_per_fft, dt)
+
+    # Apply frequency mask if specified
+    if freq_min is not None and freq_max is not None:
+        freq_mask = (freq >= freq_min) & (freq <= freq_max)
+        freq = freq[freq_mask]
+        stft_matrix = stft_matrix[:, freq_mask]
+
+    return  freq, stft_matrix, time_resolution, freq_resolution
 #===============================================================================================================================================
 # def get_Bdot_calibration(filepath):
 #     data_dict = read_NA_data(filepath)
