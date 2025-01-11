@@ -30,56 +30,6 @@ from read_scope_data import read_trc_data
 import gc  # For garbage collection
 import numpy as np
 
-#==============================================================================
-# Frequency Analysis Functions
-#==============================================================================
-
-def plot_fft(time_array, signals_dict, window=None):
-    """
-    Compute and plot FFT of signals with proper frequency units.
-    
-    Args:
-        time_array (np.ndarray): Time array in seconds
-        signals_dict (dict): Dictionary of signals to plot with their labels
-        window (str, optional): Window function to use (e.g., 'hanning', 'blackman')
-    
-    Returns:
-        tuple: (frequencies in MHz, magnitude spectrum)
-    """
-    # Calculate sampling parameters
-    dt = time_array[1] - time_array[0]  # Time step
-    fs = 1/dt  # Sampling frequency
-    n = len(time_array)
-    
-    # Create frequency array in MHz
-    freq = np.fft.rfftfreq(n, dt) / 1e6  # Convert to MHz
-    
-    plt.figure(figsize=(10, 6))
-    
-    for label, signal in signals_dict.items():
-        # Apply window if specified
-        if window is not None:
-            if window.lower() == 'hanning':
-                win = np.hanning(len(signal))
-            elif window.lower() == 'blackman':
-                win = np.blackman(len(signal))
-            signal = signal * win
-            
-        # Compute FFT
-        fft_result = np.fft.rfft(signal)
-        # Compute magnitude spectrum (normalized)
-        magnitude = 2.0/n * np.abs(fft_result)
-        
-        # Plot
-        plt.plot(freq, magnitude, label=label)
-    
-    plt.xlabel('Frequency (MHz)')
-    plt.ylabel('Magnitude')
-    plt.grid(True)
-    plt.legend(loc='upper right')  # Fixed legend location
-    
-    return freq, magnitude
-
 
 #==============================================================================
 # Multi-Shot Display Functions
@@ -99,22 +49,49 @@ def cleanup_figures():
     # Force garbage collection
     gc.collect()
 
-def select_monitor(monitor_idx: Optional[int] = None, window_scale: tuple = (1.0, 1.0)) -> tuple:
+def position_window(window_manager, x_pos: int, y_pos: int, 
+                   window_width: Optional[int] = None, 
+                   window_height: Optional[int] = None) -> None:
     """
-    Select a monitor for displaying plots and calculate window positioning.
+    Position a matplotlib window across different backends.
+    
+    Args:
+        window_manager: plt.get_current_fig_manager() instance
+        x_pos (int): Window x position
+        y_pos (int): Window y position
+        window_width (Optional[int]): Window width. If None, keeps current width
+        window_height (Optional[int]): Window height. If None, keeps current height
+    """
+    try:
+        # For Qt backend
+        if window_width and window_height:
+            window_manager.window.setGeometry(x_pos, y_pos, window_width, window_height)
+        else:
+            window_manager.window.move(x_pos, y_pos)
+    except:
+        try:
+            # For TkAgg backend
+            window_manager.window.wm_geometry(f"+{x_pos}+{y_pos}")
+        except:
+            try:
+                # For WX backend
+                window_manager.window.SetPosition((x_pos, y_pos))
+            except:
+                print("Could not position window - unsupported backend")
+
+def select_monitor(monitor_idx: Optional[int] = None, 
+                  window_scale: tuple = (1.0, 1.0),
+                  position_fig: bool = True) -> tuple:
+    """
+    Select a monitor and optionally position the current matplotlib figure.
     
     Args:
         monitor_idx (Optional[int]): Monitor index to use. If None, will prompt user.
-        window_scale (tuple): Scale factors (width, height) for window size relative to monitor size.
-                            Default (1.0, 1.0) uses full monitor size.
+        window_scale (tuple): Scale factors (width, height) for window size.
+        position_fig (bool): If True, positions the current matplotlib figure.
     
     Returns:
         tuple: (monitor_object, x_pos, y_pos, window_width, window_height)
-               - monitor_object: The selected monitor
-               - x_pos: Calculated x position for window
-               - y_pos: Calculated y position for window
-               - window_width: Calculated window width
-               - window_height: Calculated window height
     """
     monitors = get_monitors()
     
@@ -140,8 +117,16 @@ def select_monitor(monitor_idx: Optional[int] = None, window_scale: tuple = (1.0
     x_pos = monitor.x + (monitor.width - window_width) // 2
     y_pos = monitor.y + (monitor.height - window_height) // 2
     
+    # Position the current figure if requested
+    if position_fig:
+        mngr = plt.get_current_fig_manager()
+        position_window(mngr, x_pos, y_pos, window_width, window_height)
+    
     return monitor, x_pos, y_pos, window_width, window_height
 
+#==============================================================================
+# Display multiple shots on the screen
+#==============================================================================
 def plot_shots_grid(data_path_template: str, shot_range: range, n_cols: int = 2,
                    data_processor: Optional[Callable] = None, monitor_idx: Optional[int] = None) -> None:
     """Plot multiple shots in windows with 2x2 subplots."""
@@ -246,80 +231,27 @@ def plot_shots_grid(data_path_template: str, shot_range: range, n_cols: int = 2,
 # Photon Counting Functions
 #==============================================================================
 
-def plot_counts_per_bin(pulse_times, pulse_areas, bin_width_ms=5.0, 
-                    amplitude_min=None, amplitude_max=None, ax=None):
+def plot_counts_per_bin(bin_centers, counts, bin_width_ms, ax=None):
     """
-    Plot total counts in each time bin with optional amplitude threshold filtering.
+    Plot number of pulses in each time bin.
     
     Args:
-        pulse_times (np.ndarray): Array of pulse arrival times in milliseconds
-        pulse_areas (np.ndarray): Array of pulse areas/amplitudes
-        bin_width_ms (float): Width of time bins in milliseconds
-        amplitude_min (float, optional): Minimum amplitude threshold for counting pulses
-        amplitude_max (float, optional): Maximum amplitude threshold for counting pulses
+        bin_centers (np.ndarray): Array of bin center times in milliseconds
+        counts (np.ndarray): Array of pulse counts per bin
         ax (matplotlib.axes.Axes, optional): Axes to plot on. If None, current axes will be used.
-    
-    Returns:
-        tuple: (bin_centers, counts) arrays where counts shows total counts in each bin
     """
     if ax is None:
         ax = plt.gca()
         
-    # Apply amplitude thresholds if specified
-    if amplitude_min is not None or amplitude_max is not None:
-        # Initialize mask as all True
-        mask = np.ones_like(pulse_times, dtype=bool)
-        
-        # Apply min threshold if specified
-        if amplitude_min is not None:
-            mask &= (pulse_areas >= amplitude_min)
-            
-        # Apply max threshold if specified
-        if amplitude_max is not None:
-            mask &= (pulse_areas <= amplitude_max)
-            
-        pulse_times = pulse_times[mask]
-        pulse_areas = pulse_areas[mask]
-    
-    # Create time bins
-    bins = np.arange(min(pulse_times), max(pulse_times) + bin_width_ms, bin_width_ms)
-    bin_centers = (bins[:-1] + bins[1:])/2
-    
-    # Calculate histogram
-    counts, _ = np.histogram(pulse_times, bins=bins)
-    
     # Plot counts per bin
-    ax.plot(bin_centers, counts)
+    ax.plot(bin_centers, counts, label=f'Counts per {bin_width_ms} ms')
     
     # Add labels and title
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Counts per Bin')
-    title = f'Photon Counts per {bin_width_ms} ms'
-    if amplitude_min is not None or amplitude_max is not None:
-        threshold_text = ''
-        if amplitude_min is not None:
-            threshold_text += f'Min: {amplitude_min:.3f}'
-        if amplitude_max is not None:
-            if threshold_text:
-                threshold_text += ', '
-            threshold_text += f'Max: {amplitude_max:.3f}'
-        title += f'\nAmplitude Thresholds: {threshold_text}'
-    ax.set_title(title)
+    ax.legend(loc='upper right')
     ax.grid(True)
     
-    # Add count rate and signal level information
-    total_time = max(pulse_times) - min(pulse_times)
-    count_rate = len(pulse_times) / (total_time/1000)  # Convert ms to s for rate
-    info_text = (f'Average Count Rate: {count_rate:.1f} counts/s\n'
-                f'Total Counts: {len(pulse_times)}\n'
-                f'Min Signal: {min(pulse_areas):.3f}\n'
-                f'Max Signal: {max(pulse_areas):.3f}')
-    ax.text(0.02, 0.98, info_text,
-            transform=ax.transAxes,
-            verticalalignment='top',
-            bbox=dict(facecolor='white', alpha=0.8))
-    
-    return bin_centers, counts
 
 #==============================================================================
 # Photon Detection Functions
@@ -350,7 +282,92 @@ def plot_photon_detection(tarr, data, pulse_times, detector, ax=None):
     ax.legend(loc='upper right')
     ax.grid(True)
     
+#==============================================================================
+# Frequency Analysis Functions
+#==============================================================================
 
+def plot_fft(time_array, signals_dict, window=None):
+    """
+    Compute and plot FFT of signals with proper frequency units.
+    
+    Args:
+        time_array (np.ndarray): Time array in seconds
+        signals_dict (dict): Dictionary of signals to plot with their labels
+        window (str, optional): Window function to use (e.g., 'hanning', 'blackman')
+    
+    Returns:
+        tuple: (frequencies in MHz, magnitude spectrum)
+    """
+    # Calculate sampling parameters
+    dt = time_array[1] - time_array[0]  # Time step
+    fs = 1/dt  # Sampling frequency
+    n = len(time_array)
+    
+    # Create frequency array in MHz
+    freq = np.fft.rfftfreq(n, dt) / 1e6  # Convert to MHz
+    
+    plt.figure(figsize=(10, 6))
+    
+    for label, signal in signals_dict.items():
+        # Apply window if specified
+        if window is not None:
+            if window.lower() == 'hanning':
+                win = np.hanning(len(signal))
+            elif window.lower() == 'blackman':
+                win = np.blackman(len(signal))
+            signal = signal * win
+            
+        # Compute FFT
+        fft_result = np.fft.rfft(signal)
+        # Compute magnitude spectrum (normalized)
+        magnitude = 2.0/n * np.abs(fft_result)
+        
+        # Plot
+        plt.plot(freq, magnitude, label=label)
+    
+    plt.xlabel('Frequency (MHz)')
+    plt.ylabel('Magnitude')
+    plt.grid(True)
+    plt.legend(loc='upper right')  # Fixed legend location
+    
+    return freq, magnitude
+
+def plot_stft_wt_photon_counts(tarr, fft_arr, freq_arr, bin_centers, counts, fig=None, ax=None):
+    if ax is None:
+        fig = plt.figure()
+        ax = plt.gca()
+    im = ax.imshow(fft_arr.T, 
+                    aspect='auto',
+                    origin='lower',
+                    extent=[tarr[0]*1e3, tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
+                    interpolation='None',
+                    cmap='jet')
+    
+    # Adjust subplot position to accommodate colorbar
+    pos = ax.get_position()
+    ax.set_position([pos.x0, pos.y0, pos.width * 0.9, pos.height])
+    
+    # Add colorbar with adjusted position
+    cax = fig.add_axes([pos.x0 + pos.width * 0.92, pos.y0, 0.02, pos.height])
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label('fft', labelpad=10)
+    
+    # Counts overlay in Bdot time range
+    ax3_twin = ax.twinx()
+    # Adjust twin axis position
+    ax3_twin.set_position([pos.x0, pos.y0, pos.width * 0.9, pos.height])
+    
+    # Plot counts
+    ax3_twin.plot(bin_centers, counts, 'w-', 
+                    linewidth=2, alpha=0.7, label='Photon Counts')
+    ax3_twin.set_xlim(tarr[0]*1e3, tarr[-1]*1e3)
+    
+    # Labels and formatting
+    ax.set_xlabel('Time (ms)', labelpad=10)
+    ax.set_ylabel('Frequency (MHz)', labelpad=10)
+    ax3_twin.set_yticks([])
+    
+    ax3_twin.legend(loc='upper right', bbox_to_anchor=(0.88, 1.0))
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================

@@ -22,8 +22,51 @@ sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
 
 from read_scope_data import read_trc_data
 from data_analysis_utils import Photons, calculate_stft
-from plot_utils import plot_counts_per_bin, plot_photon_detection, select_monitor
+from plot_utils import plot_counts_per_bin, plot_photon_detection, select_monitor, plot_stft_wt_photon_counts
 
+#===========================================================================================================
+#===========================================================================================================
+
+def counts_per_bin(pulse_times, pulse_areas, bin_width_ms=0.2, amplitude_min=None, amplitude_max=None):
+    """
+    Calculate number of pulses in each time bin with optional amplitude filtering.
+    
+    Args:
+        pulse_times (np.ndarray): Array of pulse arrival times in milliseconds
+        pulse_areas (np.ndarray): Array of pulse areas/amplitudes
+        bin_width_ms (float): Width of time bins in milliseconds
+        amplitude_min (float, optional): Minimum amplitude threshold for counting pulses
+        amplitude_max (float, optional): Maximum amplitude threshold for counting pulses
+    
+    Returns:
+        tuple: (bin_centers, counts) arrays where counts shows number of pulses in each bin
+    """
+    # Apply amplitude thresholds if specified
+    if amplitude_min is not None or amplitude_max is not None:
+        # Initialize mask as all True
+        mask = np.ones_like(pulse_times, dtype=bool)
+        
+        # Apply min threshold if specified
+        if amplitude_min is not None:
+            mask &= (pulse_areas >= amplitude_min)
+            
+        # Apply max threshold if specified
+        if amplitude_max is not None:
+            mask &= (pulse_areas <= amplitude_max)
+            
+        pulse_times = pulse_times[mask]
+    
+    # Create time bins
+    time_min = min(pulse_times)
+    time_max = max(pulse_times)
+    n_bins = int((time_max - time_min) / bin_width_ms) + 1
+    bins = np.linspace(time_min, time_max, n_bins)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    
+    # Count pulses in each bin
+    counts, _ = np.histogram(pulse_times, bins=bins)
+    
+    return bin_centers, counts
 
 def process_shot(date, file_number, position, monitor_idx=1):
     """Process a single shot and create a combined figure."""
@@ -33,11 +76,6 @@ def process_shot(date, file_number, position, monitor_idx=1):
     xray_pattern = f"C{{channel}}--E-ring-{position}-xray--{file_number}.trc"
     bdot_pattern = f"C{{channel}}--E-ring-{position}-Bdot--{file_number}.trc"
     
-    # Use select_monitor with 20% window size
-    _, x_pos, y_pos, window_width, window_height = select_monitor(
-        monitor_idx=monitor_idx,
-        window_scale=(0.2, 0.2)
-    )
 
     # Create figure with subplots
     shot_num = int(file_number) 
@@ -48,33 +86,19 @@ def process_shot(date, file_number, position, monitor_idx=1):
     ax2 = fig.add_subplot(gs[1])
     ax3 = fig.add_subplot(gs[2])
     
-    # Set window position
-    mngr = plt.get_current_fig_manager()
-    try:
-        # For Qt backend
-        mngr.window.setGeometry(x_pos, y_pos, window_width, window_height)
-    except:
-        try:
-            # For TkAgg backend
-            mngr.window.wm_geometry(f"+{x_pos}+{y_pos}")
-        except:
-            try:
-                # For WX backend
-                mngr.window.SetPosition((x_pos, y_pos))
-            except:
-                print("Could not position window - unsupported backend")
-    
+    # Use select_monitor with 20% window size
+    _, x_pos, y_pos, window_width, window_height = select_monitor(monitor_idx=monitor_idx, window_scale=(0.2, 0.2))
+
     # Read X-ray data
     base_dir = os.path.join("E:", "x-ray", date)
-    
     for channel in ["2", "3"]:
         filename = xray_pattern.format(channel=channel)
         filepath = os.path.join(base_dir, filename)
         if os.path.exists(filepath):
-            print(f"Reading x-ray data from {filename}")
-            if channel == "2":
-                dipole_data, tarr_x = read_trc_data(filepath)
-            elif channel == "3":
+            # if channel == "2":
+            #     dipole_data, tarr_x = read_trc_data(filepath)
+            if channel == "3":
+                print(f"Reading x-ray data from {filename}")
                 xray_data, tarr_x = read_trc_data(filepath)
     
     if xray_data is None or tarr_x is None:
@@ -96,8 +120,18 @@ def process_shot(date, file_number, position, monitor_idx=1):
     print(f"Detection threshold: {detector.threshold:.2f}")
 
     # Plot 2: Counts histogram (middle)
-    bin_centers, counts = plot_counts_per_bin(pulse_times, pulse_areas, bin_width_ms=0.2, ax=ax2)
-    
+    bin_width_ms = 0.2
+    bin_centers, counts = counts_per_bin(pulse_times, pulse_areas, bin_width_ms)
+
+    total_time = max(pulse_times) - min(pulse_times)
+    count_rate = len(pulse_times) / (total_time)
+    print(f'Average Count Rate: {count_rate:.1f} counts/ms')
+    print(f'Total Counts: {len(pulse_times)}')
+    print(f'Min Signal: {min(pulse_areas):.3f}')
+    print(f'Max Signal: {max(pulse_areas):.3f}')
+
+    plot_counts_per_bin(bin_centers, counts, bin_width_ms, ax=ax2)
+
     # Clean up variables
     dipole_data = None
     xray_data = None
@@ -113,8 +147,8 @@ def process_shot(date, file_number, position, monitor_idx=1):
         filename = bdot_pattern.format(channel=channel)
         filepath = os.path.join(base_dir, filename)
         if os.path.exists(filepath):
-            print(f"Reading bdot data from {filename}")
             if channel == "1":
+                print(f"Reading bdot data from {filename}")
                 By_P21, tarr_B = read_trc_data(filepath)
         else:
             print(f"Warning: Could not find {filepath}")
@@ -124,44 +158,8 @@ def process_shot(date, file_number, position, monitor_idx=1):
     freq_arr, fft_arr, time_resolution, freq_resolution = calculate_stft(tarr_B, By_P21, samples_per_fft=500000, overlap_fraction=0.01, window='hanning', freq_min=150e6, freq_max=1000e6)
     
     # Plot 3: Combined STFT and counts (bottom)
-    
-    # STFT plot
-    im = ax3.imshow(fft_arr.T, 
-                    aspect='auto',
-                    origin='lower',
-                    extent=[tarr_B[0]*1e3, tarr_B[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
-                    interpolation='None',
-                    cmap='jet')
-    
-    # Adjust subplot position to accommodate colorbar
-    pos = ax3.get_position()
-    ax3.set_position([pos.x0, pos.y0, pos.width * 0.9, pos.height])
-    
-    # Add colorbar with adjusted position
-    cax = fig.add_axes([pos.x0 + pos.width * 0.92, pos.y0, 0.02, pos.height])
-    cbar = fig.colorbar(im, cax=cax)
-    cbar.set_label('fft', labelpad=10)
-    
-    # Counts overlay in Bdot time range
-    ax3_twin = ax3.twinx()
-    # Adjust twin axis position
-    ax3_twin.set_position([pos.x0, pos.y0, pos.width * 0.9, pos.height])
-    
-    # Plot counts
-    ax3_twin.plot(bin_centers, counts, 'w-', 
-                    linewidth=2, alpha=0.7, label='Photon Counts')
-    ax3_twin.set_xlim(tarr_B[0]*1e3, tarr_B[-1]*1e3)
-    
-    # Labels and formatting
-    ax3.set_xlabel('Time (ms)', labelpad=10)
-    ax3.set_ylabel('Frequency (MHz)', labelpad=10)
-    ax3_twin.set_yticks([])
-    
-    # Add STFT information to title
-    ax3.set_title('STFT and Photon Counts\n' +
-                    f'Time Res: {time_resolution*1e3:.2f} ms, Freq Res: {freq_resolution/1e6:.2f} MHz',
-                    pad=20)  # Add padding to title
-    ax3_twin.legend(loc='upper right', bbox_to_anchor=(0.88, 1.0))
+    plot_stft_wt_photon_counts(tarr_B, fft_arr, freq_arr, bin_centers, counts, fig=fig, ax=ax3)
+    print(f'Time Res: {time_resolution*1e3:.2f} ms, Freq Res: {freq_resolution/1e6:.2f} MHz')
     
     print(f"Completed processing shot {file_number}")
 
