@@ -16,6 +16,8 @@ from matplotlib.gridspec import GridSpec
 from screeninfo import get_monitors
 import tkinter as tk
 
+from scipy.ndimage import gaussian_filter1d
+
 # Add paths for custom modules
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
@@ -96,22 +98,26 @@ def process_shot(date, file_number, position, monitor_idx=1):
             if channel == "3":
                 print(f"Reading x-ray data from {filename}")
                 xray_data, tarr_x = read_trc_data(filepath)
-                xray_data = -xray_data
+                filtered_xray_data = - gaussian_filter1d(xray_data, sigma=10)
 
     if xray_data is None or tarr_x is None:
         raise FileNotFoundError("Required X-ray data files not found")
         
     # Process X-ray data
     time_ms = tarr_x * 1000
-    detector = Photons(time_ms, xray_data, threshold_multiplier=3, cutoff_freq=0.00001)
+    detector = Photons(time_ms,
+                    filtered_xray_data,
+                    threshold_multiplier=2,
+                    filter_type='butterworth',
+                    filter_value=0.000005)
     detector.reduce_pulses()
     pulse_times, pulse_areas = detector.get_pulse_arrays()
     
     # Plot 1: Original signal and baseline
-    plot_original_and_baseline(time_ms, xray_data, detector, ax1)
+    plot_original_and_baseline(time_ms, filtered_xray_data, detector, ax1)
     
     # Plot 2: Baseline-subtracted signal with pulses
-    plot_subtracted_signal(time_ms, xray_data, pulse_times, detector, ax2)
+    plot_subtracted_signal(time_ms, filtered_xray_data, pulse_times, detector, ax2)
     
     # Calculate photon counts per bin
     bin_width_ms = 0.2

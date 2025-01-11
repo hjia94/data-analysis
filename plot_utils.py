@@ -368,7 +368,7 @@ def plot_subtracted_signal(tarr, data, pulse_times, detector, ax=None):
     
     # Plot detected pulses
     pulse_heights = subtracted_signal[np.searchsorted(tarr, pulse_times)]
-    ax.plot(pulse_times, pulse_heights, 'r.', markersize=2, label='Detected Pulses')
+    ax.plot(pulse_times, pulse_heights, 'r.', markersize=10, label='Detected Pulses')
     
     # Plot threshold levels
     ax.axhline(y=detector.threshold, color='g', linestyle='--', alpha=0.5, label='Threshold')

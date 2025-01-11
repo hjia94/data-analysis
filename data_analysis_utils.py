@@ -15,7 +15,7 @@ import os
 import sys
 import re
 import numpy as np
-from scipy import signal
+from scipy import signal, ndimage
 import scipy.constants as const
 import matplotlib.pyplot as plt
 
@@ -30,6 +30,23 @@ from read_scope_data import read_trc_data
 from plot_utils import plot_original_and_baseline, plot_subtracted_signal
 #===========================================================================================================
 #===========================================================================================================
+
+def fast_gaussian_filter(data, sigma):
+    # Create Gaussian kernel
+    kernel_size = int(6 * sigma)  # 3 sigma on each side
+    kernel = np.exp(-np.linspace(-3, 3, kernel_size)**2 / 2)
+    kernel = kernel / kernel.sum()  # normalize
+    
+    # Use FFT-based convolution
+    return signal.fftconvolve(data, kernel, mode='same')
+
+def low_pass_filter(data, cutoff_freq):
+        # Design a low-pass Butterworth filter
+        b, a = signal.butter(2, cutoff_freq, btype='low')
+        
+        return signal.filtfilt(b, a, data)
+#===========================================================================================================
+
 
 def get_files_in_folder(folder_path, modified_date=None, omit_keyword=None):
     """
@@ -175,43 +192,51 @@ class Photons:
     
     def __init__(self, 
                  times: NDArray[np.float64], 
-                 signal: NDArray[np.float64], 
+                 data_array: NDArray[np.float64], 
                  threshold_multiplier: float = 7.0,
-                 cutoff_freq: float = 0.01,
+                 filter_value: float = 10000,
+                 filter_type: str = 'gaussian',
                  negative_pulses: bool = False):
         """Initialize photon pulse detector.
         
         Args:
             times: Time array in milliseconds
-            signal: Signal amplitude array
+            data_array: Signal amplitude array
             threshold_multiplier: Number of standard deviations above baseline for detection
-            cutoff_freq: Cutoff frequency for the low-pass filter as a fraction of the Nyquist frequency
+            filter_value: Filter parameter value - sigma for gaussian filter, cutoff frequency for butterworth
+            filter_type: Type of filter to use ('gaussian' or 'butterworth')
             negative_pulses: If True, detect negative-going pulses instead of positive
         
         Raises:
             ValueError: If input arrays have different lengths or are empty
         """
-        if len(times) != len(signal):
-            raise ValueError("Time and signal arrays must have same length")
+        if len(times) != len(data_array):
+            raise ValueError("Time and data arrays must have same length")
         if len(times) == 0:
             raise ValueError("Input arrays cannot be empty")
             
         self.times = times
-        self.signal = signal
-        self.cutoff_freq = cutoff_freq
+        self.data = data_array
+        self.filter_value = filter_value
+        self.filter_type = filter_type
         self._compute_signal_properties()
         self._detect_pulses(threshold_multiplier, negative_pulses)
         
     def _compute_signal_properties(self) -> None:
-        """Compute baseline properties of the signal using a low-pass filter."""
-        # Design a low-pass Butterworth filter
-        b, a = signal.butter(2, self.cutoff_freq, btype='low')
-        
-        # Apply the filter to get the baseline
-        self.baseline = signal.filtfilt(b, a, self.signal)
-        
+        """Compute baseline properties of the signal using the chosen filter."""
+        # Apply the chosen filter to get the baseline
+        if self.filter_type == 'gaussian':
+            self.baseline = fast_gaussian_filter(self.data, sigma=self.filter_value)
+        elif self.filter_type == 'butterworth':
+            self.baseline = low_pass_filter(self.data, self.filter_value)
+        else:
+            # Take last 10% of data points for baseline calculation
+            n_points = len(self.data)
+            baseline_points = self.data[-int(n_points * 0.1):]
+            self.baseline = np.full_like(self.data, np.mean(baseline_points))
+
         # Subtract baseline from signal to get residuals
-        residuals = self.signal - self.baseline
+        residuals = self.data - self.baseline
         
         # Compute standard deviation from residuals
         self.std_dev = np.std(residuals)
@@ -222,11 +247,11 @@ class Photons:
         self.threshold = self.std_dev * threshold_multiplier
         
         if negative_pulses:
-            mask = (self.signal - self.baseline) < -self.threshold
-            amplitudes = -(self.signal[mask] - self.baseline[mask])
+            mask = (self.data - self.baseline) < -self.threshold
+            amplitudes = -(self.data[mask] - self.baseline[mask])
         else:
-            mask = (self.signal - self.baseline) > self.threshold
-            amplitudes = self.signal[mask] - self.baseline[mask]
+            mask = (self.data - self.baseline) > self.threshold
+            amplitudes = self.data[mask] - self.baseline[mask]
             
         self.pulse_times = self.times[mask]
         self.pulse_amplitudes = amplitudes
@@ -342,16 +367,3 @@ def calculate_stft(time_array, signal, samples_per_fft, overlap_fraction, window
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================
-
-if __name__ == "__main__":
-    ifn = r"E:\x-ray\20241102\C3--E-ring-p30-z13-x200-xray--00011.trc"
-    xray_data, tarr_x = read_trc_data(ifn)
-
-    time_ms = tarr_x * 1000
-    detector = Photons(time_ms, xray_data, threshold_multiplier=7, cutoff_freq=0.00001)
-    detector.reduce_pulses()
-    pulse_times, pulse_areas = detector.get_pulse_arrays()
-    
-    # Plot 1: Original signal and baseline
-    plot_original_and_baseline(time_ms, xray_data, detector)
-    plt.show()
