@@ -18,6 +18,9 @@ into the following categories:
 
 Each function includes detailed documentation of its parameters and returns.
 '''
+import sys
+sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
+sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
 
 import tkinter as tk
 from screeninfo import get_monitors
@@ -96,31 +99,23 @@ def cleanup_figures():
     # Force garbage collection
     gc.collect()
 
-def plot_shots_grid(
-    data_path_template: str,
-    shot_range: range,
-    n_cols: int = 2,
-    data_processor: Optional[Callable] = None,
-    monitor_idx: Optional[int] = None
-) -> None:
+def select_monitor(monitor_idx: Optional[int] = None, window_scale: tuple = (1.0, 1.0)) -> tuple:
     """
-    Plot multiple shots in windows with 2x2 subplots, spread across monitors.
-    Memory efficient version that clears data after each plot.
+    Select a monitor for displaying plots and calculate window positioning.
     
     Args:
-        data_path_template (str): Template string for data file paths with {shot:05d} format
-        shot_range (range): Range of shot numbers to plot
-        n_cols (int): Number of windows to arrange horizontally
-        data_processor (Callable, optional): Function to process data before plotting
-        monitor_idx (Optional[int]): Monitor index to display plots on. If None, will prompt user
+        monitor_idx (Optional[int]): Monitor index to use. If None, will prompt user.
+        window_scale (tuple): Scale factors (width, height) for window size relative to monitor size.
+                            Default (1.0, 1.0) uses full monitor size.
     
     Returns:
-        list: List of figure objects for cleanup
+        tuple: (monitor_object, x_pos, y_pos, window_width, window_height)
+               - monitor_object: The selected monitor
+               - x_pos: Calculated x position for window
+               - y_pos: Calculated y position for window
+               - window_width: Calculated window width
+               - window_height: Calculated window height
     """
-    # Clean up any existing figures first
-    cleanup_figures()
-    
-    # Get monitor information
     monitors = get_monitors()
     
     # If monitor_idx not provided, show available monitors and prompt user
@@ -130,21 +125,40 @@ def plot_shots_grid(
             print(f"Monitor {i}: {m.width}x{m.height} at position ({m.x}, {m.y})")
         monitor_idx = int(input("\nEnter the monitor number to display plots on: "))
     
-    target_monitor = monitors[monitor_idx]
+    # Validate monitor index
+    if not 0 <= monitor_idx < len(monitors):
+        raise ValueError(f"Invalid monitor index {monitor_idx}. Must be between 0 and {len(monitors)-1}")
+    
+    monitor = monitors[monitor_idx]
+    
+    # Calculate window dimensions
+    width_scale, height_scale = window_scale
+    window_width = int(monitor.width * width_scale)
+    window_height = int(monitor.height * height_scale)
+    
+    # Calculate centered position
+    x_pos = monitor.x + (monitor.width - window_width) // 2
+    y_pos = monitor.y + (monitor.height - window_height) // 2
+    
+    return monitor, x_pos, y_pos, window_width, window_height
+
+def plot_shots_grid(data_path_template: str, shot_range: range, n_cols: int = 2,
+                   data_processor: Optional[Callable] = None, monitor_idx: Optional[int] = None) -> None:
+    """Plot multiple shots in windows with 2x2 subplots."""
+    # Clean up any existing figures first
+    cleanup_figures()
+    
+    # Get monitor information using full window size
+    monitor, base_x, base_y, window_width, window_height = select_monitor(
+        monitor_idx=monitor_idx,
+        window_scale=(0.9, 0.9)  # Use 90% of monitor size for each window
+    )
     
     # Calculate number of windows needed (each window shows 4 plots)
     n_shots = len(shot_range)
     n_windows = (n_shots + 3) // 4  # Ceiling division by 4
     n_rows = (n_windows + n_cols - 1) // n_cols  # Ceiling division for window layout
     
-    # Calculate window sizes
-    window_width = target_monitor.width // n_cols
-    window_height = target_monitor.height // n_rows
-    
-    # Base position for windows
-    base_x = target_monitor.x
-    base_y = target_monitor.y
-
     # Find common path prefix for naming windows
     first_path = data_path_template.format(shot=shot_range[0])
     path_parts = first_path.split('/')

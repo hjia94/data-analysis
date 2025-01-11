@@ -22,31 +22,7 @@ sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
 
 from read_scope_data import read_trc_data
 from data_analysis_utils import Photons, calculate_stft
-from plot_utils import plot_counts_per_bin, plot_photon_detection
-
-
-def select_monitor(monitor_idx=1):
-    """
-    Select a monitor to display the figure on and return its dimensions and position.
-    
-    Args:
-        monitor_idx (int, optional): Index of monitor to use. If None, will prompt user.
-        
-    Returns:
-        tuple: (x, y, width, height) of selected monitor
-    """
-    monitors = get_monitors()
-    
-    # If monitor_idx not provided, show available monitors and prompt user
-    if monitor_idx is None:
-        print("\nAvailable monitors:")
-        for i, m in enumerate(monitors):
-            print(f"Monitor {i}: {m.width}x{m.height} at position ({m.x}, {m.y})")
-        monitor_idx = int(input("\nEnter the monitor number to display plots on: "))
-    
-    # Get selected monitor
-    monitor = monitors[monitor_idx]
-    return monitor.x, monitor.y, monitor.width, monitor.height
+from plot_utils import plot_counts_per_bin, plot_photon_detection, select_monitor
 
 
 def process_shot(date, file_number, position, monitor_idx=1):
@@ -57,8 +33,11 @@ def process_shot(date, file_number, position, monitor_idx=1):
     xray_pattern = f"C{{channel}}--E-ring-{position}-xray--{file_number}.trc"
     bdot_pattern = f"C{{channel}}--E-ring-{position}-Bdot--{file_number}.trc"
     
-    # Get monitor dimensions
-    mon_x, mon_y, mon_width, mon_height = select_monitor(monitor_idx)
+    # Use select_monitor with 20% window size
+    _, x_pos, y_pos, window_width, window_height = select_monitor(
+        monitor_idx=monitor_idx,
+        window_scale=(0.2, 0.2)
+    )
 
     # Create figure with subplots
     shot_num = int(file_number) 
@@ -68,15 +47,6 @@ def process_shot(date, file_number, position, monitor_idx=1):
     ax1 = fig.add_subplot(gs[0])
     ax2 = fig.add_subplot(gs[1])
     ax3 = fig.add_subplot(gs[2])
-    
-    # Position window on selected monitor
-    # Calculate window size (use 90% of monitor width/height)
-    window_width = int(mon_width * 0.2)
-    window_height = int(mon_height * 0.2)
-    
-    # Center the window on the monitor
-    x_pos = mon_x + (mon_width - window_width) // 2
-    y_pos = mon_y + (mon_height - window_height) // 2
     
     # Set window position
     mngr = plt.get_current_fig_manager()
@@ -207,7 +177,7 @@ if __name__ == "__main__":
     # Configuration
     date = "20241102"
     position = "p30-z13-x200"
-    file_numbers = [f"{i:05d}" for i in range(11, 20)]  # Example: 00011 to 00014
+    file_numbers = [f"{i:05d}" for i in range(11, 12)]  # Example: 00011 to 00014
     
     print(f"Starting processing for {len(file_numbers)} shots")
     print(f"Date: {date}")
