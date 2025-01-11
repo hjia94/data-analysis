@@ -259,29 +259,43 @@ def plot_counts_per_bin(bin_centers, counts, bin_width_ms, ax=None):
 
 def plot_photon_detection(tarr, data, pulse_times, detector, ax=None):
     """
-    Plot photon pulses from x-ray detector data.
+    Plot photon pulses from x-ray detector data with dynamic baseline.
     
     Args:
         time_array (np.ndarray): Time array in seconds
         signal_data (np.ndarray): Signal data to analyze
         pulse_times (np.ndarray): Array of detected pulse times in milliseconds
-        threshold_level (float): Detection threshold level
+        detector (Photons): Photon detector object containing baseline and threshold
         ax (matplotlib.axes.Axes, optional): Axes to plot on. If None, current axes will be used
     """
     if ax is None:
         plt.figure()
         ax = plt.gca()
 
-    ax.plot(tarr, data, 'b-', label='Signal')
-    ax.plot(pulse_times, [detector.threshold + detector.offset]*len(pulse_times), 
-            'r.', label='Detected Pulses')
+    # Plot original signal
+    ax.plot(tarr, data, 'b-', label='Original', alpha=0.7)
+    
+    # Plot dynamic baseline
+    ax.plot(tarr, detector.baseline, 'g-', label='Baseline', alpha=0.7)
+    
+    # Plot baseline-subtracted signal
+    subtracted_signal = data - detector.baseline
+    ax.plot(tarr, subtracted_signal + detector.baseline.mean(), 'k-', 
+            label='Subtracted', alpha=0.5)
+    
+    # Plot detected pulses on the subtracted signal
+    pulse_heights = subtracted_signal[np.searchsorted(tarr, pulse_times)] + detector.baseline.mean()
+    ax.plot(pulse_times, pulse_heights, 'r.', label='Pulses')
+    
+    # Plot threshold level
+    ax.axhline(y=detector.baseline.mean() + detector.threshold, color='r', 
+               linestyle='--', alpha=0.5, label='Threshold')
     
     ax.set_xlabel('Time (ms)')
-    ax.set_ylabel('Signal')
     ax.set_title(f'Detected {len(pulse_times)} pulses')
     ax.legend(loc='upper right')
     ax.grid(True)
-    
+
 #==============================================================================
 # Frequency Analysis Functions
 #==============================================================================
@@ -332,42 +346,66 @@ def plot_fft(time_array, signals_dict, window=None):
     
     return freq, magnitude
 
+def plot_original_and_baseline(tarr, data, detector, ax=None):
+    """Plot original signal and its calculated baseline."""
+    if ax is None:
+        ax = plt.gca()
+    
+    ax.plot(tarr, data, 'b-', alpha=0.7, label='Original')
+    ax.plot(tarr, detector.baseline, 'r-', alpha=0.7, label='Baseline')
+    ax.set_xlabel('Time (ms)')
+    ax.legend(loc='upper right')
+    ax.grid(True)
+
+def plot_subtracted_signal(tarr, data, pulse_times, detector, ax=None):
+    """Plot baseline-subtracted signal with detected pulses."""
+    if ax is None:
+        ax = plt.gca()
+    
+    # Plot baseline-subtracted signal
+    subtracted_signal = data - detector.baseline
+    ax.plot(tarr, subtracted_signal, 'b-', alpha=0.7, label='Data - Baseline')
+    
+    # Plot detected pulses
+    pulse_heights = subtracted_signal[np.searchsorted(tarr, pulse_times)]
+    ax.plot(pulse_times, pulse_heights, 'r.', markersize=2, label='Detected Pulses')
+    
+    # Plot threshold levels
+    ax.axhline(y=detector.threshold, color='g', linestyle='--', alpha=0.5, label='Threshold')
+
+    ax.set_xlabel('Time (ms)')
+    ax.legend(loc='upper right')
+    ax.grid(True)
+
 def plot_stft_wt_photon_counts(tarr, fft_arr, freq_arr, bin_centers, counts, fig=None, ax=None):
+    """Plot STFT spectrogram with photon counts overlay."""
     if ax is None:
         fig = plt.figure()
         ax = plt.gca()
+        
+    # Plot STFT
     im = ax.imshow(fft_arr.T, 
-                    aspect='auto',
-                    origin='lower',
-                    extent=[tarr[0]*1e3, tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
-                    interpolation='None',
-                    cmap='jet')
+                   aspect='auto',
+                   origin='lower',
+                   extent=[tarr[0]*1e3, tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
+                   interpolation='None',
+                   cmap='jet')
     
-    # Adjust subplot position to accommodate colorbar
+    # Add colorbar
     pos = ax.get_position()
     ax.set_position([pos.x0, pos.y0, pos.width * 0.9, pos.height])
-    
-    # Add colorbar with adjusted position
     cax = fig.add_axes([pos.x0 + pos.width * 0.92, pos.y0, 0.02, pos.height])
-    cbar = fig.colorbar(im, cax=cax)
-    cbar.set_label('fft', labelpad=10)
+    fig.colorbar(im, cax=cax)
     
-    # Counts overlay in Bdot time range
-    ax3_twin = ax.twinx()
-    # Adjust twin axis position
-    ax3_twin.set_position([pos.x0, pos.y0, pos.width * 0.9, pos.height])
+    # Add counts overlay
+    ax_twin = ax.twinx()
+    ax_twin.set_position([pos.x0, pos.y0, pos.width * 0.9, pos.height])
+    ax_twin.plot(bin_centers, counts, 'w-', linewidth=1, alpha=0.7)
+    ax_twin.set_yticks([])
     
-    # Plot counts
-    ax3_twin.plot(bin_centers, counts, 'w-', 
-                    linewidth=2, alpha=0.7, label='Photon Counts')
-    ax3_twin.set_xlim(tarr[0]*1e3, tarr[-1]*1e3)
-    
-    # Labels and formatting
-    ax.set_xlabel('Time (ms)', labelpad=10)
-    ax.set_ylabel('Frequency (MHz)', labelpad=10)
-    ax3_twin.set_yticks([])
-    
-    ax3_twin.legend(loc='upper right', bbox_to_anchor=(0.88, 1.0))
+    ax.set_xlabel('Time (ms)')
+    ax.set_ylabel('Frequency (MHz)')
+
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================

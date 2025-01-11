@@ -22,7 +22,7 @@ sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
 
 from read_scope_data import read_trc_data
 from data_analysis_utils import Photons, calculate_stft
-from plot_utils import plot_counts_per_bin, plot_photon_detection, select_monitor, plot_stft_wt_photon_counts
+from plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
 
 #===========================================================================================================
 #===========================================================================================================
@@ -78,15 +78,11 @@ def process_shot(date, file_number, position, monitor_idx=1):
     
 
     # Create figure with subplots
-    shot_num = int(file_number) 
-    fig = plt.figure(shot_num, figsize=(10, 15))  # Use full file_number in title
-    gs = GridSpec(3, 1, figure=fig, height_ratios=[1, 1, 1.5], hspace=0.5)
-
-    ax1 = fig.add_subplot(gs[0])
-    ax2 = fig.add_subplot(gs[1])
-    ax3 = fig.add_subplot(gs[2])
+    fig = plt.figure(int(file_number), figsize=(10, 15))
+    gs = GridSpec(3, 1, figure=fig, height_ratios=[1, 1, 1.5], hspace=0.3)
+    ax1, ax2, ax3 = [fig.add_subplot(g) for g in gs]
     
-    # Use select_monitor with 20% window size
+    # Position window
     _, x_pos, y_pos, window_width, window_height = select_monitor(monitor_idx=monitor_idx, window_scale=(0.2, 0.2))
 
     # Read X-ray data
@@ -100,37 +96,39 @@ def process_shot(date, file_number, position, monitor_idx=1):
             if channel == "3":
                 print(f"Reading x-ray data from {filename}")
                 xray_data, tarr_x = read_trc_data(filepath)
-    
+                xray_data = -xray_data
+
     if xray_data is None or tarr_x is None:
         raise FileNotFoundError("Required X-ray data files not found")
         
     # Process X-ray data
-    print("Processing X-ray pulses...")
     time_ms = tarr_x * 1000
-    detector = Photons(time_ms, -xray_data, threshold_multiplier=5, negative_pulses=False)
+    detector = Photons(time_ms, xray_data, threshold_multiplier=3, cutoff_freq=0.00001)
     detector.reduce_pulses()
     pulse_times, pulse_areas = detector.get_pulse_arrays()
     
-    # Plot 1: Photon detection plot (top)
-    plot_photon_detection(time_ms, -xray_data, pulse_times, detector, ax=ax1)
-    # Print some statistics
-    print(f"\nDetected {detector.pulse_count} pulses")
-    print(f"Average pulse area: {np.mean(pulse_areas):.2f}")
-    print(f"Signal baseline: {detector.offset:.2f}")
-    print(f"Detection threshold: {detector.threshold:.2f}")
-
-    # Plot 2: Counts histogram (middle)
+    # Plot 1: Original signal and baseline
+    plot_original_and_baseline(time_ms, xray_data, detector, ax1)
+    
+    # Plot 2: Baseline-subtracted signal with pulses
+    plot_subtracted_signal(time_ms, xray_data, pulse_times, detector, ax2)
+    
+    # Calculate photon counts per bin
     bin_width_ms = 0.2
     bin_centers, counts = counts_per_bin(pulse_times, pulse_areas, bin_width_ms)
 
     total_time = max(pulse_times) - min(pulse_times)
     count_rate = len(pulse_times) / (total_time)
+
+    # Print some statistics
+    print(f"\nDetected {detector.pulse_count} pulses")
+    print(f"Average pulse area: {np.mean(pulse_areas):.2f}")
+    print(f"Detection threshold: {detector.threshold:.2f}")
     print(f'Average Count Rate: {count_rate:.1f} counts/ms')
     print(f'Total Counts: {len(pulse_times)}')
     print(f'Min Signal: {min(pulse_areas):.3f}')
     print(f'Max Signal: {max(pulse_areas):.3f}')
 
-    plot_counts_per_bin(bin_centers, counts, bin_width_ms, ax=ax2)
 
     # Clean up variables
     dipole_data = None

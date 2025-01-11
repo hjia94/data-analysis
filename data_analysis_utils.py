@@ -12,15 +12,24 @@ Included functions:
 '''
 
 import os
+import sys
 import re
 import numpy as np
+from scipy import signal
+import scipy.constants as const
+import matplotlib.pyplot as plt
 
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Tuple, Optional
 from numpy.typing import NDArray
 
-import scipy.constants as const
+sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
+sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\Nov-2024")
+from read_scope_data import read_trc_data
+from plot_utils import plot_original_and_baseline, plot_subtracted_signal
+#===========================================================================================================
+#===========================================================================================================
 
 def get_files_in_folder(folder_path, modified_date=None, omit_keyword=None):
     """
@@ -168,6 +177,7 @@ class Photons:
                  times: NDArray[np.float64], 
                  signal: NDArray[np.float64], 
                  threshold_multiplier: float = 7.0,
+                 cutoff_freq: float = 0.01,
                  negative_pulses: bool = False):
         """Initialize photon pulse detector.
         
@@ -175,6 +185,7 @@ class Photons:
             times: Time array in milliseconds
             signal: Signal amplitude array
             threshold_multiplier: Number of standard deviations above baseline for detection
+            cutoff_freq: Cutoff frequency for the low-pass filter as a fraction of the Nyquist frequency
             negative_pulses: If True, detect negative-going pulses instead of positive
         
         Raises:
@@ -187,29 +198,35 @@ class Photons:
             
         self.times = times
         self.signal = signal
+        self.cutoff_freq = cutoff_freq
         self._compute_signal_properties()
         self._detect_pulses(threshold_multiplier, negative_pulses)
         
-    def _compute_signal_properties(self, baseline_fraction: float = 0.05) -> None:
-        """Compute baseline properties of the signal."""
-        n_points = len(self.signal)
-        n1 = int((1 - baseline_fraction) * n_points)
-        n2 = n_points
+    def _compute_signal_properties(self) -> None:
+        """Compute baseline properties of the signal using a low-pass filter."""
+        # Design a low-pass Butterworth filter
+        b, a = signal.butter(2, self.cutoff_freq, btype='low')
         
-        self.offset = np.mean(self.signal[n1:n2])
-        self.std_dev = np.std(self.signal[n1:n2])
-        self.dt = np.mean(np.diff(self.times[n1:n2]))
+        # Apply the filter to get the baseline
+        self.baseline = signal.filtfilt(b, a, self.signal)
+        
+        # Subtract baseline from signal to get residuals
+        residuals = self.signal - self.baseline
+        
+        # Compute standard deviation from residuals
+        self.std_dev = np.std(residuals)
+        self.dt = np.mean(np.diff(self.times))
         
     def _detect_pulses(self, threshold_multiplier: float, negative_pulses: bool) -> None:
-        """Detect pulses above/below threshold."""
+        """Detect pulses above/below baseline."""
         self.threshold = self.std_dev * threshold_multiplier
         
         if negative_pulses:
-            mask = self.signal < (self.offset - self.threshold)
-            amplitudes = self.offset - self.signal[mask]
+            mask = (self.signal - self.baseline) < -self.threshold
+            amplitudes = -(self.signal[mask] - self.baseline[mask])
         else:
-            mask = self.signal > (self.offset + self.threshold)
-            amplitudes = self.signal[mask] - self.offset
+            mask = (self.signal - self.baseline) > self.threshold
+            amplitudes = self.signal[mask] - self.baseline[mask]
             
         self.pulse_times = self.times[mask]
         self.pulse_amplitudes = amplitudes
@@ -321,3 +338,20 @@ def calculate_stft(time_array, signal, samples_per_fft, overlap_fraction, window
 #     data_dict = read_NA_data(filepath)
     
 #     return data_dict
+
+#===========================================================================================================
+#<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
+#===========================================================================================================
+
+if __name__ == "__main__":
+    ifn = r"E:\x-ray\20241102\C3--E-ring-p30-z13-x200-xray--00011.trc"
+    xray_data, tarr_x = read_trc_data(ifn)
+
+    time_ms = tarr_x * 1000
+    detector = Photons(time_ms, xray_data, threshold_multiplier=7, cutoff_freq=0.00001)
+    detector.reduce_pulses()
+    pulse_times, pulse_areas = detector.get_pulse_arrays()
+    
+    # Plot 1: Original signal and baseline
+    plot_original_and_baseline(time_ms, xray_data, detector)
+    plt.show()
