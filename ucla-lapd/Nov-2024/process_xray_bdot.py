@@ -17,7 +17,7 @@ from screeninfo import get_monitors
 import tkinter as tk
 
 from scipy.ndimage import gaussian_filter1d
-
+from scipy.signal import savgol_filter
 # Add paths for custom modules
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
@@ -72,13 +72,10 @@ def counts_per_bin(pulse_times, pulse_areas, bin_width_ms=0.2, amplitude_min=Non
 
 def process_shot(date, file_number, position, monitor_idx=1):
     """Process a single shot and create a combined figure."""
-    print(f"\nProcessing shot {file_number} at position {position}")
-    
     # Define file patterns
     xray_pattern = f"C{{channel}}--E-ring-{position}-xray--{file_number}.trc"
     bdot_pattern = f"C{{channel}}--E-ring-{position}-Bdot--{file_number}.trc"
     
-
     # Create figure with subplots
     fig = plt.figure(int(file_number), figsize=(10, 15))
     gs = GridSpec(3, 1, figure=fig, height_ratios=[1, 1, 1.5], hspace=0.3)
@@ -89,86 +86,69 @@ def process_shot(date, file_number, position, monitor_idx=1):
 
     # Read X-ray data
     base_dir = os.path.join("E:", "x-ray", date)
+    xray_data = None
+    tarr_x = None
     for channel in ["2", "3"]:
         filename = xray_pattern.format(channel=channel)
         filepath = os.path.join(base_dir, filename)
-        if os.path.exists(filepath):
-            # if channel == "2":
-            #     dipole_data, tarr_x = read_trc_data(filepath)
-            if channel == "3":
-                print(f"Reading x-ray data from {filename}")
-                xray_data, tarr_x = read_trc_data(filepath)
-                filtered_xray_data = - gaussian_filter1d(xray_data, sigma=10)
+        if os.path.exists(filepath) and channel == "3":
+            xray_data, tarr_x = read_trc_data(filepath)
+            xray_data = -xray_data  # Invert signal for positive pulses
 
     if xray_data is None or tarr_x is None:
         raise FileNotFoundError("Required X-ray data files not found")
         
     # Process X-ray data
-    time_ms = tarr_x * 1000
-    detector = Photons(time_ms,
-                    filtered_xray_data,
-                    threshold_multiplier=2,
-                    filter_type='butterworth',
-                    filter_value=0.000005)
+    time_ms = tarr_x * 1000  # Convert to milliseconds
+    detector = Photons(time_ms, 
+                      xray_data,
+                      threshold_multiplier=5,
+                      baseline_filter_value=10001,
+                      pulse_filter_value=11,
+                      baseline_filter_type='savgol',
+                      pulse_filter_type='savgol')
     detector.reduce_pulses()
-    pulse_times, pulse_areas = detector.get_pulse_arrays()
     
     # Plot 1: Original signal and baseline
-    plot_original_and_baseline(time_ms, filtered_xray_data, detector, ax1)
+    plot_original_and_baseline(time_ms, xray_data, detector, ax1)
+    ax1.set_title('Original Signal and Baseline')
     
     # Plot 2: Baseline-subtracted signal with pulses
-    plot_subtracted_signal(time_ms, filtered_xray_data, pulse_times, detector, ax2)
+    plot_subtracted_signal(time_ms, xray_data, None, detector, ax2)  # pulse_times not needed
+    ax2.set_title('Baseline-subtracted Signal with Detected Pulses')
+    
+    # Get pulse data for counts
+    pulse_times, pulse_areas = detector.get_pulse_arrays()
     
     # Calculate photon counts per bin
     bin_width_ms = 0.2
     bin_centers, counts = counts_per_bin(pulse_times, pulse_areas, bin_width_ms)
-
-    total_time = max(pulse_times) - min(pulse_times)
-    count_rate = len(pulse_times) / (total_time)
-
-    # Print some statistics
-    print(f"\nDetected {detector.pulse_count} pulses")
-    print(f"Average pulse area: {np.mean(pulse_areas):.2f}")
-    print(f"Detection threshold: {detector.threshold:.2f}")
-    print(f'Average Count Rate: {count_rate:.1f} counts/ms')
-    print(f'Total Counts: {len(pulse_times)}')
-    print(f'Min Signal: {min(pulse_areas):.3f}')
-    print(f'Max Signal: {max(pulse_areas):.3f}')
-
-
-    # Clean up variables
-    dipole_data = None
-    xray_data = None
-    detector = None
-    pulse_times = None
-    pulse_areas = None
-    tarr_x = None
-
+    
     # Read Bdot data
     base_dir = os.path.join("E:", "Bdot", date)
-    
+    By_P21 = None
+    tarr_B = None
     for channel in ["1", "2", "3"]:
         filename = bdot_pattern.format(channel=channel)
         filepath = os.path.join(base_dir, filename)
-        if os.path.exists(filepath):
-            if channel == "1":
-                print(f"Reading bdot data from {filename}")
-                By_P21, tarr_B = read_trc_data(filepath)
-        else:
-            print(f"Warning: Could not find {filepath}")
-
+        if os.path.exists(filepath) and channel == "1":
+            By_P21, tarr_B = read_trc_data(filepath)
+    
+    if By_P21 is not None and tarr_B is not None:
+        # Calculate STFT
+        freq_arr, fft_arr, _, _ = calculate_stft(
+            tarr_B, By_P21, 
+            samples_per_fft=500000, 
+            overlap_fraction=0.01, 
+            window='hanning', 
+            freq_min=150e6, 
+            freq_max=1000e6
+        )
         
-    # Calculate STFT
-    freq_arr, fft_arr, time_resolution, freq_resolution = calculate_stft(tarr_B, By_P21, samples_per_fft=500000, overlap_fraction=0.01, window='hanning', freq_min=150e6, freq_max=1000e6)
+        # Plot 3: STFT with photon counts
+        plot_stft_wt_photon_counts(tarr_B, fft_arr, freq_arr, bin_centers, counts, fig=fig, ax=ax3)    
     
-    # Plot 3: Combined STFT and counts (bottom)
-    plot_stft_wt_photon_counts(tarr_B, fft_arr, freq_arr, bin_centers, counts, fig=fig, ax=ax3)
-    print(f'Time Res: {time_resolution*1e3:.2f} ms, Freq Res: {freq_resolution/1e6:.2f} MHz')
-    
-    print(f"Completed processing shot {file_number}")
-
     plt.pause(0.1)
-
     return fig
 
 #===========================================================================================================

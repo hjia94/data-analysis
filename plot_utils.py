@@ -347,38 +347,68 @@ def plot_fft(time_array, signals_dict, window=None):
     return freq, magnitude
 
 def plot_original_and_baseline(tarr, data, detector, ax=None):
-    """Plot original signal and its calculated baseline."""
+    """Plot original signal and its calculated baseline.
+    
+    Args:
+        tarr: Time array in milliseconds
+        data: Original signal data
+        detector: Photons detector object containing baseline
+        ax: Optional matplotlib axis to plot on
+    """
     if ax is None:
         ax = plt.gca()
     
+    # Plot original signal and baseline
     ax.plot(tarr, data, 'b-', alpha=0.7, label='Original')
     ax.plot(tarr, detector.baseline, 'r-', alpha=0.7, label='Baseline')
+    
     ax.set_xlabel('Time (ms)')
     ax.legend(loc='upper right')
     ax.grid(True)
 
 def plot_subtracted_signal(tarr, data, pulse_times, detector, ax=None):
-    """Plot baseline-subtracted signal with detected pulses."""
+    """Plot baseline-subtracted signal with detected pulses.
+    
+    Args:
+        tarr: Time array in milliseconds
+        data: Original signal data (not used, kept for API consistency)
+        pulse_times: Not used, kept for API consistency
+        detector: Photons detector object containing baseline-subtracted signal
+        ax: Optional matplotlib axis to plot on
+    """
     if ax is None:
         ax = plt.gca()
     
     # Plot baseline-subtracted signal
-    subtracted_signal = data - detector.baseline
-    ax.plot(tarr, subtracted_signal, 'b-', alpha=0.7, label='Data - Baseline')
+    ax.plot(tarr, detector.baseline_subtracted, 'b-', alpha=0.7, label='Baseline Subtracted')
     
-    # Plot detected pulses
-    pulse_heights = subtracted_signal[np.searchsorted(tarr, pulse_times)]
-    ax.plot(pulse_times, pulse_heights, 'r.', markersize=10, label='Detected Pulses')
+    # Plot detected pulses at their actual times and heights
+    if hasattr(detector, 'pulses'):
+        # Plot reduced pulses
+        times = np.array([p.time for p in detector.pulses])
+        areas = np.array([p.area for p in detector.pulses])
+        ax.plot(times, areas, 'r.', markersize=2, label='Detected Pulses')
     
-    # Plot threshold levels
-    ax.axhline(y=detector.threshold, color='g', linestyle='--', alpha=0.5, label='Threshold')
+    # Plot threshold level
+    ax.axhline(y=detector.threshold, color='g', linestyle='--', 
+               alpha=0.5, label='Threshold')
 
     ax.set_xlabel('Time (ms)')
     ax.legend(loc='upper right')
     ax.grid(True)
 
 def plot_stft_wt_photon_counts(tarr, fft_arr, freq_arr, bin_centers, counts, fig=None, ax=None):
-    """Plot STFT spectrogram with photon counts overlay."""
+    """Plot STFT spectrogram with photon counts overlay.
+    
+    Args:
+        tarr: Time array for STFT in seconds
+        fft_arr: 2D array of STFT values
+        freq_arr: Frequency array in Hz
+        bin_centers: Time array for photon counts in milliseconds
+        counts: Array of photon counts
+        fig: Figure object for colorbar
+        ax: Axis to plot on
+    """
     if ax is None:
         fig = plt.figure()
         ax = plt.gca()
@@ -405,6 +435,9 @@ def plot_stft_wt_photon_counts(tarr, fft_arr, freq_arr, bin_centers, counts, fig
     
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Frequency (MHz)')
+    ax.set_title('STFT with Photon Counts Overlay')
+
+    ax.set_xlim(tarr[0]*1e3, tarr[-1]*1e3)
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>

@@ -45,6 +45,19 @@ def low_pass_filter(data, cutoff_freq):
         b, a = signal.butter(2, cutoff_freq, btype='low')
         
         return signal.filtfilt(b, a, data)
+
+def rolling_baseline(data, window_size=1000, quantile=0.1):
+    """
+    Estimate the baseline using a rolling window and a lower quantile.
+    Args:
+        signal: Input signal as a pandas Series or numpy array
+        window_size: Size of the rolling window (in samples)
+        quantile: Quantile for baseline estimation (e.g., 0.1 for the 10th percentile)
+    Returns:
+        baseline: Smoothed baseline of the signal as a pandas Series
+    """
+    return data.rolling(window=window_size, center=True).quantile(quantile)
+
 #===========================================================================================================
 
 
@@ -183,8 +196,8 @@ class Photons:
     """Analyzes photon pulses in time series data.
     
     Attributes:
-        offset (float): Baseline offset of the signal
-        std_dev (float): Standard deviation of the baseline
+        baseline (NDArray): Computed baseline of the signal
+        std_dev (float): Standard deviation of the baseline-subtracted signal
         dt (float): Time step between samples
         threshold (float): Detection threshold for pulses
         pulses (list[PhotonPulse]): Detected photon pulses
@@ -194,18 +207,20 @@ class Photons:
                  times: NDArray[np.float64], 
                  data_array: NDArray[np.float64], 
                  threshold_multiplier: float = 7.0,
-                 filter_value: float = 10000,
-                 filter_type: str = 'gaussian',
-                 negative_pulses: bool = False):
+                 baseline_filter_value: float = 10001,
+                 pulse_filter_value: float = 11,
+                 baseline_filter_type: str = 'savgol',
+                 pulse_filter_type: str = 'savgol'):
         """Initialize photon pulse detector.
         
         Args:
             times: Time array in milliseconds
             data_array: Signal amplitude array
             threshold_multiplier: Number of standard deviations above baseline for detection
-            filter_value: Filter parameter value - sigma for gaussian filter, cutoff frequency for butterworth
-            filter_type: Type of filter to use ('gaussian' or 'butterworth')
-            negative_pulses: If True, detect negative-going pulses instead of positive
+            baseline_filter_value: Filter parameter for baseline - sigma for gaussian, cutoff for butterworth, window for savgol
+            pulse_filter_value: Filter parameter for pulse smoothing - sigma for gaussian, cutoff for butterworth, window for savgol
+            baseline_filter_type: Type of filter to use for baseline ('gaussian', 'butterworth', or 'savgol')
+            pulse_filter_type: Type of filter to use for pulse smoothing ('gaussian', 'butterworth', or 'savgol')
         
         Raises:
             ValueError: If input arrays have different lengths or are empty
@@ -217,44 +232,85 @@ class Photons:
             
         self.times = times
         self.data = data_array
-        self.filter_value = filter_value
-        self.filter_type = filter_type
-        self._compute_signal_properties()
-        self._detect_pulses(threshold_multiplier, negative_pulses)
         
-    def _compute_signal_properties(self) -> None:
-        """Compute baseline properties of the signal using the chosen filter."""
-        # Apply the chosen filter to get the baseline
-        if self.filter_type == 'gaussian':
-            self.baseline = fast_gaussian_filter(self.data, sigma=self.filter_value)
-        elif self.filter_type == 'butterworth':
-            self.baseline = low_pass_filter(self.data, self.filter_value)
+        # Ensure window lengths are odd for Savitzky-Golay filter
+        if baseline_filter_type == 'savgol':
+            self.baseline_filter_value = int(baseline_filter_value) // 2 * 2 + 1
         else:
-            # Take last 10% of data points for baseline calculation
-            n_points = len(self.data)
-            baseline_points = self.data[-int(n_points * 0.1):]
-            self.baseline = np.full_like(self.data, np.mean(baseline_points))
-
-        # Subtract baseline from signal to get residuals
-        residuals = self.data - self.baseline
+            self.baseline_filter_value = baseline_filter_value
+            
+        if pulse_filter_type == 'savgol':
+            self.pulse_filter_value = int(pulse_filter_value) // 2 * 2 + 1
+        else:
+            self.pulse_filter_value = pulse_filter_value
+            
+        self.baseline_filter_type = baseline_filter_type
+        self.pulse_filter_type = pulse_filter_type
         
-        # Compute standard deviation from residuals
-        self.std_dev = np.std(residuals)
+        # Calculate time step
         self.dt = np.mean(np.diff(self.times))
+
+        print("Computing baseline...")
+        self._compute_baseline()
+        print("Computing threshold...")
+        self._compute_threshold(threshold_multiplier)
+        print("Detecting pulses...")
+        self._detect_pulses()
         
-    def _detect_pulses(self, threshold_multiplier: float, negative_pulses: bool) -> None:
-        """Detect pulses above/below baseline."""
+    def _compute_baseline(self) -> None:
+        """Compute baseline of the signal using the chosen filter."""
+        # Apply baseline filter to get the slow-varying baseline
+        if self.baseline_filter_type == 'gaussian':
+            self.baseline = fast_gaussian_filter(self.data, sigma=self.baseline_filter_value)
+        elif self.baseline_filter_type == 'butterworth':
+            self.baseline = low_pass_filter(self.data, self.baseline_filter_value)
+        elif self.baseline_filter_type == 'savgol':
+            self.baseline = signal.savgol_filter(self.data, 
+                                               window_length=self.baseline_filter_value, 
+                                               polyorder=3)
+        else:
+            # Take last 5% of data points for baseline calculation
+            n_points = len(self.data)
+            n1 = int(0.95 * n_points)
+            self.baseline = np.full_like(self.data, np.mean(self.data[n1:]))
+
+        # Subtract baseline from signal
+        self.baseline_subtracted = self.data - self.baseline
+        
+    def _compute_threshold(self, threshold_multiplier: float) -> None:
+        """Compute detection threshold based on signal standard deviation.
+        
+        Args:
+            threshold_multiplier: Number of standard deviations for threshold
+        """
+        # Compute standard deviation from last 5% of baseline-subtracted data
+        n_points = len(self.baseline_subtracted)
+        n1 = int(0.95 * n_points)
+        self.std_dev = np.std(self.baseline_subtracted[n1:])
         self.threshold = self.std_dev * threshold_multiplier
         
-        if negative_pulses:
-            mask = (self.data - self.baseline) < -self.threshold
-            amplitudes = -(self.data[mask] - self.baseline[mask])
+    def _detect_pulses(self) -> None:
+        """Detect pulses above threshold in filtered signal."""
+        # Apply pulse smoothing filter to reduce high-frequency noise
+        if self.pulse_filter_type == 'gaussian':
+            filtered_signal = fast_gaussian_filter(self.baseline_subtracted, 
+                                                sigma=self.pulse_filter_value)
+        elif self.pulse_filter_type == 'butterworth':
+            filtered_signal = low_pass_filter(self.baseline_subtracted, 
+                                           self.pulse_filter_value)
+        elif self.pulse_filter_type == 'savgol':
+            filtered_signal = signal.savgol_filter(self.baseline_subtracted,
+                                                window_length=self.pulse_filter_value,
+                                                polyorder=3)
         else:
-            mask = (self.data - self.baseline) > self.threshold
-            amplitudes = self.data[mask] - self.baseline[mask]
+            filtered_signal = self.baseline_subtracted
             
+        # Detect pulses above threshold in filtered signal
+        mask = filtered_signal > self.threshold
+        
+        # Get amplitudes from baseline-subtracted signal for true pulse heights
+        self.pulse_amplitudes = self.baseline_subtracted[mask]
         self.pulse_times = self.times[mask]
-        self.pulse_amplitudes = amplitudes
         
     def reduce_pulses(self, max_gap: Optional[float] = None) -> None:
         """Combine adjacent pulse points into single pulses.
