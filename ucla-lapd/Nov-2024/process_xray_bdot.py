@@ -104,8 +104,8 @@ def process_shot(date, file_number, position, monitor_idx=1):
                       xray_data,
                       threshold_multiplier=5,
                       baseline_filter_value=10001,
-                      pulse_filter_value=11,
-                      baseline_filter_type='savgol',
+                      pulse_filter_value=51,
+                      baseline_filter_type='None',
                       pulse_filter_type='savgol')
     detector.reduce_pulses()
     

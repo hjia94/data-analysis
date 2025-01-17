@@ -380,18 +380,26 @@ def plot_subtracted_signal(tarr, data, pulse_times, detector, ax=None):
         ax = plt.gca()
     
     # Plot baseline-subtracted signal
-    ax.plot(tarr, detector.baseline_subtracted, 'b-', alpha=0.7, label='Baseline Subtracted')
+    ax.plot(tarr, detector.baseline_subtracted, 'b-', alpha=0.3, label='Raw - Baseline')
     
-    # Plot detected pulses at their actual times and heights
+    # Plot filtered signal
+    ax.plot(tarr, detector.filtered_signal, 'g-', alpha=0.7, label='Filtered Signal')
+    
+    # Plot detected peaks
     if hasattr(detector, 'pulses'):
-        # Plot reduced pulses
-        times = np.array([p.time for p in detector.pulses])
-        areas = np.array([p.area for p in detector.pulses])
-        ax.plot(times, areas, 'r.', markersize=2, label='Detected Pulses')
+        # Plot peak points
+        ax.plot(detector.pulse_times, detector.pulse_amplitudes, 'r.', 
+                markersize=8, label='Detected Peaks')
+        
+        # Plot pulse areas as stems
+        for pulse in detector.pulses:
+            ax.plot([pulse.time, pulse.time], [0, pulse.area/pulse.width], 
+                   'r-', alpha=0.3, linewidth=1)
     
     # Plot threshold level
-    ax.axhline(y=detector.threshold, color='g', linestyle='--', 
+    ax.axhline(y=detector.threshold, color='r', linestyle='--', 
                alpha=0.5, label='Threshold')
+    ax.axhline(y=0, color='k', linestyle='-', alpha=0.2)
 
     ax.set_xlabel('Time (ms)')
     ax.legend(loc='upper right')

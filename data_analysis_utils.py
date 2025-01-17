@@ -58,6 +58,36 @@ def rolling_baseline(data, window_size=1000, quantile=0.1):
     """
     return data.rolling(window=window_size, center=True).quantile(quantile)
 
+def hl_envelopes_idx(s, dmin=1, dmax=1, split=False):
+    """
+    Input :
+    s: 1d-array, data signal from which to extract high and low envelopes
+    dmin, dmax: int, optional, size of chunks, use this if the size of the input signal is too big
+    split: bool, optional, if True, split the signal in half along its mean, might help to generate the envelope in some cases
+    Output :
+    lmin,lmax : high/low envelope idx of input signal s
+    """
+
+    # locals min      
+    lmin = (np.diff(np.sign(np.diff(s))) > 0).nonzero()[0] + 1 
+    # locals max
+    lmax = (np.diff(np.sign(np.diff(s))) < 0).nonzero()[0] + 1 
+    
+    if split:
+        # s_mid is zero if s centered around x-axis or more generally mean of signal
+        s_mid = np.mean(s) 
+        # pre-sorting of locals min based on relative position with respect to s_mid 
+        lmin = lmin[s[lmin]<s_mid]
+        # pre-sorting of local max based on relative position with respect to s_mid 
+        lmax = lmax[s[lmax]>s_mid]
+
+    # global min of dmin-chunks of locals min 
+    lmin = lmin[[i+np.argmin(s[lmin[i:i+dmin]]) for i in range(0,len(lmin),dmin)]]
+    # global max of dmax-chunks of locals max 
+    lmax = lmax[[i+np.argmax(s[lmax[i:i+dmax]]) for i in range(0,len(lmax),dmax)]]
+    
+    return lmin,lmax
+
 #===========================================================================================================
 
 
@@ -290,7 +320,7 @@ class Photons:
         self.threshold = self.std_dev * threshold_multiplier
         
     def _detect_pulses(self) -> None:
-        """Detect pulses above threshold in filtered signal."""
+        """Detect pulses using peak finding on filtered signal."""
         # Apply pulse smoothing filter to reduce high-frequency noise
         if self.pulse_filter_type == 'gaussian':
             filtered_signal = fast_gaussian_filter(self.baseline_subtracted, 
@@ -305,46 +335,50 @@ class Photons:
         else:
             filtered_signal = self.baseline_subtracted
             
-        # Detect pulses above threshold in filtered signal
-        mask = filtered_signal > self.threshold
+        # Store filtered signal for visualization
+        self.filtered_signal = filtered_signal
+            
+        # Find peaks in filtered signal above threshold
+        peaks, properties = signal.find_peaks(filtered_signal, 
+                                            height=self.threshold,
+                                            distance=int(self.pulse_filter_value/2))
         
-        # Get amplitudes from baseline-subtracted signal for true pulse heights
-        self.pulse_amplitudes = self.baseline_subtracted[mask]
-        self.pulse_times = self.times[mask]
+        # Store peak information
+        self.pulse_times = self.times[peaks]
+        self.pulse_amplitudes = filtered_signal[peaks]
+        self.pulse_indices = peaks
         
     def reduce_pulses(self, max_gap: Optional[float] = None) -> None:
-        """Combine adjacent pulse points into single pulses.
+        """Process detected peaks into pulse objects.
         
         Args:
-            max_gap: Maximum time gap (ms) between adjacent points to be considered 
-                    same pulse. Defaults to 1.5 * dt if None.
+            max_gap: Maximum time gap (ms) between points to be considered same pulse.
+                    Not used in peak-based detection.
         """
-        if max_gap is None:
-            max_gap = 1.5 * self.dt
-            
         self.pulses = []
-        i = 0
-        while i < len(self.pulse_times):
-            # Start new pulse
-            pulse_points = [i]
-            
-            # Add adjacent points
-            while (i < len(self.pulse_times) - 1 and 
-                   self.pulse_times[i + 1] - self.pulse_times[i] <= max_gap):
-                i += 1
-                pulse_points.append(i)
+        
+        # For each detected peak
+        for i, peak_idx in enumerate(self.pulse_indices):
+            # Find pulse boundaries (where signal crosses zero or changes direction)
+            left_idx = peak_idx
+            while left_idx > 0 and self.filtered_signal[left_idx-1] > 0:
+                left_idx -= 1
                 
-            # Create pulse object
-            times = self.pulse_times[pulse_points]
-            amplitudes = self.pulse_amplitudes[pulse_points]
+            right_idx = peak_idx
+            while right_idx < len(self.filtered_signal)-1 and self.filtered_signal[right_idx+1] > 0:
+                right_idx += 1
             
+            # Get pulse region data
+            pulse_times = self.times[left_idx:right_idx+1]
+            pulse_amplitudes = self.filtered_signal[left_idx:right_idx+1]
+            
+            # Create pulse object
             pulse = PhotonPulse(
-                time=np.mean(times),
-                area=np.sum(amplitudes),
-                width=times[-1] - times[0]
+                time=self.times[peak_idx],  # Time at peak
+                area=np.trapz(pulse_amplitudes, pulse_times),  # Proper integration
+                width=pulse_times[-1] - pulse_times[0]  # Full width of pulse
             )
             self.pulses.append(pulse)
-            i += 1
             
     @property
     def pulse_count(self) -> int:
