@@ -298,8 +298,8 @@ class Photons:
                  tarr: NDArray[np.float64], 
                  data_array: NDArray[np.float64], 
                  min_timescale: float = 0.5e-3,
-                 tsh_mult: list[int] = [6, 100],
-                 savgol_window: int = 51,
+                 tsh_mult: list[int] = [9, 100],
+                 savgol_window: int = 31,
                  savgol_order: int = 3,
                  downsample_rate: Optional[int] = None):
         """Initialize photon pulse detector.
