@@ -85,7 +85,7 @@ def process_shot(date, file_number, position, monitor_idx=1):
     _, x_pos, y_pos, window_width, window_height = select_monitor(monitor_idx=monitor_idx, window_scale=(0.2, 0.2))
 
     # Read X-ray data
-    base_dir = os.path.join("E:", "x-ray", date)
+    base_dir = os.path.join("F:", "x-ray", date)
     xray_data = None
     tarr_x = None
     for channel in ["2", "3"]:
@@ -99,22 +99,25 @@ def process_shot(date, file_number, position, monitor_idx=1):
         raise FileNotFoundError("Required X-ray data files not found")
         
     # Process X-ray data
-    time_ms = tarr_x * 1000  # Convert to milliseconds
-    detector = Photons(time_ms, 
-                      xray_data,
-                      threshold_multiplier=5,
-                      baseline_filter_value=10001,
-                      pulse_filter_value=51,
-                      baseline_filter_type='None',
-                      pulse_filter_type='savgol')
+    detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.0005,tsh_mult=[9, 150])
     detector.reduce_pulses()
     
     # Plot 1: Original signal and baseline
-    plot_original_and_baseline(time_ms, xray_data, detector, ax1)
+    ax1.plot(detector.tarr_ds, detector.data_ds, label='Original')
+    ax1.plot(detector.tarr_ds, detector.baseline, label='Baseline')
+    ax1.set_xlabel('Time (ms)')
+    ax1.set_ylabel('Signal (V)')
+    ax1.legend(loc='upper right')
     ax1.set_title('Original Signal and Baseline')
     
     # Plot 2: Baseline-subtracted signal with pulses
-    plot_subtracted_signal(time_ms, xray_data, None, detector, ax2)  # pulse_times not needed
+    ax2.plot(detector.tarr_ds, detector.baseline_subtracted)
+    ax2.axhline(y=detector.lower_threshold, color='g', linestyle='--', label='Lower Threshold')
+    ax2.axhline(y=detector.upper_threshold, color='r', linestyle='--', label='Upper Threshold')
+    ax2.scatter(detector.pulse_times, detector.pulse_amplitudes, color='red', label='Detected Pulses')
+    ax2.set_xlabel('Time (ms)')
+    ax2.set_ylabel('Signal (V)')
+    ax2.legend(loc='upper right')
     ax2.set_title('Baseline-subtracted Signal with Detected Pulses')
     
     # Get pulse data for counts
@@ -122,10 +125,10 @@ def process_shot(date, file_number, position, monitor_idx=1):
     
     # Calculate photon counts per bin
     bin_width_ms = 0.2
-    bin_centers, counts = counts_per_bin(pulse_times, pulse_areas, bin_width_ms)
+    bin_centers, counts = counts_per_bin(pulse_times, pulse_areas, bin_width_ms, amplitude_max=0.05)
     
     # Read Bdot data
-    base_dir = os.path.join("E:", "Bdot", date)
+    base_dir = os.path.join("F:", "Bdot", date)
     By_P21 = None
     tarr_B = None
     for channel in ["1", "2", "3"]:
@@ -137,7 +140,7 @@ def process_shot(date, file_number, position, monitor_idx=1):
     if By_P21 is not None and tarr_B is not None:
         # Calculate STFT
         freq_arr, fft_arr, _, _ = calculate_stft(
-            tarr_B, By_P21, 
+            tarr_B, By_P21,
             samples_per_fft=500000, 
             overlap_fraction=0.01, 
             window='hanning', 
@@ -176,4 +179,3 @@ if __name__ == "__main__":
 
     print("\nScript execution completed")    
     plt.show()
-

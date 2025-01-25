@@ -89,15 +89,14 @@ def hl_envelopes_idx(s, dmin=1, dmax=1, split=False):
     return lmin,lmax
 
 #===========================================================================================================
-def analyze_downsample_options(data, tarr, window_length=51, polyorder=3, min_timescale_ms=1e-3):
+def analyze_downsample_options(data, tarr, filtered_data, min_timescale_ms=1e-3, verbose=False):
     """
     Analyze different downsample rates and their effect on filtered data.
     
     Args:
-        data: Input signal array
-        times: Time array in milliseconds
-        window_length: Savitzky-Golay filter window length
-        polyorder: Savitzky-Golay filter polynomial order
+        data: Original signal array
+        tarr: Time array in milliseconds
+        filtered_data: Filtered signal array
         min_timescale_ms: Minimum timescale to preserve in milliseconds
     
     Returns:
@@ -107,47 +106,43 @@ def analyze_downsample_options(data, tarr, window_length=51, polyorder=3, min_ti
     dt = tarr[1] - tarr[0]
     min_samples = min_timescale_ms / dt  # minimum samples needed
     
-    # Original filtered data
-    filtered_orig = signal.savgol_filter(data, window_length, polyorder)
-    
     # Try different downsample rates
     rates = [2, 5, 10, 20, 50]
     errors = []
-    
-    print(f"\nAnalyzing downsample rates (minimum {min_samples:.1e} samples needed for {min_timescale_ms:.1e} ms features):")
 
+    if verbose:
+        print(f"\nAnalyzing downsample rates (minimum {min_samples:.1e} samples needed for {min_timescale_ms:.1e} ms features):")
 
-    
     for rate in rates:
         # Skip rates that would undersample the minimum timescale
         if rate > min_samples/2:  # Nyquist criterion
             print(f"Rate {rate:2d}: Too high for {min_timescale_ms:.1e} ms features")
             continue
             
-        # Downsample, filter, then upsample
-        downsampled = data[::rate]
-        filtered_down = signal.savgol_filter(downsampled, 
-                                    max(3, window_length//rate), 
-                                    min(polyorder, (window_length//rate)-1))
-        # Interpolate back to original size
+        # Downsample filtered data
+        filtered_down = filtered_data[::rate]
+        
+        # Interpolate back to original size for comparison
         filtered_up = np.interp(np.arange(len(data)), 
-                              np.arange(len(downsampled))*rate, 
+                              np.arange(len(filtered_down))*rate, 
                               filtered_down)
         
-        # Compare with original
-        error = np.abs(filtered_orig - filtered_up).mean()
+        # Compare with original filtered data
+        error = np.abs(filtered_data - filtered_up).mean()
         errors.append((rate, error))
-        print(f"Rate {rate:2d}: Mean error = {error:.2e}, Samples in min_timescale = {min_samples/rate:.1f}")
+        if verbose:
+            print(f"Rate {rate:2d}: Mean error = {error:.2e}, Samples in min_timescale = {min_samples/rate:.1f}")
     
     if errors:
         # Find best rate that preserves features
         best_rate = min(errors, key=lambda x: x[1])[0]
-        print(f"\nRecommended downsample rate: {best_rate}")
+        if verbose:
+            print(f"\nRecommended downsample rate: {best_rate}")
         return best_rate
     else:
-        print("\nNo suitable downsample rates found for given timescale")
+        if verbose:
+            print("\nNo suitable downsample rates found for given timescale")
         return 1
-    
 
 #===========================================================================================================
 #===========================================================================================================
@@ -294,27 +289,27 @@ class Photons:
         pulses (list[PhotonPulse]): Detected photon pulses
     """
     
-    def __init__(self, 
+    def __init__(self,
                  tarr: NDArray[np.float64], 
                  data_array: NDArray[np.float64], 
                  min_timescale: float = 0.5e-3,
                  tsh_mult: list[int] = [9, 100],
                  savgol_window: int = 31,
                  savgol_order: int = 3,
-                 downsample_rate: Optional[int] = None):
+                 distance_mult: float = 0.002,
+                 downsample_rate: Optional[int] = None,
+                 debug: bool = False):
         """Initialize photon pulse detector.
         
         Args:
-            times: Time array in seconds
+            tarr: Time array in seconds
             data_array: Signal amplitude array
-            min_timescale_ms: Minimum timescale to preserve
-            threshold_multiplier: Number of standard deviations above noise for detection
+            min_timescale: Minimum timescale to preserve in seconds
+            tsh_mult: [lower, upper] threshold multipliers
             savgol_window: Window length for Savitzky-Golay filter
             savgol_order: Polynomial order for Savitzky-Golay filter
             downsample_rate: Optional manual downsample rate. If None, will be automatically determined.
-        
-        Raises:
-            ValueError: If input arrays have different lengths or are empty
+            debug: Whether to show debug plots
         """
         if len(tarr) != len(data_array):
             raise ValueError("Time and data arrays must have same length")
@@ -328,7 +323,8 @@ class Photons:
         self.min_timescale = min_timescale * 1000  # Convert to ms
         self.upths_mult = tsh_mult[1]
         self.lowths_mult = tsh_mult[0]
-        
+        self.debug = debug
+
         # Initial signal filtering
         print("Applying Savitzky-Golay filter...")
         self.filtered_data = signal.savgol_filter(self.data, window_length=savgol_window, polyorder=savgol_order)
@@ -336,16 +332,19 @@ class Photons:
         # Determine downsample rate if not provided
         if downsample_rate is None:
             print("Analyzing optimal downsample rate...")
-            downsample_rate = self._analyze_downsample_options(self.min_timescale)
+            downsample_rate = analyze_downsample_options(self.data, self.tarr, self.filtered_data,
+                                                       min_timescale_ms=self.min_timescale,
+                                                       verbose=self.debug)
             print(f"Downsample rate: {downsample_rate}")
         self.downsample_rate = downsample_rate
 
-        # Downsample data
+        # Downsample filtered data
         self.tarr_ds = self.tarr[::downsample_rate]
         self.data_ds = self.filtered_data[::downsample_rate]
         self.dt = (self.tarr_ds[1] - self.tarr_ds[0])
-        self.min_distance = int(self.min_timescale / self.dt * 0.01)
-        print(f"Min distance: {self.min_distance}")
+        self.min_distance = int(self.min_timescale / self.dt * distance_mult)
+        if self.debug:
+            print(f"Min distance: {self.min_distance}")
         
         print("Computing baseline...")
         self._compute_baseline()
@@ -353,33 +352,6 @@ class Photons:
         self._compute_thresholds()
         print("Detecting pulses...")
         self._detect_pulses()
-        
-    def _analyze_downsample_options(self, min_timescale_ms: float) -> int:
-        """Analyze different downsample rates and their effect on filtered data."""
-        
-        min_samples = min_timescale / self.dt
-        
-        rates = [2, 5, 10, 20, 50]
-        errors = []
-        
-        for rate in rates:
-            if rate > min_samples/2:  # Nyquist criterion
-                continue
-                
-            downsampled = self.filtered_data[::rate]
-            filtered_down = signal.savgol_filter(downsampled, 
-                                               max(3, 51//rate), 
-                                               min(3, (51//rate)-1))
-            filtered_up = np.interp(np.arange(len(self.filtered_data)), 
-                                  np.arange(len(downsampled))*rate, 
-                                  filtered_down)
-            
-            error = np.abs(self.filtered_data - filtered_up).mean()
-            errors.append((rate, error))
-        
-        if errors:
-            return min(errors, key=lambda x: x[1])[0]
-        return 1
         
     def _compute_baseline(self) -> None:
         """Compute baseline using envelope detection."""
@@ -395,7 +367,7 @@ class Photons:
         self.baseline = np.interp(np.arange(len(self.data_ds)), harr, self.data_ds[harr]) - noise_amplitude
         self.baseline_subtracted = self.baseline - self.data_ds
 
-        if True:
+        if self.debug:
             plt.figure()
             plt.plot(self.tarr_ds, self.data_ds, label='Original')
             plt.plot(self.tarr_ds, self.baseline, label='Baseline')
@@ -434,7 +406,7 @@ class Photons:
         self.pulse_times = self.tarr_ds[self.peak_indices]
         self.pulse_amplitudes = self.baseline_subtracted[self.peak_indices]
 
-        if True:
+        if self.debug:
             plt.figure()
             plt.plot(self.tarr_ds, self.baseline_subtracted)
             plt.axhline(y=self.lower_threshold, color='g', linestyle='--', label='Lower Threshold')
