@@ -50,11 +50,11 @@ def rolling_baseline(data, window_size=1000, quantile=0.1):
     """
     Estimate the baseline using a rolling window and a lower quantile.
     Args:
-        signal: Input signal as a pandas Series or numpy array
+        data: pandas Series or numpy array
         window_size: Size of the rolling window (in samples)
         quantile: Quantile for baseline estimation (e.g., 0.1 for the 10th percentile)
     Returns:
-        baseline: Smoothed baseline of the signal as a pandas Series
+        baseline: Smoothed baseline
     """
     return data.rolling(window=window_size, center=True).quantile(quantile)
 
@@ -89,7 +89,68 @@ def hl_envelopes_idx(s, dmin=1, dmax=1, split=False):
     return lmin,lmax
 
 #===========================================================================================================
+def analyze_downsample_options(data, tarr, window_length=51, polyorder=3, min_timescale_ms=1e-3):
+    """
+    Analyze different downsample rates and their effect on filtered data.
+    
+    Args:
+        data: Input signal array
+        times: Time array in milliseconds
+        window_length: Savitzky-Golay filter window length
+        polyorder: Savitzky-Golay filter polynomial order
+        min_timescale_ms: Minimum timescale to preserve in milliseconds
+    
+    Returns:
+        int: Recommended downsample rate
+    """
+    # Calculate sampling rate
+    dt = tarr[1] - tarr[0]
+    min_samples = min_timescale_ms / dt  # minimum samples needed
+    
+    # Original filtered data
+    filtered_orig = signal.savgol_filter(data, window_length, polyorder)
+    
+    # Try different downsample rates
+    rates = [2, 5, 10, 20, 50]
+    errors = []
+    
+    print(f"\nAnalyzing downsample rates (minimum {min_samples:.1e} samples needed for {min_timescale_ms:.1e} ms features):")
 
+
+    
+    for rate in rates:
+        # Skip rates that would undersample the minimum timescale
+        if rate > min_samples/2:  # Nyquist criterion
+            print(f"Rate {rate:2d}: Too high for {min_timescale_ms:.1e} ms features")
+            continue
+            
+        # Downsample, filter, then upsample
+        downsampled = data[::rate]
+        filtered_down = signal.savgol_filter(downsampled, 
+                                    max(3, window_length//rate), 
+                                    min(polyorder, (window_length//rate)-1))
+        # Interpolate back to original size
+        filtered_up = np.interp(np.arange(len(data)), 
+                              np.arange(len(downsampled))*rate, 
+                              filtered_down)
+        
+        # Compare with original
+        error = np.abs(filtered_orig - filtered_up).mean()
+        errors.append((rate, error))
+        print(f"Rate {rate:2d}: Mean error = {error:.2e}, Samples in min_timescale = {min_samples/rate:.1f}")
+    
+    if errors:
+        # Find best rate that preserves features
+        best_rate = min(errors, key=lambda x: x[1])[0]
+        print(f"\nRecommended downsample rate: {best_rate}")
+        return best_rate
+    else:
+        print("\nNo suitable downsample rates found for given timescale")
+        return 1
+    
+
+#===========================================================================================================
+#===========================================================================================================
 
 def get_files_in_folder(folder_path, modified_date=None, omit_keyword=None):
     """
@@ -234,149 +295,183 @@ class Photons:
     """
     
     def __init__(self, 
-                 times: NDArray[np.float64], 
+                 tarr: NDArray[np.float64], 
                  data_array: NDArray[np.float64], 
-                 threshold_multiplier: float = 7.0,
-                 baseline_filter_value: float = 10001,
-                 pulse_filter_value: float = 11,
-                 baseline_filter_type: str = 'savgol',
-                 pulse_filter_type: str = 'savgol'):
+                 min_timescale: float = 0.5e-3,
+                 tsh_mult: list[int] = [6, 100],
+                 savgol_window: int = 51,
+                 savgol_order: int = 3,
+                 downsample_rate: Optional[int] = None):
         """Initialize photon pulse detector.
         
         Args:
-            times: Time array in milliseconds
+            times: Time array in seconds
             data_array: Signal amplitude array
-            threshold_multiplier: Number of standard deviations above baseline for detection
-            baseline_filter_value: Filter parameter for baseline - sigma for gaussian, cutoff for butterworth, window for savgol
-            pulse_filter_value: Filter parameter for pulse smoothing - sigma for gaussian, cutoff for butterworth, window for savgol
-            baseline_filter_type: Type of filter to use for baseline ('gaussian', 'butterworth', or 'savgol')
-            pulse_filter_type: Type of filter to use for pulse smoothing ('gaussian', 'butterworth', or 'savgol')
+            min_timescale_ms: Minimum timescale to preserve
+            threshold_multiplier: Number of standard deviations above noise for detection
+            savgol_window: Window length for Savitzky-Golay filter
+            savgol_order: Polynomial order for Savitzky-Golay filter
+            downsample_rate: Optional manual downsample rate. If None, will be automatically determined.
         
         Raises:
             ValueError: If input arrays have different lengths or are empty
         """
-        if len(times) != len(data_array):
+        if len(tarr) != len(data_array):
             raise ValueError("Time and data arrays must have same length")
-        if len(times) == 0:
+        if len(tarr) == 0:
             raise ValueError("Input arrays cannot be empty")
             
-        self.times = times
+        # Convert everything to milliseconds for consistency
+        self.tarr = tarr * 1000  # Convert to ms
         self.data = data_array
+        self.dt = (self.tarr[1] - self.tarr[0])
+        self.min_timescale = min_timescale * 1000  # Convert to ms
+        self.upths_mult = tsh_mult[1]
+        self.lowths_mult = tsh_mult[0]
         
-        # Ensure window lengths are odd for Savitzky-Golay filter
-        if baseline_filter_type == 'savgol':
-            self.baseline_filter_value = int(baseline_filter_value) // 2 * 2 + 1
-        else:
-            self.baseline_filter_value = baseline_filter_value
-            
-        if pulse_filter_type == 'savgol':
-            self.pulse_filter_value = int(pulse_filter_value) // 2 * 2 + 1
-        else:
-            self.pulse_filter_value = pulse_filter_value
-            
-        self.baseline_filter_type = baseline_filter_type
-        self.pulse_filter_type = pulse_filter_type
+        # Initial signal filtering
+        print("Applying Savitzky-Golay filter...")
+        self.filtered_data = signal.savgol_filter(self.data, window_length=savgol_window, polyorder=savgol_order)
         
-        # Calculate time step
-        self.dt = np.mean(np.diff(self.times))
+        # Determine downsample rate if not provided
+        if downsample_rate is None:
+            print("Analyzing optimal downsample rate...")
+            downsample_rate = self._analyze_downsample_options(self.min_timescale)
+            print(f"Downsample rate: {downsample_rate}")
+        self.downsample_rate = downsample_rate
 
+        # Downsample data
+        self.tarr_ds = self.tarr[::downsample_rate]
+        self.data_ds = self.filtered_data[::downsample_rate]
+        self.dt = (self.tarr_ds[1] - self.tarr_ds[0])
+        self.min_distance = int(self.min_timescale / self.dt * 0.01)
+        print(f"Min distance: {self.min_distance}")
+        
         print("Computing baseline...")
         self._compute_baseline()
-        print("Computing threshold...")
-        self._compute_threshold(threshold_multiplier)
+        print("Computing thresholds...")
+        self._compute_thresholds()
         print("Detecting pulses...")
         self._detect_pulses()
         
+    def _analyze_downsample_options(self, min_timescale_ms: float) -> int:
+        """Analyze different downsample rates and their effect on filtered data."""
+        
+        min_samples = min_timescale / self.dt
+        
+        rates = [2, 5, 10, 20, 50]
+        errors = []
+        
+        for rate in rates:
+            if rate > min_samples/2:  # Nyquist criterion
+                continue
+                
+            downsampled = self.filtered_data[::rate]
+            filtered_down = signal.savgol_filter(downsampled, 
+                                               max(3, 51//rate), 
+                                               min(3, (51//rate)-1))
+            filtered_up = np.interp(np.arange(len(self.filtered_data)), 
+                                  np.arange(len(downsampled))*rate, 
+                                  filtered_down)
+            
+            error = np.abs(self.filtered_data - filtered_up).mean()
+            errors.append((rate, error))
+        
+        if errors:
+            return min(errors, key=lambda x: x[1])[0]
+        return 1
+        
     def _compute_baseline(self) -> None:
-        """Compute baseline of the signal using the chosen filter."""
-        # Apply baseline filter to get the slow-varying baseline
-        if self.baseline_filter_type == 'gaussian':
-            self.baseline = fast_gaussian_filter(self.data, sigma=self.baseline_filter_value)
-        elif self.baseline_filter_type == 'butterworth':
-            self.baseline = low_pass_filter(self.data, self.baseline_filter_value)
-        elif self.baseline_filter_type == 'savgol':
-            self.baseline = signal.savgol_filter(self.data, 
-                                               window_length=self.baseline_filter_value, 
-                                               polyorder=3)
-        else:
-            # Take last 5% of data points for baseline calculation
-            n_points = len(self.data)
-            n1 = int(0.95 * n_points)
-            self.baseline = np.full_like(self.data, np.mean(self.data[n1:]))
+        """Compute baseline using envelope detection."""
+        
+        # Get upper envelope points
+        _, harr = hl_envelopes_idx(self.data_ds, dmin=1, dmax=self.min_distance, split=False)
+        
+        # Get noise amplitude from first 0.1% of data
+        noise_sample = self.data_ds[:int(len(self.data_ds)*0.001)]
+        noise_amplitude = (np.max(np.abs(noise_sample)) - np.min(np.abs(noise_sample))) / 2
+        
+        # Interpolate baseline using upper envelope points
+        self.baseline = np.interp(np.arange(len(self.data_ds)), harr, self.data_ds[harr]) - noise_amplitude
+        self.baseline_subtracted = self.baseline - self.data_ds
 
-        # Subtract baseline from signal
-        self.baseline_subtracted = self.data - self.baseline
+        if True:
+            plt.figure()
+            plt.plot(self.tarr_ds, self.data_ds, label='Original')
+            plt.plot(self.tarr_ds, self.baseline, label='Baseline')
+            # plt.plot(self.tarr_ds, self.baseline_subtracted, label='Baseline Subtracted')
+            plt.legend(loc='upper right')
+            plt.show()
         
-    def _compute_threshold(self, threshold_multiplier: float) -> None:
-        """Compute detection threshold based on signal standard deviation.
+    def _compute_thresholds(self) -> None:
+        """Compute detection thresholds based on noise statistics."""
+        # Use first 5% of data as noise sample
+        noise_sample = self.baseline_subtracted[:int(len(self.baseline_subtracted)*0.05)]
+        self.noise_mean = np.mean(noise_sample)
+        self.noise_std = np.std(noise_sample)
         
-        Args:
-            threshold_multiplier: Number of standard deviations for threshold
-        """
-        # Compute standard deviation from last 5% of baseline-subtracted data
-        n_points = len(self.baseline_subtracted)
-        n1 = int(0.95 * n_points)
-        self.std_dev = np.std(self.baseline_subtracted[n1:])
-        self.threshold = self.std_dev * threshold_multiplier
+        self.lower_threshold = self.noise_mean + self.lowths_mult * self.noise_std
+        self.upper_threshold = self.noise_mean + self.upths_mult * self.noise_std  # For detecting oversized pulses
         
     def _detect_pulses(self) -> None:
-        """Detect pulses using peak finding on filtered signal."""
-        # Apply pulse smoothing filter to reduce high-frequency noise
-        if self.pulse_filter_type == 'gaussian':
-            filtered_signal = fast_gaussian_filter(self.baseline_subtracted, 
-                                                sigma=self.pulse_filter_value)
-        elif self.pulse_filter_type == 'butterworth':
-            filtered_signal = low_pass_filter(self.baseline_subtracted, 
-                                           self.pulse_filter_value)
-        elif self.pulse_filter_type == 'savgol':
-            filtered_signal = signal.savgol_filter(self.baseline_subtracted,
-                                                window_length=self.pulse_filter_value,
-                                                polyorder=3)
-        else:
-            filtered_signal = self.baseline_subtracted
-            
-        # Store filtered signal for visualization
-        self.filtered_signal = filtered_signal
-            
-        # Find peaks in filtered signal above threshold
-        peaks, properties = signal.find_peaks(filtered_signal, 
-                                            height=self.threshold,
-                                            distance=int(self.pulse_filter_value/2))
+        """Detect pulses using signal_find_peaks."""
         
-        # Store peak information
-        self.pulse_times = self.times[peaks]
-        self.pulse_amplitudes = filtered_signal[peaks]
-        self.pulse_indices = peaks
+        # Find peaks above lower threshold
+        peak_indices, _ = signal.find_peaks(self.baseline_subtracted, 
+                                          height=self.lower_threshold,
+                                          distance=self.min_distance)
         
-    def reduce_pulses(self, max_gap: Optional[float] = None) -> None:
-        """Process detected peaks into pulse objects.
-        
-        Args:
-            max_gap: Maximum time gap (ms) between points to be considered same pulse.
-                    Not used in peak-based detection.
-        """
+        # Remove peaks that exceed upper threshold and nearby peaks
+        mask = np.ones(len(peak_indices), dtype=bool)
+        for i, idx in enumerate(peak_indices):
+            if self.baseline_subtracted[idx] > self.upper_threshold:
+                # Remove peaks within extended window around large peaks
+                nearby_mask = np.abs(peak_indices - idx) <= self.min_distance*20
+                mask[nearby_mask] = False
+                
+        # Apply mask to keep only valid peaks
+        self.peak_indices = peak_indices[mask]
+        self.pulse_times = self.tarr_ds[self.peak_indices]
+        self.pulse_amplitudes = self.baseline_subtracted[self.peak_indices]
+
+        if True:
+            plt.figure()
+            plt.plot(self.tarr_ds, self.baseline_subtracted)
+            plt.axhline(y=self.lower_threshold, color='g', linestyle='--', label='Lower Threshold')
+            plt.axhline(y=self.upper_threshold, color='r', linestyle='--', label='Upper Threshold')
+            plt.scatter(self.pulse_times, self.pulse_amplitudes, color='red')
+            plt.xlabel('Time (ms)')
+            plt.ylabel('Signal')
+            plt.title('Detected Pulses')
+            plt.legend(loc='upper right')
+            plt.show()
+
+    def reduce_pulses(self) -> None:
+        """Process detected peaks into pulse objects."""
         self.pulses = []
         
         # For each detected peak
-        for i, peak_idx in enumerate(self.pulse_indices):
-            # Find pulse boundaries (where signal crosses zero or changes direction)
+        for i, peak_idx in enumerate(self.peak_indices):
+            # Find pulse boundaries (where signal crosses noise mean or changes direction)
             left_idx = peak_idx
-            while left_idx > 0 and self.filtered_signal[left_idx-1] > 0:
+            while (left_idx > 0 and 
+                   self.baseline_subtracted[left_idx-1] > self.noise_mean):
                 left_idx -= 1
                 
             right_idx = peak_idx
-            while right_idx < len(self.filtered_signal)-1 and self.filtered_signal[right_idx+1] > 0:
+            while (right_idx < len(self.baseline_subtracted)-1 and 
+                   self.baseline_subtracted[right_idx+1] > self.noise_mean):
                 right_idx += 1
             
             # Get pulse region data
-            pulse_times = self.times[left_idx:right_idx+1]
-            pulse_amplitudes = self.filtered_signal[left_idx:right_idx+1]
+            pulse_times = self.tarr_ds[left_idx:right_idx+1]
+            pulse_amplitudes = self.baseline_subtracted[left_idx:right_idx+1]
             
             # Create pulse object
             pulse = PhotonPulse(
-                time=self.times[peak_idx],  # Time at peak
-                area=np.trapz(pulse_amplitudes, pulse_times),  # Proper integration
-                width=pulse_times[-1] - pulse_times[0]  # Full width of pulse
+                time=self.tarr_ds[peak_idx],
+                area=np.trapz(pulse_amplitudes, pulse_times),
+                width=pulse_times[-1] - pulse_times[0]
             )
             self.pulses.append(pulse)
             
@@ -399,7 +494,7 @@ class Photons:
         return times, areas
 
 #===============================================================================================================================================
-def calculate_stft(time_array, signal, samples_per_fft, overlap_fraction, window, freq_min=None, freq_max=None):
+def calculate_stft(time_array, data_arr, samples_per_fft, overlap_fraction, window, freq_min=None, freq_max=None):
     # Calculate basic parameters
     dt = time_array[1] - time_array[0]  # Time step
     
@@ -420,14 +515,14 @@ def calculate_stft(time_array, signal, samples_per_fft, overlap_fraction, window
         win = np.ones(samples_per_fft)
     
     # Pad signal if necessary
-    pad_length = (samples_per_fft - len(signal)) % hop
+    pad_length = (samples_per_fft - len(data_arr)) % hop
     if pad_length > 0:
-        signal = np.pad(signal, (0, pad_length), mode='constant')
+        data_arr = np.pad(data_arr, (0, pad_length), mode='constant')
     
     # Create strided array of segments using numpy's stride tricks
-    shape = (samples_per_fft, (len(signal) - samples_per_fft) // hop + 1)
-    strides = (signal.strides[0], signal.strides[0] * hop)
-    segments = np.lib.stride_tricks.as_strided(signal, shape=shape, strides=strides)
+    shape = (samples_per_fft, (len(data_arr) - samples_per_fft) // hop + 1)
+    strides = (data_arr.strides[0], data_arr.strides[0] * hop)
+    segments = np.lib.stride_tricks.as_strided(data_arr, shape=shape, strides=strides)
     
     # Apply window to all segments at once
     segments = segments.T * win
