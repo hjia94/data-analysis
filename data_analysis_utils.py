@@ -359,8 +359,8 @@ class Photons:
         # Get upper envelope points
         _, harr = hl_envelopes_idx(self.data_ds, dmin=1, dmax=self.min_distance, split=False)
         
-        # Get noise amplitude from first 0.1% of data
-        noise_sample = self.data_ds[:int(len(self.data_ds)*0.001)]
+        # Get noise amplitude from last 0.1% of data
+        noise_sample = self.data_ds[-int(len(self.data_ds)*0.001):]
         noise_amplitude = (np.max(np.abs(noise_sample)) - np.min(np.abs(noise_sample))) / 2
         
         # Interpolate baseline using upper envelope points
@@ -466,17 +466,68 @@ class Photons:
         return times, areas
 
 #===============================================================================================================================================
-def calculate_stft(time_array, data_arr, samples_per_fft, overlap_fraction, window, freq_min=None, freq_max=None):
+def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, window='hanning', freq_min=None, freq_max=None):
+    """
+    Calculate Short-Time Fourier Transform with specified number of frequency bins.
+    
+    Args:
+        time_array: Array of time points
+        data_arr: Signal data array
+        freq_bins: Number of frequency bins desired between freq_min and freq_max
+        overlap_fraction: Fraction of overlap between consecutive FFT windows
+        window: Window function ('hanning', 'blackman', or None)
+        freq_min: Minimum frequency to include in output (Hz)
+        freq_max: Maximum frequency to include in output (Hz)
+        
+    Returns:
+        freq: Frequency array
+        stft_matrix: STFT magnitude matrix
+        stft_time: Time array corresponding to each FFT segment
+        freq_resolution: Frequency resolution of the STFT
+    """
     # Calculate basic parameters
     dt = time_array[1] - time_array[0]  # Time step
+    fs = 1.0 / dt  # Sampling frequency
+    
+    # Calculate samples_per_fft based on desired frequency bins
+    if freq_min is not None and freq_max is not None:
+        # Calculate samples needed for desired frequency resolution
+        desired_freq_resolution = (freq_max - freq_min) / freq_bins
+        samples_per_fft = int(fs / desired_freq_resolution)
+        
+        # Ensure samples_per_fft is large enough to cover the frequency range
+        nyquist_freq = fs / 2
+        if freq_max > nyquist_freq:
+            print(f"Warning: Maximum frequency {freq_max/1e6:.1f} MHz exceeds Nyquist frequency {nyquist_freq/1e6:.1f} MHz")
+            freq_max = nyquist_freq
+        
+        # Minimum samples needed for the requested frequency range
+        min_samples_needed = int(2 * fs / (freq_max - freq_min) * freq_bins)
+        
+        if samples_per_fft < min_samples_needed:
+            samples_per_fft = min_samples_needed
+            print(f"Increased samples_per_fft to {samples_per_fft} to accommodate frequency range")
+        
+        # Ensure samples_per_fft is even (for FFT efficiency)
+        if samples_per_fft % 2 != 0:
+            samples_per_fft += 1
+            
+        # Ensure samples_per_fft is not too large
+        max_samples = len(data_arr) // 2
+        if samples_per_fft > max_samples:
+            samples_per_fft = max_samples
+            print(f"Warning: Reduced samples_per_fft to {samples_per_fft} due to data length constraints")
+    else:
+        # Default to a reasonable fraction of the data length if no freq range specified
+        samples_per_fft = min(1024, len(data_arr) // 4)
     
     # Calculate overlap and hop size
     overlap = int(samples_per_fft * overlap_fraction)
     hop = samples_per_fft - overlap
     
-    # Calculate resolutions
+    # Calculate time resolution
     time_resolution = dt * hop  # Time between successive FFTs
-    freq_resolution = 1.0 / (dt * samples_per_fft)  # Frequency resolution
+    freq_resolution = fs / samples_per_fft  # Frequency resolution
     
     # Create window function
     if window.lower() == 'hanning':
@@ -487,12 +538,25 @@ def calculate_stft(time_array, data_arr, samples_per_fft, overlap_fraction, wind
         win = np.ones(samples_per_fft)
     
     # Pad signal if necessary
-    pad_length = (samples_per_fft - len(data_arr)) % hop
+    pad_length = (samples_per_fft - len(data_arr) % hop) % hop
     if pad_length > 0:
         data_arr = np.pad(data_arr, (0, pad_length), mode='constant')
+        # Also pad the time array (extrapolate time values)
+        if len(time_array) < len(data_arr):
+            dt = time_array[1] - time_array[0]
+            extra_times = np.arange(len(time_array), len(data_arr)) * dt + time_array[-1]
+            time_array = np.concatenate([time_array, extra_times])
+    
+    # Calculate indices of the start of each segment
+    num_segments = (len(data_arr) - samples_per_fft) // hop + 1
+    segment_indices = np.arange(num_segments) * hop
+    
+    # Calculate the middle time point for each segment
+    mid_indices = segment_indices + samples_per_fft // 2
+    stft_time = time_array[mid_indices]
     
     # Create strided array of segments using numpy's stride tricks
-    shape = (samples_per_fft, (len(data_arr) - samples_per_fft) // hop + 1)
+    shape = (samples_per_fft, num_segments)
     strides = (data_arr.strides[0], data_arr.strides[0] * hop)
     segments = np.lib.stride_tricks.as_strided(data_arr, shape=shape, strides=strides)
     
@@ -511,10 +575,18 @@ def calculate_stft(time_array, data_arr, samples_per_fft, overlap_fraction, wind
     # Apply frequency mask if specified
     if freq_min is not None and freq_max is not None:
         freq_mask = (freq >= freq_min) & (freq <= freq_max)
+        if not any(freq_mask):
+            print("Warning: No frequencies in the requested range. Check your frequency limits and sampling rate.")
+            # Use all available frequencies as fallback
+            freq_mask = np.ones_like(freq, dtype=bool)
         freq = freq[freq_mask]
         stft_matrix = stft_matrix[:, freq_mask]
+    
+    print(f"STFT calculated with {samples_per_fft} samples per FFT window")
+    print(f"Frequency range: {freq[0]/1e6:.1f} MHz to {freq[-1]/1e6:.1f} MHz")
+    print(f"Generated {len(stft_time)} time points for {stft_matrix.shape[0]} FFT segments")
 
-    return  freq, stft_matrix, time_resolution, freq_resolution
+    return freq, stft_matrix, stft_time
 #===============================================================================================================================================
 # def get_Bdot_calibration(filepath):
 #     data_dict = read_NA_data(filepath)

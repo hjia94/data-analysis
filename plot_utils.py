@@ -113,7 +113,7 @@ def select_monitor(monitor_idx: Optional[int] = None,
     window_width = int(monitor.width * width_scale)
     window_height = int(monitor.height * height_scale)
     
-    # Calculate centered position
+    # Calculate centered position on the monitor
     x_pos = monitor.x + (monitor.width - window_width) // 2
     y_pos = monitor.y + (monitor.height - window_height) // 2
     
@@ -437,9 +437,9 @@ def plot_stft_wt_photon_counts(tarr, fft_arr, freq_arr, bin_centers, counts, fig
     
     # Add counts overlay
     ax_twin = ax.twinx()
-    ax_twin.set_position([pos.x0, pos.y0, pos.width * 0.9, pos.height])
-    ax_twin.plot(bin_centers, counts, 'w-', linewidth=1, alpha=0.7)
+    ax_twin.plot(bin_centers, counts, 'w-', linewidth=1.5, alpha=0.7)
     ax_twin.set_yticks([])
+    ax_twin.set_ylim(0, np.average(counts))
     
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Frequency (MHz)')
