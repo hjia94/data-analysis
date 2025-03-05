@@ -439,7 +439,7 @@ def plot_stft_wt_photon_counts(tarr, fft_arr, freq_arr, bin_centers, counts, fig
     ax_twin = ax.twinx()
     ax_twin.plot(bin_centers, counts, 'w-', linewidth=1.5, alpha=0.7)
     ax_twin.set_yticks([])
-    ax_twin.set_ylim(0, np.average(counts))
+    ax_twin.set_ylim(0, np.max(counts))
     
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Frequency (MHz)')

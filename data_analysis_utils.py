@@ -292,7 +292,7 @@ class Photons:
     def __init__(self,
                  tarr: NDArray[np.float64], 
                  data_array: NDArray[np.float64], 
-                 min_timescale: float = 0.5e-3,
+                 min_timescale: float = 5e-5,
                  tsh_mult: list[int] = [9, 100],
                  savgol_window: int = 31,
                  savgol_order: int = 3,
@@ -342,9 +342,8 @@ class Photons:
         self.tarr_ds = self.tarr[::downsample_rate]
         self.data_ds = self.filtered_data[::downsample_rate]
         self.dt = (self.tarr_ds[1] - self.tarr_ds[0])
-        self.min_distance = int(self.min_timescale / self.dt * distance_mult)
-        if self.debug:
-            print(f"Min distance: {self.min_distance}")
+        self.baseline_dis = int(self.min_timescale / self.dt * distance_mult)
+        self.peak_detect_dis = int(self.min_timescale / self.dt)
         
         print("Computing baseline...")
         self._compute_baseline()
@@ -357,7 +356,7 @@ class Photons:
         """Compute baseline using envelope detection."""
         
         # Get upper envelope points
-        _, harr = hl_envelopes_idx(self.data_ds, dmin=1, dmax=self.min_distance, split=False)
+        _, harr = hl_envelopes_idx(self.data_ds, dmin=1, dmax=self.baseline_dis, split=False)
         
         # Get noise amplitude from last 0.1% of data
         noise_sample = self.data_ds[-int(len(self.data_ds)*0.001):]
@@ -391,14 +390,14 @@ class Photons:
         # Find peaks above lower threshold
         peak_indices, _ = signal.find_peaks(self.baseline_subtracted, 
                                           height=self.lower_threshold,
-                                          distance=self.min_distance)
+                                          distance=self.peak_detect_dis)
         
         # Remove peaks that exceed upper threshold and nearby peaks
         mask = np.ones(len(peak_indices), dtype=bool)
         for i, idx in enumerate(peak_indices):
             if self.baseline_subtracted[idx] > self.upper_threshold:
                 # Remove peaks within extended window around large peaks
-                nearby_mask = np.abs(peak_indices - idx) <= self.min_distance*20
+                nearby_mask = np.abs(peak_indices - idx) <= self.peak_detect_dis*20
                 mask[nearby_mask] = False
                 
         # Apply mask to keep only valid peaks
@@ -446,7 +445,48 @@ class Photons:
                 width=pulse_times[-1] - pulse_times[0]
             )
             self.pulses.append(pulse)
+
+    def counts_per_bin(self, bin_width_ms=0.2, amplitude_min=None, amplitude_max=None):
+        """
+        Calculate number of pulses in each time bin with optional amplitude filtering.
+        
+        Args:
+            bin_width_ms (float): Width of time bins in milliseconds
+            amplitude_min (float, optional): Minimum amplitude threshold for counting pulses
+            amplitude_max (float, optional): Maximum amplitude threshold for counting pulses
+        Returns:
+            tuple: (bin_centers, counts) arrays where counts shows number of pulses in each bin
+        """
+        
+        pulse_times, pulse_areas = self.get_pulse_arrays()
+
+        # Apply amplitude thresholds if specified
+        if amplitude_min is not None or amplitude_max is not None:
+            # Initialize mask as all True
+            mask = np.ones_like(pulse_times, dtype=bool)
             
+            # Apply min threshold if specified
+            if amplitude_min is not None:
+                mask &= (pulse_areas >= amplitude_min)
+                
+            # Apply max threshold if specified
+            if amplitude_max is not None:
+                mask &= (pulse_areas <= amplitude_max)
+                
+            pulse_times = pulse_times[mask]
+        
+        # Create time bins
+        time_min = min(pulse_times)
+        time_max = max(pulse_times)
+        n_bins = int((time_max - time_min) / bin_width_ms) + 1
+        bins = np.linspace(time_min, time_max, n_bins)
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+        
+        # Count pulses in each bin
+        counts, _ = np.histogram(pulse_times, bins=bins)
+        
+        return bin_centers, counts
+
     @property
     def pulse_count(self) -> int:
         """Return number of detected pulses."""
