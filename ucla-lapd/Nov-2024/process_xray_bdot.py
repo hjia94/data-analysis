@@ -29,48 +29,7 @@ from plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original
 #===========================================================================================================
 #===========================================================================================================
 
-def counts_per_bin(pulse_times, pulse_areas, bin_width_ms=0.2, amplitude_min=None, amplitude_max=None):
-    """
-    Calculate number of pulses in each time bin with optional amplitude filtering.
-    
-    Args:
-        pulse_times (np.ndarray): Array of pulse arrival times in milliseconds
-        pulse_areas (np.ndarray): Array of pulse areas/amplitudes
-        bin_width_ms (float): Width of time bins in milliseconds
-        amplitude_min (float, optional): Minimum amplitude threshold for counting pulses
-        amplitude_max (float, optional): Maximum amplitude threshold for counting pulses
-    
-    Returns:
-        tuple: (bin_centers, counts) arrays where counts shows number of pulses in each bin
-    """
-    # Apply amplitude thresholds if specified
-    if amplitude_min is not None or amplitude_max is not None:
-        # Initialize mask as all True
-        mask = np.ones_like(pulse_times, dtype=bool)
-        
-        # Apply min threshold if specified
-        if amplitude_min is not None:
-            mask &= (pulse_areas >= amplitude_min)
-            
-        # Apply max threshold if specified
-        if amplitude_max is not None:
-            mask &= (pulse_areas <= amplitude_max)
-            
-        pulse_times = pulse_times[mask]
-    
-    # Create time bins
-    time_min = min(pulse_times)
-    time_max = max(pulse_times)
-    n_bins = int((time_max - time_min) / bin_width_ms) + 1
-    bins = np.linspace(time_min, time_max, n_bins)
-    bin_centers = (bins[:-1] + bins[1:]) / 2
-    
-    # Count pulses in each bin
-    counts, _ = np.histogram(pulse_times, bins=bins)
-    
-    return bin_centers, counts
-
-def process_shot(file_number, base_dir, bdot_channel=1, monitor_idx=1):
+def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     """Process a single shot and create a combined figure."""
     
     # Create figure with 2 subplots using a string identifier
@@ -78,7 +37,7 @@ def process_shot(file_number, base_dir, bdot_channel=1, monitor_idx=1):
     fig = plt.figure(fig_id)
     
     # Position the window on the specified monitor
-    select_monitor(monitor_idx=monitor_idx, window_scale=(0.5, 0.5))
+    # select_monitor(monitor_idx=monitor_idx, window_scale=(0.1, 0.1))
     
     # Create 2 subplots
     gs = GridSpec(2, 1, figure=fig)
@@ -173,15 +132,13 @@ def process_shot(file_number, base_dir, bdot_channel=1, monitor_idx=1):
     old_interactive = plt.isinteractive()
     plt.ion()  # Turn on interactive mode so figures display immediately
 
-    detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=False)
+    # Parameters for P24 data
+    # detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=debug)
+    detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=debug)
     detector.reduce_pulses()
     
-    # Get pulse data for counts
-    pulse_times, pulse_areas = detector.get_pulse_arrays()
-    
     # Calculate photon counts per bin
-    bin_width_ms = 0.1
-    bin_centers, counts = counts_per_bin(pulse_times, pulse_areas, bin_width_ms)
+    bin_centers, counts = detector.counts_per_bin(bin_width_ms=0.1)
     
     # Free memory
     del xray_data
@@ -327,15 +284,9 @@ def process_shot_2(file_number, base_dir, bdot_channel=1):
     if xray_data is None or tarr_x is None:
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
-    detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=False)
+    detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=False)        
     detector.reduce_pulses()
-    
-    # Get pulse data for counts
-    pulse_times, pulse_areas = detector.get_pulse_arrays()
-    
-    # Calculate photon counts per bin
-    bin_width_ms = 0.1
-    bin_centers, counts = counts_per_bin(pulse_times, pulse_areas, bin_width_ms)
+    bin_centers, counts= detector.counts_per_bin(0.1)
     
     # Bdot data
     bdot_data = None
@@ -370,10 +321,7 @@ def process_shot_2(file_number, base_dir, bdot_channel=1):
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================
 
-def main_plot():
-    # Configuration
-    file_numbers = [f"{i:05d}" for i in range(14,25)]
-    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
+def main_plot(file_numbers, base_dir, debug):
     
     print(f"Starting processing for {len(file_numbers)} shots")
     print(f"Data directory: {base_dir}")
@@ -386,7 +334,7 @@ def main_plot():
     
     for file_number in file_numbers:
         try:
-            fig = process_shot(file_number, base_dir, bdot_channel=2)
+            fig = process_shot(file_number, base_dir, bdot_channel=2, debug=debug)
             all_figures.append(fig)
             
             # Add explicit pause to ensure the display updates
@@ -408,9 +356,7 @@ def main_plot():
     plt.ioff()
     plt.show(block=True)  # Block until all figures are closed
 
-def main_average():
-    file_numbers = [f"{i:05d}" for i in range(14,25)]
-    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
+def main_average(file_number, base_dir):
     
     print(f"Starting processing for {len(file_numbers)} shots")
     print(f"Data directory: {base_dir}")
@@ -501,7 +447,7 @@ def main_average():
             trimmed_counts = [counts[:min_count_length] for counts in all_counts]
             common_bin_centers = common_bin_centers[:min_count_length]
             
-            avg_counts = np.mean(trimmed_counts, axis=0)
+            avg_counts = np.sum(trimmed_counts, axis=0)
             std_counts = np.std(trimmed_counts, axis=0)
             print(f"Averaged count data from {len(all_counts)} shots")
         except Exception as e:
@@ -572,27 +518,22 @@ def main_average():
     else:
         print("Cannot create STFT figure - missing data")
     
-    # Figure 2: Average Photon Counts (if available)
+    # Figure 2: Photon Counts total
     if avg_counts is not None and std_counts is not None and common_bin_centers is not None:
         fig2 = plt.figure(figsize=(14, 10))
         ax2 = fig2.add_subplot(111)
         
         # Plot average counts
-        ax2.plot(common_bin_centers, avg_counts, 'b-', linewidth=2, label='Average Counts')
+        ax2.plot(common_bin_centers, avg_counts, 'b-', linewidth=2)
         # Add error bars (standard deviation)
-        ax2.fill_between(common_bin_centers, avg_counts - std_counts, avg_counts + std_counts, 
-                        alpha=0.3, color='blue', label='±1 Std Dev')
+        # ax2.fill_between(common_bin_centers, avg_counts - std_counts, avg_counts + std_counts, 
+        #                 alpha=0.3, color='blue', label='±1 Std Dev')
         
         ax2.set_xlabel('Time (ms)', fontsize=12)
         ax2.set_ylabel('Counts per Bin', fontsize=12)
-        ax2.set_title(f'Average Photon Counts ({len(all_counts)} shots)', fontsize=14)
+        ax2.set_title(f'Photon Counts sum({len(all_counts)} shots)', fontsize=14)
         ax2.legend(loc='upper right')
         ax2.grid(True)
-        
-        # Set useful time range
-        time_min = max(10, min(common_bin_centers))
-        time_max = min(14, max(common_bin_centers))
-        ax2.set_xlim(time_min, time_max)
         
         # Draw the figure to ensure it shows up
         fig2.canvas.draw()
@@ -622,6 +563,11 @@ def main_average():
 #===========================================================================================================
 
 if __name__ == "__main__":
+
+    file_numbers = [f"{i:05d}" for i in range(11,27)]
+    # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
+    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30"
+
     # Uncomment one of these functions to run
-    # main_plot()  # Process and display individual shots
-    main_average()  # Process, average and display aggregate data
+    # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots
+    main_average(file_numbers, base_dir)  # Process, average and display aggregate data
