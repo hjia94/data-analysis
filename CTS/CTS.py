@@ -18,6 +18,7 @@ from scipy import integrate
 from scipy.constants import *
 
 #===========================================================================================================
+r_0 = 2.8179403262e-13 # classical electron radius in cm
 #===========================================================================================================
 
 def compute_alpha(lambda_i, theta, n_e, T_e):
@@ -62,7 +63,7 @@ def compute_theta(lambda_i, alpha, n_e, T_e):
     return theta_deg
 
 
-def generate_spectral_density(probe_wavelength, T_e, T_i, n_e, scattering_angle=180, delta_lam=20, num_points=2000, ions="He+"):
+def generate_spectral_density(probe_wavelength, T_e, T_i, n_e, scattering_angle=180, delta_lam=20, num_points=10000, ions="He+"):
     """
     Generate the spectral density function (Skw) for Thomson scattering.
     
@@ -111,16 +112,23 @@ def generate_spectral_density(probe_wavelength, T_e, T_i, n_e, scattering_angle=
         probe_vec=probe_vec,
         scatter_vec=scatter_vec,
     )
-    omega_arr = 2*np.pi*astro_units.rad*c/(lambda_arr*1e-9*astro_units.m)
+    # Convert wavelength to angular frequency (omega)
+    # omega = 2πc/λ where c is speed of light
+    # Using astropy units to ensure dimensional consistency
+    omega_arr = 2*np.pi*c/lambda_arr.to(astro_units.m)
+    omega_in = 2*np.pi*c/probe_wavelength.to(astro_units.m)
     
-    return alpha, omega_arr, Skw
+    return alpha, omega_arr, omega_in, Skw
 
 def power_ratio(n_e, omega_arr, Skw, scattering_angle=180, L=0.1):
-    ''' calculate the ratio scattered power/incident power '''
-    
-    # Ensure lambda_in has proper units
-    if not isinstance(lambda_in, Quantity):
-        lambda_in = Quantity(lambda_in, astro_units.nm)
+    '''
+    calculate the ratio scattered power/incident power
+    n_e: electron density in cm^-3
+    omega_arr: angular frequency array in rad/s
+    Skw: spectral density in rad/s
+    scattering_angle: scattering angle in degrees
+    L: length of the plasma in cm
+    '''
     
     # Convert scattering_angle to radians if it's not already
     scattering_angle_rad = np.radians(scattering_angle)
@@ -129,11 +137,10 @@ def power_ratio(n_e, omega_arr, Skw, scattering_angle=180, L=0.1):
     if not isinstance(n_e, Quantity):
         n_e = Quantity(n_e, astro_units.cm**-3)
     
-
     # Calculate the function with proper unit handling
-    func = (L/(4*np.pi)) * 3*(1 + np.cos(scattering_angle_rad)**2) * n_e * Skw
-    
+    func = r_0**2*L/(4*np.pi) * (1 + np.cos(scattering_angle_rad)**2) * n_e * Skw
+
     # Integrate over angular frequency
     result = integrate.simpson(func, omega_arr)
         
-    return result
+    return -result
