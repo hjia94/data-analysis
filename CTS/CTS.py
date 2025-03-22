@@ -144,3 +144,33 @@ def power_ratio(n_e, omega_arr, Skw, scattering_angle=180, L=0.1):
     result = integrate.simpson(func, omega_arr)
         
     return -result
+
+def faraday_rotation_angle(freq_in, ne, B, L):
+    """
+    Computes the Faraday rotation angle in degrees using CGS units.
+    
+    Parameters:
+    - freq_in : float or np.array
+        Frequency of the wave in Hz
+    - ne : float
+        Electron density in cm^-3
+    - B : float
+        Magnetic field (parallel to propagation direction) in Gauss
+    - L : float
+        Length of plasma path in cm
+
+    Returns:
+    - theta_deg : float
+        Faraday rotation angle in degrees
+    """
+    coeff = e**3 / (8*pi**2*epsilon_0*m_e**2*c**3)
+    
+    wavelength = c / freq_in
+
+    # Compute angle in radians
+    theta_rad = coeff * (wavelength ** 2) * ne*1e6 * B*1e-4 * L*1e2
+    
+    # Convert to degrees
+    theta_deg = np.degrees(theta_rad)
+    
+    return theta_deg
