@@ -182,6 +182,7 @@ def faraday_rotation_angle(freq_in, ne, B, L):
     
     return theta_deg
 
+#===========================================================================================================
 
 def generate_pulse_wave_packet(f0, n_cycles, num_points=4096, return_envelope=False):
     """
@@ -326,67 +327,48 @@ def generate_n_cycle_wave_packet(f0, n_cycles, num_points=4096, return_envelope=
     else:
         return t, signal, freqs, fft_signal
 
-
-def plot_wave_packet_fft(f0, signal, envelope, freqs, signal_fft, bandwidth_factor=0.5):
+#===========================================================================================================
+def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=10.0):
     """
-    Generate a wave packet and plot its FFT focused around the center frequency.
+    Generate a THz waveform pulse train and its spectrum.
     
     Parameters:
-    - f0 : float
-        Center frequency of the wave packet in Hz.
-    - n_cycles : int
-        Number of cycles in the wave packet.
-    - num_points : int
-        Number of points for the FFT.
-    - bandwidth_factor : float
-        Factor to determine the frequency range to plot around f0.
-        The range will be [f0 * (1 - bandwidth_factor), f0 * (1 + bandwidth_factor)].
+        f0_THz (float): Center frequency in THz (defines pulse spacing).
+        sigma_t (float): Width parameter of the single-cycle pulse in ps.
+        npulses (int): Number of pulses in the train.
+        Ts (float): Sampling interval in ps.
+        pulse_offset (float): Time offset before the first pulse (default 10 ps).
     
     Returns:
-    - fig : matplotlib figure
-        Figure containing the plots.
+        t (np.ndarray): Time array in ps.
+        waveform (np.ndarray): Time-domain waveform.
+        freqs (np.ndarray): Frequency array in THz.
+        fft_signal (np.ndarray): FFT of the waveform (complex).
+        envelope (np.ndarray): Envelope of the waveform.
     """
+    # Define the single-cycle THz field
+    def ETHz(t):
+        return t * np.exp(-t**2 / sigma_t**2)
 
-    
-    # Define the frequency range of interest
-    f_min = f0 * (1 - bandwidth_factor)
-    f_max = f0 * (1 + bandwidth_factor)
-    
-    # Create a mask for frequencies within the range of interest
-    mask = (freqs >= f_min) & (freqs <= f_max)
-    
-    # For plotting, we need to shift the FFT to center the zero frequency
-    freqs_shifted = fft.fftshift(freqs)
-    signal_fft_shifted = fft.fftshift(signal_fft)
-    
-    # Create a mask for the shifted frequencies
-    mask_shifted = (freqs_shifted >= f_min) & (freqs_shifted <= f_max)
-    
-    # Create plots
-    fig, axs = plt.subplots(2, 1, figsize=(10, 8))
-    
-    # Time domain plot
-    axs[0].plot(t * 1e9, signal, 'b', label='Signal')
-    axs[0].plot(t * 1e9, envelope, 'r--', label='Envelope')
-    axs[0].set_xlabel('Time (ns)')
-    axs[0].set_ylabel('Amplitude')
-    axs[0].set_title(f'Wave Packet with {n_cycles} cycles at {f0/1e9:.2f} GHz')
-    axs[0].legend()
-    axs[0].grid(True)
-    
-    # Frequency domain plot - focused on the center frequency
-    axs[1].plot(freqs_shifted[mask_shifted] * 1e-9, np.abs(signal_fft_shifted[mask_shifted]))
-    axs[1].set_xlabel('Frequency (GHz)')
-    axs[1].set_ylabel('Amplitude')
-    axs[1].set_title(f'FFT Magnitude (zoomed around {f0/1e9:.2f} GHz)')
-    axs[1].grid(True)
-    
-    # Add vertical line at center frequency
-    axs[1].axvline(x=f0*1e-9, color='r', linestyle='--', label=f'f0 = {f0/1e9:.2f} GHz')
-    axs[1].legend()
-    
-    plt.tight_layout()
-    return fig
+    deltat = 1 / f0_THz  # pulse period in ps
+    t_max = 3 * npulses * deltat
+    t = np.arange(0, t_max, Ts)
+
+    waveform = np.zeros_like(t)
+    for i in range(npulses):
+        waveform += ETHz(t - pulse_offset - i * deltat)
+
+    # Compute FFT and frequency axis
+    n = len(waveform)
+    fft_signal = np.fft.fft(waveform)
+    freqs = np.fft.fftfreq(n, d=Ts)  # in THz
+
+    # Calculate the envelope using the Hilbert transform
+    from scipy.signal import hilbert
+    envelope = np.abs(hilbert(waveform))
+
+    return t, waveform, freqs, fft_signal, envelope
+
 
 def plasma_dispersion_relation(omega, n_e):  # e.g. 0.5 THz plasma frequency
     """
@@ -410,81 +392,105 @@ def plasma_dispersion_relation(omega, n_e):  # e.g. 0.5 THz plasma frequency
     
     return k
 
-def propagate_through_dispersive_medium(freqs, fft_signal, z, dispersion_relation):
+def propagate_through_dispersive_medium(omega, fft_signal, L, dispersion_relation):
     """
     Propagate a wave packet through a dispersive medium.
 
     Parameters:
-    - freqs : ndarray
-        Frequency array in Hz (from FFT).
+    - omega : ndarray
+        Angular frequency array [rad/s].
     - fft_signal : ndarray
         FFT of the initial wave packet (complex).
-    - z : float
+    - L : float
         Propagation distance in meters.
     - dispersion_relation : callable
-        Function omega(f) [rad/s] → k(omega) [rad/m]
+        Function that takes omega [rad/s] and returns k [rad/m].
 
     Returns:
     - fft_propagated : ndarray
         Modified FFT after propagation.
     """
-    # Angular frequency (rad/s)
-    omega = 2 * np.pi * freqs
 
     # Compute wavenumber from dispersion relation (rad/m)
     k = dispersion_relation(omega)
 
-    # Apply dispersion: each spectral component gets a phase shift exp(i * k * z)
-    phase_shift = np.exp(1j * k * z)
+    # Apply dispersion: each spectral component gets a phase shift exp(i * k * L)
+    # This properly accounts for both phase velocity and group velocity effects
+    phase_shift = np.exp(1j * k * L)
 
     # Propagated spectrum
     fft_propagated = fft_signal * phase_shift
 
     return fft_propagated
 
-
-
-
+#===========================================================================================================
+#<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
+#===========================================================================================================
 if __name__ == "__main__":
     # Example usage of the wave packet generator with focused FFT
     
     # Parameters
-    f0 = 330e9  # 330 GHz center frequency
-    n_cycles = 16
-    n_e = 1e12  # cm^-3
-    L = 100  # cm
-    bandwidth_factor = 0.3  # Show frequencies within 30% of f0
-    
-    # Generate the wave packet
-    t, signal, freqs, signal_fft, envelope = generate_pulse_wave_packet(f0, n_cycles, return_envelope=True) 
-    
-    omega = 2 * np.pi * freqs
+    f0 = 300e9 # GHz
+    n_cycles = 2
+    n_e = 1e19  # m^-3
+    L = 0.001 # meter
+
+    # Generate the THz waveform
+    t, signal, freqs, signal_fft, envelope = generate_thz_waveform(f0/1e12, 0.9, n_cycles, 0.001)
     
     # Create a wrapper function that can be passed as the dispersion relation
-    dispersion_func = lambda omega: plasma_dispersion_relation(omega, n_e*1e6)
-    
-    # Now pass the function, not its result
-    fft_propagated = propagate_through_dispersive_medium(freqs, signal_fft, L/100, dispersion_func)
+    dispersion_func = lambda omega: plasma_dispersion_relation(omega, n_e)
 
-    # Convert propagated signal back to time domain
-    signal_propagated = fft.ifft(fft_propagated)
     
-    # Create figure with two subplots
-    fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+    # Calculate angular frequency
+    omega = 2 * np.pi * freqs*1e12
+    
+    # Propagate the signal through the plasma
+    fft_propagated = propagate_through_dispersive_medium(omega, signal_fft, L, dispersion_func)
+    
+    # Convert back to time domain using inverse FFT
+    signal_propagated = np.fft.ifft(fft_propagated)
+    
+    # Calculate the expected time delay due to propagation
+    # Get the wavenumber at the center frequency
+    omega_center = 2 * np.pi * f0
+    k_center = dispersion_func(omega_center)
+    
+    # Calculate group velocity (dω/dk) numerically at the center frequency
+    delta_omega = omega_center * 0.01  # Small delta for numerical derivative
+    k_plus = dispersion_func(omega_center + delta_omega)
+    k_minus = dispersion_func(omega_center - delta_omega)
+    
+    # Group velocity = dω/dk ≈ Δω/Δk
+    v_group = (2 * delta_omega) / (k_plus - k_minus) if (k_plus - k_minus) != 0 else c
+    
+    # Calculate propagation delay
+    delay_time = L / v_group  # seconds
+    
+    # Convert to ps for plotting
+    delay_time_ps = delay_time * 1e12
+    
+    # Print information for verification
+    print(f"Center frequency: {f0/1e9:.2f} GHz")
+    print(f"Wavenumber at center frequency: {k_center:.2f} rad/m")
+    print(f"Group velocity: {v_group/1e6:.2f} x 10^6 m/s")
+    print(f"Expected time delay: {delay_time_ps:.2f} ps")
     
     # Define frequency range of interest around f0
+    bandwidth_factor = 0.8  # Show frequencies within 80% of f0
     f_min = f0 * (1 - bandwidth_factor)
     f_max = f0 * (1 + bandwidth_factor)
     
     # Create masks for frequencies within the range of interest
     # First for positive frequencies
-    pos_mask = (freqs >= f_min) & (freqs <= f_max)
-    # Also for negative frequencies (corresponding to -f0)
-    neg_mask = (freqs >= -f_max) & (freqs <= -f_min)
+    pos_mask = (freqs >= f_min/1e12) & (freqs <= f_max/1e12)
     
-    # Plot frequency domain (FFT magnitude) - only around f0
-    axs[0].plot(freqs[pos_mask]/1e9, np.abs(signal_fft[pos_mask]), 'b-', label='Original')
-    axs[0].plot(freqs[pos_mask]/1e9, np.abs(fft_propagated[pos_mask]), 'r-', label='After propagation')
+    # Create figure with two subplots
+    fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+    
+    # Plot 1: Frequency domain (FFT magnitude) - only around f0
+    axs[0].plot(freqs[pos_mask]*1e12/1e9, np.abs(signal_fft[pos_mask]), 'b-', alpha=0.6, label='Generator (L=0)')
+    axs[0].plot(freqs[pos_mask]*1e12/1e9, np.abs(fft_propagated[pos_mask]), 'r-', alpha=0.6, label='Receiver (L={} m)'.format(L))
     axs[0].set_xlabel('Frequency (GHz)')
     axs[0].set_ylabel('FFT Magnitude')
     axs[0].set_title(f'Wave Packet Spectrum around {f0/1e9:.1f} GHz')
@@ -494,12 +500,26 @@ if __name__ == "__main__":
     # Add vertical line at center frequency
     axs[0].axvline(x=f0/1e9, color='k', linestyle='--', label=f'f0 = {f0/1e9:.2f} GHz')
     
-    # Plot time domain signals
-    axs[1].plot(t*1e9, signal.real, 'b-', label='Original')
-    axs[1].plot(t*1e9, signal_propagated.real, 'r-', label='After propagation')
-    axs[1].set_xlabel('Time (ns)')
+    # Plot 2: Time domain signals
+    # First plot: the original signal at the generator
+    axs[1].plot(t, signal.real, 'b-', label='Generator (L=0)')
+    
+    # Create a copy of the time array shifted by the propagation delay
+    # This represents the actual time when signal reaches the receiver
+    t_shifted = t + delay_time_ps
+    axs[1].plot(t_shifted, signal_propagated.real, 'r-', label=f'Receiver (L={L} m, delay={delay_time_ps:.2f} ps)')
+    
+    # Mark the expected arrival time of the pulse center
+    # Find the time at which the original signal has its maximum amplitude
+    max_idx = np.argmax(np.abs(signal))
+    t_peak = t[max_idx]
+    t_arrival = t_peak + delay_time_ps
+    axs[1].axvline(x=t_arrival, color='g', linestyle='--', 
+                  label=f'Expected arrival time: {t_arrival:.2f} ps')
+    
+    axs[1].set_xlabel('Time (ps)')
     axs[1].set_ylabel('Amplitude')
-    axs[1].set_title(f'Wave Packet Time Domain (n_e={n_e:.1e} cm^-3, L={L} cm)')
+    axs[1].set_title(f'Wave Packet Time Domain (n_e={n_e:.1e} $m^{-3}$, L={L} m)')
     axs[1].legend()
     axs[1].grid(True)
     
