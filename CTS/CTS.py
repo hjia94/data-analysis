@@ -434,6 +434,17 @@ def propagate_through_dispersive_medium(tarr, signal, L, n_e, debug=False):
 
     return signal_propagated, fft_propagated, vgarr
 
+
+def total_propagation(f0, n_cycles, n_e, L_arr):
+    tarr, signal, envelope, x = generate_thz_waveform(f0/1e12, 0.9, n_cycles, 0.1, 5, 100)
+    
+    tot_wave = np.zeros_like(tarr)
+    for L in L_arr:
+        signal_propagated, fft_propagated, vgarr = propagate_through_dispersive_medium(tarr, signal, L, n_e)   
+        tot_wave += signal_propagated / L**2
+    
+    return tot_wave
+
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================
