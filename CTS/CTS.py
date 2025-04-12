@@ -338,7 +338,7 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=0):
         pulse_offset (float): Time offset before the first pulse (default 10 ps).
     
     Returns:
-        t (np.ndarray): Time array in ps.
+        tarr (np.ndarray): Time array in ps.
         waveform (np.ndarray): Time-domain waveform.
         freqs (np.ndarray): Frequency array in THz.
         fft_signal (np.ndarray): FFT of the waveform (complex).
@@ -350,22 +350,37 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=0):
 
     deltat = 1 / f0_THz  # pulse period in ps
     t_max = 3 * npulses * deltat
-    t = np.arange(0, t_max, Ts)
-
-    waveform = np.zeros_like(t)
+    waveform_tarr = np.arange(0, t_max, Ts)
+    waveform_len = len(waveform_tarr)
+    
+    # Create the original waveform
+    original_waveform = np.zeros_like(waveform_tarr)
     for i in range(npulses):
-        waveform += ETHz(t - pulse_offset - i * deltat)
-
-    # Compute FFT and frequency axis
-    n = len(waveform)
-    fft_signal = np.fft.fft(waveform)
-    freqs = np.fft.fftfreq(n, d=Ts)  # in THz
-
+        original_waveform += ETHz(waveform_tarr - pulse_offset - i * deltat)
+    
     # Calculate the envelope using the Hilbert transform
     from scipy.signal import hilbert
-    envelope = np.abs(hilbert(waveform))
+    original_envelope = np.abs(hilbert(original_waveform))
+    
+    # Create extended arrays with zeros at beginning and end
+    # Add same length of zeros at beginning and 10x length at end
+    total_len = waveform_len + waveform_len + 100 * waveform_len  # original + prefix + suffix
+    
+    # Create extended time array
+    t_start = waveform_tarr[0] - waveform_len * Ts
+    t_end = waveform_tarr[-1] + 5 * waveform_len * Ts
+    tarr = np.linspace(t_start, t_end, total_len)
+    
+    # Create extended waveform with zeros
+    waveform = np.zeros(total_len)
+    waveform[waveform_len:2*waveform_len] = original_waveform
+    
+    # Create extended envelope with zeros
+    envelope = np.zeros(total_len)
+    envelope[waveform_len:2*waveform_len] = original_envelope
+    
 
-    return t, waveform, freqs, fft_signal, envelope
+    return tarr, waveform, envelope
 
 
 def plasma_dispersion_relation(omega, wpe, debug=False):  # e.g. 0.5 THz plasma frequency
@@ -384,179 +399,45 @@ def plasma_dispersion_relation(omega, wpe, debug=False):  # e.g. 0.5 THz plasma 
     if debug:
         print(f"Plasma frequency: {wpe/(2*np.pi)/1e9:.2f} GHz")
 
-    k = np.sqrt((omega**2 - wpe**2) / c**2)
-    
-    return k, wpe
-
-def propagate_through_dispersive_medium(t, signal, L, n_e, debug=False):
-    """
-    Propagate a wave packet through a dispersive plasma medium.
-    This function handles the full propagation process including:
-    1. Transformation to frequency domain
-    2. Application of dispersion effects
-    3. Proper time delay based on minimum propagation time
-    4. Conversion back to time domain
-    5. Analysis of dispersion effects
-
-    Parameters:
-    - t : ndarray
-        Time array [ps].
-    - signal : ndarray
-        Original time domain signal.
-    - L : float
-        Propagation distance in meters.
-    - n_e : float
-        Electron density [cm^-3].
-    - debug : bool, optional
-        If True, print diagnostic information. Default is False.
-
-    Returns:
-    - signal_propagated : ndarray
-        Time domain signal after propagation, with proper delays applied.
-    - fft_propagated : ndarray
-        Frequency domain representation of the propagated signal.
-    - omega : ndarray
-        Angular frequency array [rad/s].
-    - f0 : float
-        Dominant frequency of the signal in Hz.
-    - v_group_avg : float
-        Average group velocity at the center frequency in m/s.
-    """
-    # Calculate time step and total points
-    dt = t[1] - t[0]  # Time step in ps
-    dt_s = dt * 1e-12  # Convert time step to seconds
-    N = len(t)
-    
-    # Transform signal to frequency domain
-    signal_fft = np.fft.fft(signal)
-    freqs = np.fft.fftfreq(N, dt_s)  # Frequency in Hz
-    
-    # Find the dominant frequency in the signal (using magnitude of FFT)
-    # Only consider positive frequencies and skip DC component
-    pos_freq_mask = (freqs > 0)
-    
-    # Get the index of the maximum magnitude among positive frequencies
-    pos_freq_signal = np.abs(signal_fft[pos_freq_mask])
-    if len(pos_freq_signal) > 0:
-        idx_max = np.argmax(pos_freq_signal)
-        # Get the actual frequency index in the original array
-        positive_indices = np.where(pos_freq_mask)[0]
-        idx_max = positive_indices[idx_max]
-        f0 = abs(freqs[idx_max])  # Center frequency in Hz
-    else:
-        # Fallback if no positive frequencies found (shouldn't happen)
-        f0 = 300e9  # Default to 300 GHz
-
-    # Calculate angular frequencies and plasma frequency
-    omega = 2 * np.pi * freqs  # Angular frequency in rad/s
-    omega_0 = 2 * np.pi * f0   # Center angular frequency
-    wpe = 5.64e4 * np.sqrt(n_e)  # Plasma frequency in rad/s
-    
-    # Create array for wavenumbers
+    # Initialize k array with zeros
     k = np.zeros_like(omega)
     
-    # Calculate wavenumbers using plasma dispersion relation only for positive frequencies
-    # For ω > ωpe: k(ω) = ω/c · sqrt(1 - (ωpe/ω)²)
-    pos_propagating_mask = (omega > wpe)
-    neg_propagating_mask = (omega < -wpe)
+    # Only compute k for frequencies above plasma frequency
+    propagating_mask = omega > wpe
+    k[propagating_mask] = np.sqrt((omega[propagating_mask]**2 - wpe**2) / c**2)
+
+    return k, wpe
+
+def propagate_through_dispersive_medium(tarr, signal, L, n_e, debug=False):
+    """
+    Propagate a wave packet through a dispersive plasma medium.
+
+    """
+    # Calculate time step and total points
+    dt = (tarr[1] - tarr[0]) *1e-12  # seconds
+    NT = len(tarr)
     
-    # Get wavenumbers for positive propagating waves
-    if np.any(pos_propagating_mask):
-        omega_pos = omega[pos_propagating_mask]
-        k_pos, _ = plasma_dispersion_relation(omega_pos, wpe, debug=False)
-        k[pos_propagating_mask] = k_pos
+    # Transform signal to frequency domain
+    signal_fft = np.fft.rfft(signal)
+    freqs = np.fft.rfftfreq(NT, dt)  # Frequency in Hz
     
-    # Get wavenumbers for negative propagating waves (ensure conjugate symmetry)
-    if np.any(neg_propagating_mask):
-        omega_neg = -omega[neg_propagating_mask]  # Make positive for calculation
-        k_neg, _ = plasma_dispersion_relation(omega_neg, wpe, debug=False)
-        k[neg_propagating_mask] = -k_neg  # Negative k for negative frequencies
+    # Calculate angular frequencies and plasma frequency
+    omega = 2 * np.pi * freqs  # Angular frequency in rad/s
+
+    wpe = 5.64e4 * np.sqrt(n_e)  # Plasma frequency in rad/s
     
-    # Calculate the phase and group velocity at center frequency
-    if omega_0 > wpe:
-        # Get k at center frequency
-        k_0_array, _ = plasma_dispersion_relation(np.array([omega_0]), wpe)
-        k_0 = k_0_array[0]
-        
-        # Phase velocity: vp = ω/k
-        v_phase = omega_0 / k_0
-        
-        # Group velocity: vg = c²·k/ω for cold plasma
-        v_group_avg = (c**2 * k_0) / omega_0
-    else:
-        v_phase = c
-        v_group_avg = c
+    k, wpe = plasma_dispersion_relation(omega, wpe, debug=False)
+
+    # Calculate phase shift for propagation
+    phase_shift = np.exp(-1j * k * L)
     
-    # Calculate propagation delays
-    # 1. Minimum possible delay (vacuum speed of light)
-    min_delay = L / c  # seconds
-    min_delay_ps = min_delay * 1e12  # convert to ps
+    # Apply phase shift to frequency components
+    fft_propagated = signal_fft * phase_shift
     
-    # 2. Delay at the center frequency (group velocity)
-    group_delay = L / v_group_avg  # seconds
-    group_delay_ps = group_delay * 1e12  # convert to ps
-    
-    # Create array for dispersion effects only (no time shift)
-    dispersion_only = np.zeros_like(omega, dtype=complex)
-    
-    # Apply dispersion effects (deformation of pulse shape, no bulk time shift)
-    # This handles only the relative phase shifts between frequency components
-    for i, (w, k_val) in enumerate(zip(omega, k)):
-        if (w > wpe) or (w < -wpe):  # Only propagating waves
-            # Phase factor without linear term (which causes bulk delay)
-            if w != 0:  # Avoid division by zero
-                # For dispersion, we remove the linear term k_0*w/omega_0
-                # This leaves only the higher-order dispersion terms
-                if w > 0:
-                    dispersion = k_val - (k_0 * w / omega_0)
-                else:
-                    dispersion = k_val - (-k_0 * (-w) / omega_0)
-                
-                dispersion_only[i] = np.exp(-1j * dispersion * L)
-            else:
-                dispersion_only[i] = 1.0
-    
-    # Apply dispersion-only effects in frequency domain
-    fft_propagated = signal_fft * dispersion_only
-    
-    # Ensure Hermitian symmetry for real output signal
-    fft_propagated[0] = np.real(fft_propagated[0])  # DC component must be real
-    if N % 2 == 0:  # Even number of points
-        fft_propagated[N//2] = np.real(fft_propagated[N//2])  # Nyquist frequency must be real
-    
-    # Convert back to time domain with dispersion effects only
-    signal_dispersed = np.fft.ifft(fft_propagated)
-    
-    # Now handle the bulk delay in time domain (much more reliable)
-    # Calculate the delay in samples (time steps) using the group velocity
-    delay_samples = int(np.round(group_delay / dt_s))
-    
-    # Create the final propagated signal with proper time delay
-    signal_propagated = np.zeros_like(signal, dtype=complex)
-    
-    # Apply the time shift: signal_propagated[delay:] = signal_dispersed[:-delay]
-    if delay_samples > 0:
-        if delay_samples < N:
-            signal_propagated[delay_samples:] = signal_dispersed[:-delay_samples]
-        else:
-            # If delay exceeds signal length, just show zeros (signal hasn't arrived yet)
-            pass
-    else:
-        # No delay case
-        signal_propagated = signal_dispersed
-    
-    # Print diagnostic information if debug=True
-    if debug:
-        print(f"Center frequency: {f0/1e9:.2f} GHz")
-        print(f"Plasma frequency: {wpe/(2*np.pi)/1e9:.2f} GHz")
-        print(f"Phase velocity: {v_phase/1e6:.2f} x 10^6 m/s")
-        print(f"Group velocity: {v_group_avg/1e6:.2f} x 10^6 m/s")
-        print(f"Minimum delay (vacuum): {min_delay_ps:.2f} ps")
-        print(f"Group delay: {group_delay_ps:.2f} ps")
-        print(f"Delay in samples: {delay_samples}")
-        print(f"Propagation distance: {L} m")
-    
-    return signal_propagated.real, fft_propagated, omega, f0, v_group_avg, group_delay_ps
+    # Transform back to time domain
+    signal_propagated = np.fft.irfft(fft_propagated)
+
+    return signal_propagated, fft_propagated
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -567,43 +448,29 @@ if __name__ == "__main__":
     # Parameters
     f0 = 300e9 # GHz
     n_cycles = 2
-    n_e = 1e12  # cm^-3
-    L = 0.005 # meter
+    n_e = 1e13  # cm^-3
+    L = 1 # meter
 
     # Generate the THz waveform
-    t, signal, freqs, signal_fft, envelope = generate_thz_waveform(f0/1e12, 0.9, n_cycles, 0.01, 5) # f0_THz, sigma_t, npulses, Ts, pulse_offset=0)
+    tarr, signal, envelope = generate_thz_waveform(f0/1e12, 0.9, n_cycles, 0.05, 5) # Units: THz, ps, n, ps, ps
     
     # Propagate the signal through the plasma and generate plots
-    signal_propagated, fft_propagated, omega, f0, v_group_avg, group_delay_ps = propagate_through_dispersive_medium(t, signal, L, n_e, debug=True)
+    signal_propagated, fft_propagated = propagate_through_dispersive_medium(tarr, signal, L, n_e, debug=True)
+    print(len(signal_propagated))
  
     # Create a figure with two subplots, one for each signal
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     
     # Plot the original signal in the first subplot
-    ax1.plot(t, signal, 'b-', linewidth=2)
+    ax1.plot(tarr, signal, linewidth=2)
     ax1.set_xlabel('Time (ps)')
     ax1.set_ylabel('Amplitude')
     ax1.set_title('Input Signal (L=0)')
-    ax1.grid(True, alpha=0.3)
-    
-    # Find the center of the original signal (maximum amplitude)
-    orig_center_idx = np.argmax(np.abs(signal))
-    orig_center_time = t[orig_center_idx]
-    
-    # Find the center of the propagated signal (maximum amplitude)
-    prop_center_idx = np.argmax(np.abs(signal_propagated))
-    prop_center_time = t[prop_center_idx]
-    
-    # Calculate observed delay between signal centers
-    observed_delay = prop_center_time - orig_center_time
     
     # Plot the propagated signal in the second subplot
-    ax2.plot(t, signal_propagated, 'r-', linewidth=2)
+    ax2.plot(tarr, signal_propagated, linewidth=2)
     ax2.set_xlabel('Time (ps)')
     ax2.set_ylabel('Amplitude')
-    ax2.set_title(f'Propagated Signal (L={L} m), Delay = {group_delay_ps:.2f} ps')
-    ax2.grid(True, alpha=0.3)
-
 
     plt.tight_layout()
     plt.show()
