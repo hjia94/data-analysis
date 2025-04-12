@@ -30,6 +30,159 @@ from read_scope_data import read_trc_data
 from plot_utils import plot_original_and_baseline, plot_subtracted_signal
 #===========================================================================================================
 #===========================================================================================================
+def first_and_last_zerocrossings(cur):
+    """
+    Find the first and last positive-going zero crossings in approximately sinusoidal data.
+    
+    Parameters:
+    data (numpy array): Input sinusoidal data (e.g., current waveform).
+    lpf_gsmooth_interval (int): Smoothing interval for the low-pass filter.
+    
+    Returns:
+    int: Index of the first positive-going zero crossing.
+    int: Index of the last positive-going zero crossing.
+    float: Fractional number of points in one cycle.
+    """
+
+    n = np.size(cur)
+    lpf_gsmooth_interval = 25
+    scur = ndimage.gaussian_filter1d(cur, lpf_gsmooth_interval)
+    first = 0
+    last = 0
+    i = lpf_gsmooth_interval * 4
+    count = 0
+    NPeriod = 0
+    while i < n - lpf_gsmooth_interval*4:
+        if scur[i+1] > 0  and  scur[i] <= 0:
+            # when we find a positive-going zero-crossing
+            if first == 0:
+                first = i        # first one
+            else:
+                last = i         # last one found
+                NPeriod = (last - first) / count
+                i += lpf_gsmooth_interval    # try to avoid local noise
+                i += int(0.7*NPeriod)        # extra advance
+            count += 1
+        i += 1
+
+    return first, last, NPeriod    # note: NPeriod is not an integer
+#===========================================================================================================
+def find_all_zerocrossing(sig, dt=None, direction='all', threshold=None, window_size=None, min_distance=None):
+    """
+    Find all zero crossings in a signal, ignoring flat regions and zero-padded areas.
+    
+    Parameters:
+    -----------
+    sig : numpy.ndarray
+        Input signal to analyze
+    dt : float, optional
+        Time step between samples. If None, returns indices instead of times
+    direction : str, optional
+        Type of zero crossings to return:
+        - 'all': All zero crossings
+        - 'positive': Only positive-going zero crossings (signal goes from - to +)
+        - 'negative': Only negative-going zero crossings (signal goes from + to -)
+    threshold : float, optional
+        Minimum signal amplitude to consider for zero crossing detection.
+        If None, automatically calculated as 5% of signal range.
+    window_size : int, optional
+        Size of window to check for signal variation. If None, automatically determined.
+    min_distance : int, optional
+        Minimum number of samples between zero crossings. If None, automatically determined.
+        
+    Returns:
+    --------
+    numpy.ndarray
+        Array of times (if dt provided) or indices of zero crossings
+    """
+    # Center the signal
+    sig_centered = sig - np.mean(sig)
+    
+    # Calculate threshold if not provided
+    if threshold is None:
+        # Use middle 80% of signal to avoid edge effects
+        i0 = int(0.1 * len(sig_centered))
+        i1 = int(0.9 * len(sig_centered))
+        threshold = 0.05 * (np.max(sig_centered[i0:i1]) - np.min(sig_centered[i0:i1]))
+    
+    # Auto-detect optimal window size if not provided
+    if window_size is None:
+        # Calculate signal's dominant frequency using FFT
+        fft_sig = np.abs(np.fft.rfft(sig_centered))
+        freqs = np.fft.rfftfreq(len(sig_centered))
+        dominant_freq_idx = np.argmax(fft_sig[1:]) + 1  # Skip DC component
+        dominant_period = int(1 / freqs[dominant_freq_idx])
+        # Use 1/4 of the dominant period as window size
+        window_size = max(5, min(dominant_period // 4, 100))
+        # Ensure window_size is odd
+        window_size = window_size if window_size % 2 == 1 else window_size + 1
+    
+    # Auto-detect minimum distance if not provided
+    if min_distance is None:
+        # Use 1/8 of the dominant period as minimum distance
+        min_distance = max(3, window_size // 4)
+    
+    half_window = window_size // 2
+    
+    # Calculate local variation and signal presence
+    local_variation = np.zeros_like(sig_centered)
+    signal_presence = np.zeros_like(sig_centered, dtype=bool)
+    
+    # Use a larger window for signal presence detection
+    presence_window = window_size * 2
+    half_presence = presence_window // 2
+    
+    for i in range(half_window, len(sig_centered)-half_window):
+        # Calculate local variation
+        window = sig_centered[i-half_window:i+half_window+1]
+        local_variation[i] = np.max(window) - np.min(window)
+        
+        # Check for signal presence using a larger window
+        if i >= half_presence and i < len(sig_centered)-half_presence:
+            presence_window_data = sig_centered[i-half_presence:i+half_presence+1]
+            # Signal is considered present if there's significant variation
+            signal_presence[i] = np.max(np.abs(presence_window_data)) > threshold
+    
+    # Use median of local variations as additional threshold
+    variation_threshold = np.median(local_variation[signal_presence]) * 0.1
+    
+    # Find all zero crossings
+    zero_crossings = []
+    last_crossing = -min_distance  # Initialize to ensure first crossing is valid
+    
+    for i in range(half_window, len(sig_centered)-half_window):
+        # Skip if too close to last crossing
+        if i - last_crossing < min_distance:
+            continue
+            
+        # Only look for crossings where signal is present
+        if not signal_presence[i]:
+            continue
+            
+        # Check if we have a zero crossing
+        if sig_centered[i-1] * sig_centered[i+1] < 0:
+            # Check if signal amplitude is above threshold
+            if abs(sig_centered[i]) < threshold:
+                # Check if there's significant variation in the window
+                if local_variation[i] > variation_threshold:
+                    # Determine direction of crossing
+                    is_positive = sig_centered[i+1] > sig_centered[i-1]
+                    
+                    # Add crossing based on direction filter
+                    if direction == 'all' or \
+                       (direction == 'positive' and is_positive) or \
+                       (direction == 'negative' and not is_positive):
+                        if dt is not None:
+                            # Linear interpolation for more accurate timing
+                            t = i + sig_centered[i] / (sig_centered[i] - sig_centered[i+1])
+                            zero_crossings.append(t * dt)
+                        else:
+                            zero_crossings.append(i)
+                        last_crossing = i
+    
+    return np.array(zero_crossings)
+
+#===========================================================================================================
 
 def fast_gaussian_filter(data, sigma):
     # Create Gaussian kernel

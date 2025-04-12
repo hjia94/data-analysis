@@ -152,105 +152,26 @@ def power_ratio(n_e, omega_arr, Skw, scattering_angle=180, L=0.1):
         
     return -result
 
-def faraday_rotation_angle(freq_in, ne, B, L):
+def faraday_rotation_angle(omega, ne, B, L):
     """
-    Computes the Faraday rotation angle in degrees using CGS units.
+    Computes the Faraday rotation with uniform magnetic field
     
     Parameters:
-    - freq_in : float or np.array
-        Frequency of the wave in Hz
-    - ne : float
-        Electron density in cm^-3
-    - B : float
-        Magnetic field (parallel to propagation direction) in Gauss
-    - L : float
-        Length of plasma path in cm
+    omega: angular frequency in rad/s
+    ne: electron density in m^-3
+    B: magnetic field in Tesla
+    L: length of plasma in m
 
     Returns:
-    - theta_deg : float
-        Faraday rotation angle in degrees
+    - theta_deg : Faraday rotation angle in degrees
     """
-    coeff = e**3 / (8*pi**2*epsilon_0*m_e**2*c**3)
+    coeff = e**3 / (2*epsilon_0*m_e**2*c)
     
-    wavelength = c / freq_in
-
-    # Compute angle in radians
-    theta_rad = coeff * (wavelength ** 2) * ne*1e6 * B*1e-4 * L*1e2
+    theta_rad = coeff/omega**2  * ne * B * L
     
-    # Convert to degrees
-    theta_deg = np.degrees(theta_rad)
-    
-    return theta_deg
+    return np.degrees(theta_rad)
 
 #===========================================================================================================
-    """
-    Generate a pulse wave packet with exactly n cycles,
-    with zero padding before and after the wave packet, making the total signal length 
-    3 times the wave packet duration. The pulse amplitude goes from 0 to 1.
-
-    Parameters:
-    - f0 : float
-        Carrier frequency in Hz.
-    - n_cycles : int
-        Number of cycles in the wave packet.
-    - num_points : int
-        Number of time samples for the wave packet portion.
-        Total points will be 3 * num_points.
-    - return_envelope : bool
-        If True, also return a rectangular envelope.
-
-    Returns:
-    - t : ndarray
-        Time array in seconds.
-    - signal : ndarray
-        Pulse wave with zero padding.
-    - freqs : ndarray
-        Frequency array in Hz (matches FFT output).
-    - fft_signal : ndarray
-        FFT of the waveform (complex).
-    - envelope (optional) : ndarray
-        Rectangular envelope of the pulse (if return_envelope is True).
-    """
-    T = 1 / f0
-    duration = n_cycles * T
-    
-    # Create a time array 3 times longer (zeros before, wave, zeros after)
-    total_points = 3 * num_points
-    total_duration = 3 * duration
-    t = np.linspace(0, total_duration, total_points)
-    dt = t[1] - t[0]
-    
-    # Create signal with zeros
-    signal = np.zeros(total_points)
-    
-    # The wavepacket is in the middle third
-    start_idx = num_points
-    end_idx = 2 * num_points
-    
-    # Time values for the wavepacket portion
-    t_packet = t[start_idx:end_idx]
-    
-    # Create the pulse wave in the middle section only
-    # Get time values modulo one period
-    phase = (t_packet % T) / T
-    # Create pulse wave (1 for first half of period, 0 for second half)
-    pulse_wave = np.where(phase < 0.5, 1.0, 0.0)
-    
-    # Apply to the signal
-    signal[start_idx:end_idx] = pulse_wave
-    
-    # Create rectangular envelope (all ones in middle section)
-    envelope = np.zeros(total_points)
-    envelope[start_idx:end_idx] = 1.0
-    
-    # Calculate FFT of the full signal (including zeros)
-    fft_signal = fft.fft(signal)
-    freqs = fft.fftfreq(total_points, dt)
-
-    if return_envelope:
-        return t, signal, freqs, fft_signal, envelope
-    else:
-        return t, signal, freqs, fft_signal
 
 def generate_n_cycle_wave_packet(f0, n_cycles, num_points=4096, return_envelope=False):
     """
@@ -326,7 +247,7 @@ def generate_n_cycle_wave_packet(f0, n_cycles, num_points=4096, return_envelope=
         return t, signal, freqs, fft_signal
 
 #===========================================================================================================
-def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=0, npd=1000):
+def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000):
     """
     Generate a THz waveform pulse train and its spectrum.
     
@@ -334,7 +255,7 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=0, npd=1000
         f0_THz (float): Center frequency in THz (defines pulse spacing).
         sigma_t (float): Width parameter of the single-cycle pulse in ps.
         npulses (int): Number of pulses in the train.
-        Ts (float): Sampling interval in ps.
+        dt (float): Sampling interval in ps.
         pulse_offset (float): Time offset before the first pulse (default 0 ps).
     
     Returns:
@@ -355,7 +276,7 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=0, npd=1000
     # Create time array with equal padding
     t_start = -padding
     t_end = pulse_duration + pulse_offset + padding
-    tarr = np.arange(t_start, t_end, Ts)
+    tarr = np.arange(t_start, t_end, dt)
     
     # Create the waveform
     waveform = np.zeros_like(tarr)
