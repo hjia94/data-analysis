@@ -326,7 +326,7 @@ def generate_n_cycle_wave_packet(f0, n_cycles, num_points=4096, return_envelope=
         return t, signal, freqs, fft_signal
 
 #===========================================================================================================
-def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=0):
+def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=0, npd=1000):
     """
     Generate a THz waveform pulse train and its spectrum.
     
@@ -335,7 +335,7 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=0):
         sigma_t (float): Width parameter of the single-cycle pulse in ps.
         npulses (int): Number of pulses in the train.
         Ts (float): Sampling interval in ps.
-        pulse_offset (float): Time offset before the first pulse (default 10 ps).
+        pulse_offset (float): Time offset before the first pulse (default 0 ps).
     
     Returns:
         tarr (np.ndarray): Time array in ps.
@@ -349,38 +349,27 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, Ts, pulse_offset=0):
         return t * np.exp(-t**2 / sigma_t**2)
 
     deltat = 1 / f0_THz  # pulse period in ps
-    t_max = 3 * npulses * deltat
-    waveform_tarr = np.arange(0, t_max, Ts)
-    waveform_len = len(waveform_tarr)
+    pulse_duration = npulses * deltat  # Duration of the pulse train
+    padding = npd * pulse_duration  # Equal padding before and after
     
-    # Create the original waveform
-    original_waveform = np.zeros_like(waveform_tarr)
+    # Create time array with equal padding
+    t_start = -padding
+    t_end = pulse_duration + pulse_offset + padding
+    tarr = np.arange(t_start, t_end, Ts)
+    
+    # Create the waveform
+    waveform = np.zeros_like(tarr)
     for i in range(npulses):
-        original_waveform += ETHz(waveform_tarr - pulse_offset - i * deltat)
+        t_pulse = tarr - pulse_offset - i * deltat
+        waveform += ETHz(t_pulse)
     
     # Calculate the envelope using the Hilbert transform
     from scipy.signal import hilbert
-    original_envelope = np.abs(hilbert(original_waveform))
-    
-    # Create extended arrays with zeros at beginning and end
-    # Add same length of zeros at beginning and 10x length at end
-    total_len = waveform_len + waveform_len + 100 * waveform_len  # original + prefix + suffix
-    
-    # Create extended time array
-    t_start = waveform_tarr[0] - waveform_len * Ts
-    t_end = waveform_tarr[-1] + 5 * waveform_len * Ts
-    tarr = np.linspace(t_start, t_end, total_len)
-    
-    # Create extended waveform with zeros
-    waveform = np.zeros(total_len)
-    waveform[waveform_len:2*waveform_len] = original_waveform
-    
-    # Create extended envelope with zeros
-    envelope = np.zeros(total_len)
-    envelope[waveform_len:2*waveform_len] = original_envelope
-    
+    envelope = np.abs(hilbert(waveform))
 
-    return tarr, waveform, envelope
+    x = c*sigma_t*npulses*1e-12
+    
+    return tarr, waveform, envelope, x
 
 
 def plasma_dispersion_relation(omega, wpe, debug=False):  # e.g. 0.5 THz plasma frequency
@@ -406,7 +395,13 @@ def plasma_dispersion_relation(omega, wpe, debug=False):  # e.g. 0.5 THz plasma 
     propagating_mask = omega > wpe
     k[propagating_mask] = np.sqrt((omega[propagating_mask]**2 - wpe**2) / c**2)
 
-    return k, wpe
+    # Calculate group velocity, handling division by zero
+    with np.errstate(divide='ignore', invalid='ignore'):
+        vgarr = c*2 * k / omega  # Group velocity in m/s
+        # Replace NaN values with zeros
+        vgarr = np.nan_to_num(vgarr, nan=0.0)
+
+    return k, wpe, vgarr
 
 def propagate_through_dispersive_medium(tarr, signal, L, n_e, debug=False):
     """
@@ -426,7 +421,7 @@ def propagate_through_dispersive_medium(tarr, signal, L, n_e, debug=False):
 
     wpe = 5.64e4 * np.sqrt(n_e)  # Plasma frequency in rad/s
     
-    k, wpe = plasma_dispersion_relation(omega, wpe, debug=False)
+    k, wpe, vgarr = plasma_dispersion_relation(omega, wpe, debug=False)
 
     # Calculate phase shift for propagation
     phase_shift = np.exp(-1j * k * L)
@@ -437,41 +432,11 @@ def propagate_through_dispersive_medium(tarr, signal, L, n_e, debug=False):
     # Transform back to time domain
     signal_propagated = np.fft.irfft(fft_propagated)
 
-    return signal_propagated, fft_propagated
+    return signal_propagated, fft_propagated, vgarr
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================
 if __name__ == "__main__":
-    # Example usage of the wave packet generator with focused FFT
-    
-    # Parameters
-    f0 = 300e9 # GHz
-    n_cycles = 2
-    n_e = 1e13  # cm^-3
-    L = 1 # meter
-
-    # Generate the THz waveform
-    tarr, signal, envelope = generate_thz_waveform(f0/1e12, 0.9, n_cycles, 0.05, 5) # Units: THz, ps, n, ps, ps
-    
-    # Propagate the signal through the plasma and generate plots
-    signal_propagated, fft_propagated = propagate_through_dispersive_medium(tarr, signal, L, n_e, debug=True)
-    print(len(signal_propagated))
- 
-    # Create a figure with two subplots, one for each signal
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-    
-    # Plot the original signal in the first subplot
-    ax1.plot(tarr, signal, linewidth=2)
-    ax1.set_xlabel('Time (ps)')
-    ax1.set_ylabel('Amplitude')
-    ax1.set_title('Input Signal (L=0)')
-    
-    # Plot the propagated signal in the second subplot
-    ax2.plot(tarr, signal_propagated, linewidth=2)
-    ax2.set_xlabel('Time (ps)')
-    ax2.set_ylabel('Amplitude')
-
-    plt.tight_layout()
-    plt.show()
+    print('speed of light = ', c, 'm/s')
 
