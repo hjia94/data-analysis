@@ -249,7 +249,7 @@ def generate_n_cycle_wave_packet(f0, n_cycles, num_points=4096, return_envelope=
 #===========================================================================================================
 def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000):
     """
-    Generate a THz waveform pulse train and its spectrum.
+    Generate a THz waveform pulse train.
     
     Parameters:
         f0_THz (float): Center frequency in THz (defines pulse spacing).
@@ -257,13 +257,12 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000
         npulses (int): Number of pulses in the train.
         dt (float): Sampling interval in ps.
         pulse_offset (float): Time offset before the first pulse (default 0 ps).
+        npd (int): Number of padding points (default 1000).
     
     Returns:
         tarr (np.ndarray): Time array in ps.
         waveform (np.ndarray): Time-domain waveform.
-        freqs (np.ndarray): Frequency array in THz.
-        fft_signal (np.ndarray): FFT of the waveform (complex).
-        envelope (np.ndarray): Envelope of the waveform.
+        x (float): Wave covered distance in meters.
     """
     # Define the single-cycle THz field
     def ETHz(t):
@@ -284,13 +283,10 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000
         t_pulse = tarr - pulse_offset - i * deltat
         waveform += ETHz(t_pulse)
     
-    # Calculate the envelope using the Hilbert transform
-    from scipy.signal import hilbert
-    envelope = np.abs(hilbert(waveform))
 
     x = c*sigma_t*npulses*1e-12
     
-    return tarr, waveform, envelope, x
+    return tarr, waveform, x
 
 
 def plasma_dispersion_relation(omega, wpe, debug=False):  # e.g. 0.5 THz plasma frequency
@@ -324,7 +320,7 @@ def plasma_dispersion_relation(omega, wpe, debug=False):  # e.g. 0.5 THz plasma 
 
     return k, wpe, vgarr
 
-def propagate_through_dispersive_medium(tarr, signal, L, n_e, debug=False):
+def propagate_through_dispersive_medium(tarr, signal, n_e, L, debug=False):
     """
     Propagate a wave packet through a dispersive plasma medium.
 
@@ -356,15 +352,14 @@ def propagate_through_dispersive_medium(tarr, signal, L, n_e, debug=False):
     return signal_propagated, fft_propagated, vgarr
 
 
-def total_propagation(f0, n_cycles, n_e, L_arr):
-    tarr, signal, envelope, x = generate_thz_waveform(f0/1e12, 0.9, n_cycles, 0.1, 5, 100)
+def total_propagation(tarr, signal, n_e, L_arr, debug=False):
     
     tot_wave = np.zeros_like(tarr)
     for L in L_arr:
-        signal_propagated, fft_propagated, vgarr = propagate_through_dispersive_medium(tarr, signal, L, n_e)   
+        signal_propagated, fft_propagated, vgarr = propagate_through_dispersive_medium(tarr, signal, n_e, L, debug=debug)   
         tot_wave += signal_propagated / L**2
     
-    return tot_wave
+    return tarr, tot_wave
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
