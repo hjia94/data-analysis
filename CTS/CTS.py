@@ -127,7 +127,7 @@ def generate_spectral_density(probe_wavelength, T_e, T_i, n_e, scattering_angle=
     
     return alpha, omega_arr, omega_in, Skw
 
-def power_ratio(n_e, omega_arr, Skw, scattering_angle=180, L=0.1):
+def power_ratio(n_e, L=0.1, scattering_angle=180):
     '''
     calculate the ratio scattered power/incident power
     n_e: electron density in cm^-3
@@ -141,16 +141,16 @@ def power_ratio(n_e, omega_arr, Skw, scattering_angle=180, L=0.1):
     scattering_angle_rad = np.radians(scattering_angle)
     
     # Ensure n_e has proper units if it's not already a Quantity
-    if not isinstance(n_e, Quantity):
-        n_e = Quantity(n_e, astro_units.cm**-3)
+    # if not isinstance(n_e, Quantity):
+        # n_e = Quantity(n_e, astro_units.cm**-3)
     
     # Calculate the function with proper unit handling
-    func = r_0**2*L/(4*np.pi) * (1 + np.cos(scattering_angle_rad)**2) * n_e * Skw
+    func = r_0**2*L/(4*np.pi) * (1 + np.cos(scattering_angle_rad)**2) * n_e #* Skw
 
     # Integrate over angular frequency
-    result = integrate.simpson(func, omega_arr)
+    result = func * 2.5 #integrate.simpson(func, omega_arr)
         
-    return -result
+    return result
 
 def faraday_rotation_angle(omega, ne, B, L):
     """
