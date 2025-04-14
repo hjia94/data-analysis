@@ -76,18 +76,34 @@ def generate_spectral_density(probe_wavelength, T_e, T_i, n_e, scattering_angle=
     
     Parameters:
     -----------
-    probe_wavelength: in nm
-    delta_lam : Wavelength range to calculate around center wavelength
-    scattering_angle : in degrees
-    ne :  cm^-3
-    T_e : eV
-    T_i : eV
-    ions : Ion species
-    num_points : Number of points in wavelength array (default: 2000)
+    probe_wavelength: float
+        Probe wavelength in nm
+    T_e: float
+        Electron temperature in eV
+    T_i: float
+        Ion temperature in eV
+    n_e: float
+        Electron density in cm^-3
+    scattering_angle: float, optional
+        Scattering angle in degrees (default: 180)
+    delta_lam: float, optional
+        Wavelength range to calculate around center wavelength (default: 20)
+    num_points: int, optional
+        Number of points in wavelength array (default: 10000)
+    ions: str, optional
+        Ion species (default: "He+")
         
     Returns:
     --------
-    Skw: spectral density (rad/s)
+    tuple
+        - alpha: float
+            Scattering parameter
+        - omega_arr: ndarray
+            Angular frequency array in rad/s
+        - omega_in: float
+            Incident angular frequency in rad/s
+        - Skw: ndarray
+            Spectral density function
     """
 
     # Convert inputs to astropy units if they aren't already
@@ -166,10 +182,19 @@ def faraday_rotation_angle(omega, ne, B, L):
     - theta_deg : Faraday rotation angle in degrees
     """
     coeff = e**3 / (2*epsilon_0*m_e**2*c)
+    theta_rad = coeff/omega**2 * ne * B * L
     
-    theta_rad = coeff/omega**2  * ne * B * L
+    # Convert to degrees
+    theta_deg = np.degrees(theta_rad)
     
-    return np.degrees(theta_rad)
+    # If angle exceeds 360 degrees, set it to zero
+    if isinstance(theta_deg, np.ndarray):
+        theta_deg[theta_deg > 360] = 0
+    else:
+        if theta_deg > 360:
+            theta_deg = 0
+    
+    return theta_deg
 
 #===========================================================================================================
 
@@ -252,21 +277,39 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000
     Generate a THz waveform pulse train.
     
     Parameters:
-        f0_THz (float): Center frequency in THz (defines pulse spacing).
-        sigma_t (float): Width parameter of the single-cycle pulse in ps.
-        npulses (int): Number of pulses in the train.
-        dt (float): Sampling interval in ps.
-        pulse_offset (float): Time offset before the first pulse (default 0 ps).
-        npd (int): Number of padding points (default 1000).
+    -----------
+    f0_THz: float
+        Center frequency in THz (defines pulse spacing)
+    sigma_t: float
+        Width parameter of the single-cycle pulse in ps
+    npulses: int
+        Number of pulses in the train
+    dt: float
+        Sampling interval in ps
+    pulse_offset: float, optional
+        Time offset before the first pulse (default: 0 ps)
+    npd: int, optional
+        Number of padding points 
     
     Returns:
-        tarr (np.ndarray): Time array in ps.
-        waveform (np.ndarray): Time-domain waveform.
-        x (float): Wave covered distance in meters.
+    --------
+    tuple
+        - tarr: ndarray
+            Time array in ps
+        - waveform: ndarray
+            Time-domain waveform
+        - freqs: ndarray
+            Frequency array in Hz
+        - signal_fft: ndarray
+            Frequency-domain representation of the waveform
+        - x: float
+            Wave covered distance in meters
     """
     # Define the single-cycle THz field
     def ETHz(t):
-        return t * np.exp(-t**2 / sigma_t**2)
+        # Normalize to ensure amplitude = 1
+        normalization = (sigma_t/np.sqrt(2)) * np.exp(-0.5)
+        return (t/normalization) * np.exp(-t**2 / sigma_t**2)
 
     deltat = 1 / f0_THz  # pulse period in ps
     pulse_duration = npulses * deltat  # Duration of the pulse train
@@ -283,24 +326,45 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000
         t_pulse = tarr - pulse_offset - i * deltat
         waveform += ETHz(t_pulse)
     
+    # Check if imaginary parts are just numerical noise
+    if np.max(np.abs(np.imag(waveform))) < 1e-10:
+        # Safe to discard - they're just numerical artifacts
+        waveform = np.real(waveform)
+    else:
+        # Log a warning - might be physically meaningful
+        print("Warning: Significant imaginary components detected in waveform")
+
+    # Transform signal to frequency domain
+    signal_fft = np.fft.rfft(waveform)
+    freqs = np.fft.rfftfreq(len(tarr), dt*1e-12)  # Frequency in Hz
 
     x = c*sigma_t*npulses*1e-12
     
-    return tarr, waveform, x
+    return tarr, waveform, freqs, signal_fft, x
 
 
-def plasma_dispersion_relation(omega, wpe, debug=False):  # e.g. 0.5 THz plasma frequency
+def plasma_dispersion_relation(omega, wpe, debug=False):
     """
-    Returns the wave number k(omega) for a cold plasma.
+    Calculate the wave number k(omega) for a cold plasma.
 
     Parameters:
-    - omega : ndarray
-        Angular frequency array [rad/s]
-    - n_e : electron density in cm^-3
+    -----------
+    omega: ndarray
+        Angular frequency array in rad/s
+    wpe: float
+        Plasma frequency in rad/s
+    debug: bool, optional
+        If True, print debug information (default: False)
 
     Returns:
-    - k : ndarray
-        Wavenumber array [rad/m]
+    --------
+    tuple
+        - k: ndarray
+            Wavenumber array in rad/m
+        - wpe: float
+            Plasma frequency in rad/s
+        - vgarr: ndarray
+            Group velocity array in m/s
     """
     if debug:
         print(f"Plasma frequency: {wpe/(2*np.pi)/1e9:.2f} GHz")
@@ -320,25 +384,40 @@ def plasma_dispersion_relation(omega, wpe, debug=False):  # e.g. 0.5 THz plasma 
 
     return k, wpe, vgarr
 
-def propagate_through_dispersive_medium(tarr, signal, n_e, L, debug=False):
+def propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=False):
     """
     Propagate a wave packet through a dispersive plasma medium.
-
-    """
-    # Calculate time step and total points
-    dt = (tarr[1] - tarr[0]) *1e-12  # seconds
-    NT = len(tarr)
     
-    # Transform signal to frequency domain
-    signal_fft = np.fft.rfft(signal)
-    freqs = np.fft.rfftfreq(NT, dt)  # Frequency in Hz
+    Parameters:
+    -----------
+    freqs: ndarray
+        Frequency array in Hz
+    signal_fft: ndarray
+        Input signal waveform in frequency domain
+    n_e: float
+        Electron density in cm^-3
+    L: float
+        Propagation distance in meters
+    debug: bool, optional
+        If True, print debug information (default: False)
+        
+    Returns:
+    --------
+    tuple
+        - signal_propagated: ndarray
+            Propagated signal in time domain
+        - fft_propagated: ndarray
+            Propagated signal in frequency domain
+        - vgarr: ndarray
+            Group velocity array in m/s
+    """
     
     # Calculate angular frequencies and plasma frequency
     omega = 2 * np.pi * freqs  # Angular frequency in rad/s
 
     wpe = 5.64e4 * np.sqrt(n_e)  # Plasma frequency in rad/s
     
-    k, wpe, vgarr = plasma_dispersion_relation(omega, wpe, debug=False)
+    k, wpe, vgarr = plasma_dispersion_relation(omega, wpe, debug=debug)
 
     # Calculate phase shift for propagation
     phase_shift = np.exp(-1j * k * L)
@@ -347,19 +426,44 @@ def propagate_through_dispersive_medium(tarr, signal, n_e, L, debug=False):
     fft_propagated = signal_fft * phase_shift
     
     # Transform back to time domain
-    signal_propagated = np.fft.irfft(fft_propagated)
+    signal_propagated = np.fft.irfft(fft_propagated, n=NT)
 
     return signal_propagated, fft_propagated, vgarr
 
 
-def total_propagation(tarr, signal, n_e, L_arr, debug=False):
+def total_propagation(NT, freqs, signal_fft, n_e, L_arr, debug=False):
+    """
+    Simulate wave propagation through multiple layers of plasma and calculate total field.
     
-    tot_wave = np.zeros_like(tarr)
-    for L in L_arr:
-        signal_propagated, fft_propagated, vgarr = propagate_through_dispersive_medium(tarr, signal, n_e, L, debug=debug)   
+    Parameters:
+    -----------
+    freqs: ndarray
+        Frequency array in Hz
+    signal_fft: ndarray
+        Input signal in frequency domain
+    n_e: float
+        Electron density in cm^-3
+    L_arr: ndarray
+        Array of propagation distances in meters
+    debug: bool, optional
+        If True, print debug information (default: False)
+        
+    Returns:
+    --------
+    tuple
+        - freqs: ndarray
+            Frequency array in Hz
+        - tot_wave: ndarray
+            Total propagated wave, summed over all distances with 1/L² attenuation
+    """
+    tot_wave, _, _ = propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L_arr[0], debug=debug)
+
+    for L in L_arr[1:]:
+
+        signal_propagated, _, _ = propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=debug)
         tot_wave += signal_propagated / L**2
     
-    return tarr, tot_wave
+    return tot_wave
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
