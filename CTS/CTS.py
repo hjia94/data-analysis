@@ -196,80 +196,6 @@ def faraday_rotation_angle(omega, ne, B, L):
     
     return theta_deg
 
-#===========================================================================================================
-
-def generate_n_cycle_wave_packet(f0, n_cycles, num_points=4096, return_envelope=False):
-    """
-    Generate a Gaussian-modulated sinusoidal wave packet with exactly n cycles,
-    ensuring the signal starts and ends near zero. The function adds zero padding
-    before and after the wave packet, making the total signal length 3 times the 
-    wave packet duration.
-
-    Parameters:
-    - f0 : float
-        Carrier frequency in Hz.
-    - n_cycles : int
-        Number of cycles in the wave packet.
-    - num_points : int
-        Number of time samples for the wave packet portion.
-        Total points will be 3 * num_points.
-    - return_envelope : bool
-        If True, also return the Gaussian envelope.
-
-    Returns:
-    - t : ndarray
-        Time array in seconds.
-    - signal : ndarray
-        Gaussian-modulated sinusoidal waveform with zero padding.
-    - freqs : ndarray
-        Frequency array in Hz (matches FFT output).
-    - fft_signal : ndarray
-        FFT of the waveform (complex).
-    - envelope (optional) : ndarray
-        Envelope of the pulse (if return_envelope is True).
-    """
-    T = 1 / f0
-    duration = n_cycles * T
-    
-    # Create a time array 3 times longer (zeros before, wavepacket, zeros after)
-    total_points = 3 * num_points
-    total_duration = 3 * duration
-    t = np.linspace(0, total_duration, total_points)
-    dt = t[1] - t[0]
-    
-    # Create signal with zeros
-    signal = np.zeros(total_points)
-    
-    # The wavepacket is in the middle third
-    t_packet = np.linspace(duration, 2*duration, num_points)
-    t0 = 1.5 * duration  # Center of the time array
-    tau = duration / 6   # Set width so envelope is ~0 at pulse edges
-    
-    # Calculate the wavepacket
-    packet_center_idx = num_points // 2
-    start_idx = num_points
-    end_idx = 2 * num_points
-    
-    # Time values for the wavepacket portion
-    t_packet = t[start_idx:end_idx]
-    
-    # Create the wavepacket in the middle section only
-    envelope_packet = np.exp(-((t_packet - t0) ** 2) / (2 * tau ** 2))
-    carrier_packet = np.cos(2 * np.pi * f0 * (t_packet - t0))
-    signal[start_idx:end_idx] = envelope_packet * carrier_packet
-    
-    # Create full envelope (including zeros) for return if needed
-    envelope = np.zeros(total_points)
-    envelope[start_idx:end_idx] = envelope_packet
-    
-    # Calculate FFT of the full signal (including zeros)
-    fft_signal = fft.fft(signal)
-    freqs = fft.fftfreq(total_points, dt)
-
-    if return_envelope:
-        return t, signal, freqs, fft_signal, envelope
-    else:
-        return t, signal, freqs, fft_signal
 
 #===========================================================================================================
 def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000):
@@ -342,6 +268,62 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000
     
     return tarr, waveform, freqs, signal_fft, x
 
+
+def generate_n_cycle_wave_packet(f0_THz, sigma_t, npulses=1, dt=0.01, pulse_offset=0, npd=1000):
+    """
+    Generate a THz waveform with a Gaussian envelope.
+    
+    Parameters:
+    -----------
+    f0_THz: float
+        Center frequency in THz
+
+    npulses: int, optional
+        Number of pulses in the train (default: 1)
+    dt: float, optional
+        Sampling interval in ps (default: 0.01)
+    pulse_offset: float, optional
+        Time offset before the first pulse (default: 0 ps)
+    npd: int, optional
+        Number of padding points (default: 1000)
+    
+    Returns:
+    --------
+    tuple
+        - tarr: ndarray
+            Time array in ps
+        - waveform: ndarray
+            Time-domain waveform with Gaussian envelope
+        - freqs: ndarray
+            Frequency array in Hz
+        - signal_fft: ndarray
+            Frequency-domain representation of the waveform
+        - x: float
+            Wave covered distance in meters
+    """
+    # First generate the base THz waveform
+    tarr, waveform, freqs, signal_fft, x = generate_thz_waveform(
+        f0_THz, sigma_t, npulses, dt, pulse_offset, npd
+    )
+    
+    # Create a Gaussian envelope centered at the middle of the time array
+    t_center = (tarr[-1] + tarr[0]) / 2
+    # Width of the Gaussian envelope (adjust as needed)
+    tau = 1/f0_THz * npulses
+    
+    # Create the Gaussian envelope
+    envelope = np.exp(-((tarr - t_center) ** 2) / (tau ** 2))
+    
+    # Normalize the envelope to have a maximum of 1
+    envelope = envelope / np.max(envelope)
+    
+    # Apply the envelope to the waveform
+    modulated_waveform = waveform * envelope
+    
+    # Recalculate the FFT for the modulated waveform
+    modulated_signal_fft = np.fft.rfft(modulated_waveform)
+    
+    return tarr, modulated_waveform, freqs, modulated_signal_fft, x
 
 def plasma_dispersion_relation(omega, wpe, debug=False):
     """
