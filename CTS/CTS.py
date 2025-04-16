@@ -268,62 +268,52 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000
     
     return tarr, waveform, freqs, signal_fft, x
 
+def E_1cycle(t,sigma_t):
+    E = t * np.exp(-t**2/sigma_t**2)
+    return -E / (sigma_t/np.sqrt(2*np.e))     # normalized to 1, centered at t=0, goes positive first
 
-def generate_n_cycle_wave_packet(f0_THz, sigma_t, npulses=1, dt=0.01, pulse_offset=0, npd=1000):
-    """
-    Generate a THz waveform with a Gaussian envelope.
-    
-    Parameters:
-    -----------
-    f0_THz: float
-        Center frequency in THz
+def E_Ncycles(N, delay, dt, sigma_t, t_before=0, t_after=0):     # dt, sigma_t, t_after should all be in the same time units
+    n_before = int(t_before/dt+.5)
+    n_after  = int(t_after/dt+.5)
+    NT = int((N+1)*delay/dt+0.5) + n_after + n_before
+    tarr = np.linspace(0-t_before, (N+1)*delay+t_after, NT, endpoint=False)
+    Earr = np.zeros(NT)
+    for i in range(N):
+        Earr += E_1cycle(tarr-(i+1)*delay, sigma_t)
+    return tarr, Earr
 
-    npulses: int, optional
-        Number of pulses in the train (default: 1)
-    dt: float, optional
-        Sampling interval in ps (default: 0.01)
-    pulse_offset: float, optional
-        Time offset before the first pulse (default: 0 ps)
-    npd: int, optional
-        Number of padding points (default: 1000)
-    
-    Returns:
-    --------
-    tuple
-        - tarr: ndarray
-            Time array in ps
-        - waveform: ndarray
-            Time-domain waveform with Gaussian envelope
-        - freqs: ndarray
-            Frequency array in Hz
-        - signal_fft: ndarray
-            Frequency-domain representation of the waveform
-        - x: float
-            Wave covered distance in meters
-    """
+def generate_n_cycle_wave_packet(f0_THz, sigma_t, npulses, dt, npd=1000):
     # First generate the base THz waveform
-    tarr, waveform, freqs, signal_fft, x = generate_thz_waveform(
-        f0_THz, sigma_t, npulses, dt, pulse_offset, npd
-    )
-    
+    f0 = f0_THz * 1e12
+    period = 1/f0
+
+    tarr, waveform = E_Ncycles(16*npulses, period, dt, sigma_t, t_before=npd*period, t_after=npd*period)
+
     # Create a Gaussian envelope centered at the middle of the time array
     t_center = (tarr[-1] + tarr[0]) / 2
     # Width of the Gaussian envelope (adjust as needed)
-    tau = 1/f0_THz * npulses
-    
+    tau = period * npulses/2
+
     # Create the Gaussian envelope
-    envelope = np.exp(-((tarr - t_center) ** 2) / (tau ** 2))
-    
+    if True:
+        envelope = np.exp(-((tarr - t_center) ** 2) / (tau ** 2))   # inserted 2 back into this formula
+    else:
+        envelope = np.zeros_like(tarr)
+        dn = int(tau/dt)
+        nhalf = tarr.size//2
+        envelope[nhalf-dn:nhalf+dn] = 1
+
     # Normalize the envelope to have a maximum of 1
     envelope = envelope / np.max(envelope)
-    
+
     # Apply the envelope to the waveform
     modulated_waveform = waveform * envelope
-    
+
     # Recalculate the FFT for the modulated waveform
     modulated_signal_fft = np.fft.rfft(modulated_waveform)
-    
-    return tarr, modulated_waveform, freqs, modulated_signal_fft, x
+    freqs = np.fft.rfftfreq(len(tarr), dt)
+
+    return tarr*1e12, modulated_waveform, freqs, modulated_signal_fft
 
 def plasma_dispersion_relation(omega, wpe, debug=False):
     """
