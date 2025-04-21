@@ -143,7 +143,7 @@ def generate_spectral_density(probe_wavelength, T_e, T_i, n_e, scattering_angle=
     
     return alpha, omega_arr, omega_in, Skw
 
-def power_ratio(n_e, L=0.1, scattering_angle=180):
+def power_ratio(Skw, n_e, L, scattering_angle=180):
     '''
     calculate the ratio scattered power/incident power
     n_e: electron density in cm^-3
@@ -161,10 +161,10 @@ def power_ratio(n_e, L=0.1, scattering_angle=180):
         # n_e = Quantity(n_e, astro_units.cm**-3)
     
     # Calculate the function with proper unit handling
-    func = r_0**2*L/(4*np.pi) * (1 + np.cos(scattering_angle_rad)**2) * n_e #* Skw
+    func = r_0**2*L/(4*np.pi) * (1 + np.cos(scattering_angle_rad)**2) * n_e * Skw
 
     # Integrate over angular frequency
-    result = func * 2.5 #integrate.simpson(func, omega_arr)
+    result = func #integrate.simpson(func, omega_arr)
         
     return result
 
@@ -230,6 +230,8 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000
             Frequency-domain representation of the waveform
         - x: float
             Wave covered distance in meters
+        - center_ind: int
+            Index of the center of the wave packet
     """
     # Define the single-cycle THz field
     def ETHz(t):
@@ -263,10 +265,12 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000
     # Transform signal to frequency domain
     signal_fft = np.fft.rfft(waveform)
     freqs = np.fft.rfftfreq(len(tarr), dt*1e-12)  # Frequency in Hz
-
-    x = c*sigma_t*npulses*1e-12
     
-    return tarr, waveform, freqs, signal_fft, x
+    # Calculate center index
+    center_time = pulse_offset + pulse_duration/2
+    center_ind = np.argmin(np.abs(tarr - center_time))
+    
+    return tarr, waveform, freqs, signal_fft, center_ind
 
 def E_1cycle(t,sigma_t):
     E = t * np.exp(-t**2/sigma_t**2)
@@ -282,15 +286,13 @@ def E_Ncycles(N, delay, dt, sigma_t, t_before=0, t_after=0):     # dt, sigma_t, 
         Earr += E_1cycle(tarr-(i+1)*delay, sigma_t)
     return tarr, Earr
 
-def generate_n_cycle_wave_packet(f0_THz, sigma_t, npulses, dt, npd=1000):
-    # First generate the base THz waveform
-    f0 = f0_THz * 1e12
-    period = 1/f0
+def generate_n_cycle_wave_packet(f0, sigma_t, npulses, dt, offset=0.5, npd=1000):
 
+    period = 1/f0
     tarr, waveform = E_Ncycles(16*npulses, period, dt, sigma_t, t_before=npd*period, t_after=npd*period)
 
     # Create a Gaussian envelope centered at the middle of the time array
-    t_center = (tarr[-1] + tarr[0]) / 2
+    t_center = (tarr[-1] + tarr[0]) * offset
     # Width of the Gaussian envelope (adjust as needed)
     tau = period * npulses/2
 
@@ -348,13 +350,8 @@ def plasma_dispersion_relation(omega, wpe, debug=False):
     propagating_mask = omega > wpe
     k[propagating_mask] = np.sqrt((omega[propagating_mask]**2 - wpe**2) / c**2)
 
-    # Calculate group velocity, handling division by zero
-    with np.errstate(divide='ignore', invalid='ignore'):
-        vgarr = c*2 * k / omega  # Group velocity in m/s
-        # Replace NaN values with zeros
-        vgarr = np.nan_to_num(vgarr, nan=0.0)
 
-    return k, wpe, vgarr
+    return k, wpe
 
 def propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=False):
     """
@@ -382,6 +379,8 @@ def propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=Fal
             Propagated signal in frequency domain
         - vgarr: ndarray
             Group velocity array in m/s
+        - center_ind: int
+            Index of the center of the propagated wave packet
     """
     
     # Calculate angular frequencies and plasma frequency
@@ -389,7 +388,7 @@ def propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=Fal
 
     wpe = 5.64e4 * np.sqrt(n_e)  # Plasma frequency in rad/s
     
-    k, wpe, vgarr = plasma_dispersion_relation(omega, wpe, debug=debug)
+    k, wpe = plasma_dispersion_relation(omega, wpe, debug=debug)
 
     # Calculate phase shift for propagation
     phase_shift = np.exp(-1j * k * L)
@@ -399,8 +398,8 @@ def propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=Fal
     
     # Transform back to time domain
     signal_propagated = np.fft.irfft(fft_propagated, n=NT)
-
-    return signal_propagated, fft_propagated, vgarr
+    
+    return signal_propagated, fft_propagated
 
 
 def total_propagation(NT, freqs, signal_fft, n_e, L_arr, debug=False):
