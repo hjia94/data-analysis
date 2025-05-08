@@ -109,4 +109,4 @@ def track_object(avi_path, time_arr, CALIBRATION, cx, cy, chamber_radius):
         cv2.destroyAllWindows()
         
     print(f"Processed {len(positions)} positions")
-    return np.array(positions), time_arr[frame_numbers]
+    return np.array(positions), time_arr[frame_numbers], np.array(frame_numbers)
