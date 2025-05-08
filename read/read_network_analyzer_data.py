@@ -3,6 +3,8 @@ Read Network Analyzer data from CSV file.
 Usage example:
 data_dict = read_NA_data("your_file.csv")  # Normal usage
 data_dict = read_NA_data("your_file.csv", verbose=True)  # Debug mode
+
+TODO: This code doesn't work with the current pandas and numpy versions in the environment.
 '''
 
 import pandas as pd
