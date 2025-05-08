@@ -30,6 +30,13 @@ wheels/
 *.csv
 *.dat
 *.txt
+*.avi
+*.cine
+*.hdf5
+*.h5
+*.hdf
+*.hdf5
+*.h5
 
 # IDE specific files
 .idea/
