@@ -34,15 +34,15 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     
     # Create figure with 2 subplots using a string identifier
     fig_id = f"shot_{file_number}"
-    fig = plt.figure(fig_id)
+    fig, ax1 = plt.subplots(figsize=(12, 6))
     
     # Position the window on the specified monitor
     # select_monitor(monitor_idx=monitor_idx, window_scale=(0.1, 0.1))
     
     # Create 2 subplots
-    gs = GridSpec(2, 1, figure=fig)
-    ax1 = fig.add_subplot(gs[0])
-    ax2 = fig.add_subplot(gs[1])
+    # gs = GridSpec(1, 1, figure=fig)
+    # ax1 = fig.add_subplot(gs[0])
+    # ax2 = fig.add_subplot(gs[1])
     
     # List all files in the directory
     all_files = os.listdir(base_dir)
@@ -94,13 +94,12 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
         P_data = (I_data * 0.25) * (-V_data)  # 1V ~ 0.25A; V is recorded negative
         
         # Create power plot with twin y-axis
-        ax1.plot(tarr_I*1e3, P_data + Pref_data*1000, 'b-', label='Power')
-        ax1.set_xlabel('Time (ms)', fontsize=12)
-        ax1.set_ylabel('Power (W)', color='b', fontsize=12)
-        ax1.tick_params(axis='y', labelcolor='b', labelsize=10)
-        ax1.tick_params(axis='x', labelsize=10)
+        ax1.plot(tarr_I*1e3, P_data * 0.6e-3, label='Magnetron Power')
+        ax1.set_xlabel('Time (ms)', fontsize=16)
+        ax1.set_ylabel('Power (kW)', fontsize=16)
+        ax1.tick_params(axis='y', labelsize=16)
+        ax1.tick_params(axis='x', labelsize=16)
         ax1.grid(True)
-        ax1.set_title('Power Plot', fontsize=14, pad=10)
         
         # Free memory
         del P_data
@@ -136,6 +135,12 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     # detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=debug)
     detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=debug)
     detector.reduce_pulses()
+
+    ax1_twin = ax1.twinx()
+    ax1_twin.plot(detector.tarr_ds, detector.baseline_subtracted, c='r',label='X-ray signal')
+    ax1_twin.set_yticks([])
+    ax1.set_xlim(-5,40)
+    ax1_twin.set_xlim(-5,40)
     
     # Calculate photon counts per bin
     bin_centers, counts = detector.counts_per_bin(bin_width_ms=0.1)
@@ -144,69 +149,69 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     del xray_data
     del tarr_x
     
-    # Plot 2: STFT from Bdot data
-    # First try to load specified channel, then Channel 2 as fallback
-    bdot_data = None
-    tarr_B = None
-    channel_used = None
+    # # Plot 2: STFT from Bdot data
+    # # First try to load specified channel, then Channel 2 as fallback
+    # bdot_data = None
+    # tarr_B = None
+    # channel_used = None
     
-    # Try to load the requested channel first
-    print(f"Attempting to load Bdot data from Channel {bdot_channel}")
-    for f in bdot_files:
-        if f"C{bdot_channel}--" in f:
-            filepath = os.path.join(base_dir, f)
-            try:
-                bdot_data, tarr_B = read_trc_data(filepath)
-                channel_used = f"C{bdot_channel}"
-                print(f"Using Bdot data from Channel {bdot_channel}: {f}")
-                break
-            except Exception as e:
-                print(f"Error loading Bdot data from Channel {bdot_channel}: {e}")
+    # # Try to load the requested channel first
+    # print(f"Attempting to load Bdot data from Channel {bdot_channel}")
+    # for f in bdot_files:
+    #     if f"C{bdot_channel}--" in f:
+    #         filepath = os.path.join(base_dir, f)
+    #         try:
+    #             bdot_data, tarr_B = read_trc_data(filepath)
+    #             channel_used = f"C{bdot_channel}"
+    #             print(f"Using Bdot data from Channel {bdot_channel}: {f}")
+    #             break
+    #         except Exception as e:
+    #             print(f"Error loading Bdot data from Channel {bdot_channel}: {e}")
                 
-    # If requested channel failed, try channel 2 as fallback
-    if bdot_data is None or tarr_B is None:
-        print("Falling back to Channel 2 for Bdot data")
-        for f in bdot_files:
-            if "C2--" in f:
-                filepath = os.path.join(base_dir, f)
-                try:
-                    bdot_data, tarr_B = read_trc_data(filepath)
-                    channel_used = "C2"
-                    print(f"Using Bdot data from Channel 2 as fallback: {f}")
-                    break
-                except Exception as e:
-                    print(f"Error loading Bdot data from Channel 2: {e}")
+    # # If requested channel failed, try channel 2 as fallback
+    # if bdot_data is None or tarr_B is None:
+    #     print("Falling back to Channel 2 for Bdot data")
+    #     for f in bdot_files:
+    #         if "C2--" in f:
+    #             filepath = os.path.join(base_dir, f)
+    #             try:
+    #                 bdot_data, tarr_B = read_trc_data(filepath)
+    #                 channel_used = "C2"
+    #                 print(f"Using Bdot data from Channel 2 as fallback: {f}")
+    #                 break
+    #             except Exception as e:
+    #                 print(f"Error loading Bdot data from Channel 2: {e}")
     
-    # Calculate and plot STFT if Bdot data is available
-    if bdot_data is not None and tarr_B is not None:
-        try:
-            # Calculate STFT using parameters from xray_test.ipynb
-            freq, stft_matrix, stft_time = calculate_stft(
-                time_array=tarr_B, 
-                data_arr=bdot_data,
-                freq_bins=500, 
-                overlap_fraction=0.05,
-                window='hanning', 
-                freq_min=100e6, 
-                freq_max=800e6
-            )
+    # # Calculate and plot STFT if Bdot data is available
+    # if bdot_data is not None and tarr_B is not None:
+    #     try:
+    #         # Calculate STFT using parameters from xray_test.ipynb
+    #         freq, stft_matrix, stft_time = calculate_stft(
+    #             time_array=tarr_B, 
+    #             data_arr=bdot_data,
+    #             freq_bins=500, 
+    #             overlap_fraction=0.05,
+    #             window='hanning', 
+    #             freq_min=100e6, 
+    #             freq_max=800e6
+    #         )
             
-            # Plot STFT with photon counts overlay
-            plot_stft_wt_photon_counts(stft_time, stft_matrix, freq, bin_centers, counts, fig=fig, ax=ax2)
+    #         # Plot STFT with photon counts overlay
+    #         plot_stft_wt_photon_counts(stft_time, stft_matrix, freq, bin_centers, counts, fig=fig, ax=ax2)
             
-            # Adjust STFT plot labels for better visibility
-            ax2.set_xlim(10,14)
+    #         # Adjust STFT plot labels for better visibility
+    #         ax2.set_xlim(10,14)
             
-        except Exception as e:
-            print(f"Error calculating STFT: {e}")
-            ax2.text(0.5, 0.5, f'Error calculating STFT: {str(e)}', 
-                    horizontalalignment='center', verticalalignment='center',
-                    transform=ax2.transAxes, fontsize=12)
-    else:
-        ax2.text(0.5, 0.5, 'Bdot data not available', 
-                horizontalalignment='center', verticalalignment='center',
-                transform=ax2.transAxes, fontsize=14)
-        ax2.set_title('STFT Plot (Data Not Available)', fontsize=14, pad=10)
+    #     except Exception as e:
+    #         print(f"Error calculating STFT: {e}")
+    #         ax2.text(0.5, 0.5, f'Error calculating STFT: {str(e)}', 
+    #                 horizontalalignment='center', verticalalignment='center',
+    #                 transform=ax2.transAxes, fontsize=12)
+    # else:
+    #     ax2.text(0.5, 0.5, 'Bdot data not available', 
+    #             horizontalalignment='center', verticalalignment='center',
+    #             transform=ax2.transAxes, fontsize=14)
+    #     ax2.set_title('STFT Plot (Data Not Available)', fontsize=14, pad=10)
     
     # Add some padding around the entire figure
     plt.subplots_adjust(left=0.1, right=0.9, top=0.95, bottom=0.05)
@@ -219,6 +224,17 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     if not old_interactive:
         plt.ioff()
     
+    # Get the lines and labels from both axes
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1_twin.get_legend_handles_labels()
+
+    # Combine them
+    lines = lines1 + lines2
+    labels = labels1 + labels2
+
+    # Create a single legend with all lines
+    ax1.legend(lines, labels, loc='upper right', fontsize=16)
+
     return fig
 
 def process_shot_2(file_number, base_dir, bdot_channel=1):
@@ -564,10 +580,10 @@ def main_average(file_number, base_dir):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(11,27)]
+    file_numbers = [f"{i:05d}" for i in range(11,12)]
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
     base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30"
 
     # Uncomment one of these functions to run
-    # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots
-    main_average(file_numbers, base_dir)  # Process, average and display aggregate data
+    main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots
+    # main_average(file_numbers, base_dir)  # Process, average and display aggregate data
