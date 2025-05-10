@@ -1,7 +1,5 @@
 import cv2
 import numpy as np
-import struct
-import time
 import os
 from pathlib import Path
 

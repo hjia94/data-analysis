@@ -103,9 +103,13 @@ def read_cine(ifn):
                 image_count, 
                 endpoint=False
             )
-
+            
+            print("starting frame number:", baseline_image)
+            print("total frames:", image_count)
+            print("frame rate:", pps)
             print(f"Done reading .cine file ({time.time() - t_read:.1f} s)")
-            return time_arr, frame_arr
+            dt = 1/pps
+            return time_arr, frame_arr, dt
 
         except Exception as e:
             raise RuntimeError(f"Error reading CINE file: {str(e)}")
