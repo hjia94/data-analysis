@@ -34,7 +34,7 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     
     # Create figure with 2 subplots using a string identifier
     fig_id = f"shot_{file_number}"
-    fig, ax1 = plt.subplots(figsize=(12, 6))
+    fig, ax1 = plt.subplots(figsize=(8, 5), num=fig_id)
     
     # Position the window on the specified monitor
     # select_monitor(monitor_idx=monitor_idx, window_scale=(0.1, 0.1))
@@ -580,7 +580,7 @@ def main_average(file_number, base_dir):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(11,12)]
+    file_numbers = [f"{i:05d}" for i in range(11,15)]
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
     base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30"
 
