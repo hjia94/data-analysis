@@ -513,33 +513,39 @@ class Photons:
         Returns:
             tuple: (bin_centers, counts) arrays where counts shows number of pulses in each bin
         """
+        # Use the pulse_times that were already detected
+        if not hasattr(self, 'pulse_times') or len(self.pulse_times) == 0:
+            return np.array([]), np.array([])
         
-        pulse_times, pulse_areas = self.get_pulse_arrays()
-
-        # Apply amplitude thresholds if specified
+        # Use pulse_times and pulse_amplitudes directly from _detect_pulses
+        times = self.pulse_times.copy()
+        amplitudes = self.pulse_amplitudes.copy()
+        
+        # Apply amplitude filtering if requested
         if amplitude_min is not None or amplitude_max is not None:
-            # Initialize mask as all True
-            mask = np.ones_like(pulse_times, dtype=bool)
+            mask = np.ones(len(times), dtype=bool)
             
-            # Apply min threshold if specified
             if amplitude_min is not None:
-                mask &= (pulse_areas >= amplitude_min)
+                mask &= (amplitudes >= amplitude_min)
                 
-            # Apply max threshold if specified
             if amplitude_max is not None:
-                mask &= (pulse_areas <= amplitude_max)
+                mask &= (amplitudes <= amplitude_max)
                 
-            pulse_times = pulse_times[mask]
+            times = times[mask]
+        
+        # If no pulses remain, return empty arrays
+        if len(times) == 0:
+            return np.array([]), np.array([])
         
         # Create time bins
-        time_min = min(pulse_times)
-        time_max = max(pulse_times)
-        n_bins = int((time_max - time_min) / bin_width_ms) + 1
-        bins = np.linspace(time_min, time_max, n_bins)
+        time_min = np.min(times)
+        time_max = np.max(times)
+        n_bins = max(1, int((time_max - time_min) / bin_width_ms))
+        bins = np.linspace(time_min, time_max, n_bins + 1)
         bin_centers = (bins[:-1] + bins[1:]) / 2
         
         # Count pulses in each bin
-        counts, _ = np.histogram(pulse_times, bins=bins)
+        counts, _ = np.histogram(times, bins=bins)
         
         return bin_centers, counts
 
