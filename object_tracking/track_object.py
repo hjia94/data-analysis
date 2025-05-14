@@ -3,21 +3,23 @@ import numpy as np
 import os
 from pathlib import Path
 
-def track_object(avi_path, time_arr, CALIBRATION, cx, cy, chamber_radius):
+def track_object(avi_path, time_arr, cx, cy, chamber_radius):
     """
     Track tungsten ball through entire video sequence
     
     Args:
         avi_path (str): Path to input AVI file
-        output_prefix (str): Prefix for output files
         time_arr (np.ndarray): Array of timestamps for each frame
-        CALIBRATION (float): Calibration factor in cm/pixel
         cx (int): X-coordinate of chamber center
         cy (int): Y-coordinate of chamber center
         chamber_radius (int): Radius of chamber in pixels
         
     Returns:
-        tuple: (positions, times) where positions is array of (x,y) coordinates and times is array of timestamps
+    tuple: A tuple containing:
+        - positions (list): List of (x,y) coordinates of the tracked object
+        - frame_numbers (list): List of frame numbers where object was detected
+        - min_ydiff (float): Minimum y-difference between consecutive positions
+        - min_ydiff_frame (int): Frame number where minimum y-difference occurred
     """
     # Input validation
     if not os.path.exists(avi_path):
@@ -26,16 +28,8 @@ def track_object(avi_path, time_arr, CALIBRATION, cx, cy, chamber_radius):
     if not isinstance(time_arr, np.ndarray):
         raise ValueError("time_arr must be a numpy array")
         
-    if CALIBRATION <= 0:
-        raise ValueError("CALIBRATION must be positive")
-        
     if chamber_radius <= 0:
         raise ValueError("chamber_radius must be positive")
-
-    # Constants
-    MIN_DIAMETER_MM = 1   # Tungsten ball diameter
-    MAX_DIAMETER_MM = 3
-    PIXELS_PER_METER = 100 / CALIBRATION  # Assuming CALIBRATION is in cm/pixel
 
     # Initialize video capture
     cap = cv2.VideoCapture(avi_path)
@@ -48,7 +42,10 @@ def track_object(avi_path, time_arr, CALIBRATION, cx, cy, chamber_radius):
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     try:
-        # Process all frames
+        min_ydiff = 9999
+        min_ydiff_frame = None
+
+        print(f"Processing {total_frames} frames")
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         for frame_idx in range(total_frames):
             ret, frame = cap.read()
@@ -65,10 +62,9 @@ def track_object(avi_path, time_arr, CALIBRATION, cx, cy, chamber_radius):
             blurred = cv2.GaussianBlur(gray, (5,5), 0)
             inverted = 255 - blurred
 
-            # Correct radius calculation (using radius instead of diameter)
-            min_radius = int((MIN_DIAMETER_MM/10)/CALIBRATION)  # 0.1cm
-            max_radius = int((MAX_DIAMETER_MM/10)/CALIBRATION)  # 0.3cm
-            
+            # Constants
+            min_radius = 1   # Tungsten ball size
+            max_radius = 5            
             circles = cv2.HoughCircles(
                 inverted,
                 cv2.HOUGH_GRADIENT,
@@ -85,7 +81,7 @@ def track_object(avi_path, time_arr, CALIBRATION, cx, cy, chamber_radius):
                 valid = []
                 for c in circles:
                     # Validate position within chamber
-                    if np.hypot(c[0] - cx, c[1] - cy) < chamber_radius * 0.9:
+                    if np.hypot(c[0] - cx, c[1] - cy) < chamber_radius:
                         valid.append(c)
                 
                 if valid:
@@ -94,10 +90,14 @@ def track_object(avi_path, time_arr, CALIBRATION, cx, cy, chamber_radius):
                     px, py, radius = brightest
                     
                     # Convert to chamber-relative coordinates
-                    rel_x = (px - cx) * CALIBRATION
-                    rel_y = (cy - py) * CALIBRATION  # Inverted Y-axis
+                    rel_x = px - cx
+                    rel_y = cy - py
                     positions.append((rel_x, rel_y))
                     frame_numbers.append(frame_idx)
+
+                    if np.abs(rel_y) < min_ydiff:
+                        min_ydiff = np.abs(rel_y)
+                        min_ydiff_frame = frame_idx
 
     except Exception as e:
         raise RuntimeError(f"Error during tracking: {str(e)}")
@@ -106,5 +106,5 @@ def track_object(avi_path, time_arr, CALIBRATION, cx, cy, chamber_radius):
         cap.release()
         cv2.destroyAllWindows()
         
-    print(f"Processed {len(positions)} positions")
-    return np.array(positions), time_arr[frame_numbers], np.array(frame_numbers)
+    print(f"Frame closest to chamber center: {min_ydiff_frame}")
+    return np.array(positions), time_arr[frame_numbers], np.array(frame_numbers), min_ydiff_frame

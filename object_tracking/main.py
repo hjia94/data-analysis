@@ -26,7 +26,7 @@ from track_object import track_object
 def extract_calibration(cine_filename):
     """Extract calibration factor from filename"""
     if "P30" in cine_filename:
-        calibration = 0.056205
+        calibration = 1.5e-2
     elif "P24" in cine_filename:
         calibration = 0.031707
     else:
