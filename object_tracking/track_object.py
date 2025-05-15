@@ -212,3 +212,12 @@ def track_object(avi_path):
         
     print(f"Frame closest to chamber center: {min_ydiff_frame}")
     return np.array(positions), np.array(frame_numbers), min_ydiff_frame
+
+#===============================================================================================================================================
+def get_vel_freefall(h=1):
+    '''Get velocity (m) of object freefalling from height h in meter'''
+    return np.sqrt(2*9.8*h)
+
+def get_pos_freefall(v,t):
+    '''Get position of object in freefall after time t with initial velocity v'''
+    return v*t + 0.5*9.8*t**2

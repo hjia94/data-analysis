@@ -15,16 +15,20 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from screeninfo import get_monitors
 import tkinter as tk
-
+import cv2
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
 # Add paths for custom modules
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
+sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\object_tracking")
+sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
+
 
 from read_scope_data import read_trc_data
 from data_analysis_utils import Photons, calculate_stft
 from plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
+from read_cine import read_cine, convert_cine_to_avi
+from track_object import track_object, detect_chamber, get_vel_freefall, get_pos_freefall
 
 #===========================================================================================================
 #===========================================================================================================
@@ -237,13 +241,13 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
 
     return fig
 
-def process_shot_2(file_number, base_dir, bdot_channel=1):
+def process_shot_2(file_number, base_dir):
     """Process a single shot and return data for averaging."""
     
     all_files = os.listdir(base_dir)
     shot_files = [f for f in all_files if file_number in f]
     xray_files = [f for f in shot_files if "xray" in f.lower()]
-    cam_files = [f for f in shot_files if f.endswith('.cine')]
+    
 
     xray_data = None
     tarr_x = None
@@ -260,7 +264,7 @@ def process_shot_2(file_number, base_dir, bdot_channel=1):
     detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=False)        
     detector.reduce_pulses()
 
-    min_threshold = 0.05
+    min_threshold = 0.015
     max_threshold = 0.3
     t_bin = 1
     bin_centers, counts = detector.counts_per_bin(t_bin, amplitude_min=min_threshold, amplitude_max=max_threshold)
@@ -269,6 +273,48 @@ def process_shot_2(file_number, base_dir, bdot_channel=1):
     del xray_data
     del tarr_x
     return bin_centers, counts
+
+def process_video(file_number, base_dir, fig=None, ax=None):
+    all_files = os.listdir(base_dir)
+    actual_number = int(file_number)
+    cam_files = [f for f in all_files if f.startswith('Y') and f.endswith('.cine') and 
+                 int(f.split('_')[-1].replace('.cine', '')) == actual_number]
+
+    if not cam_files:
+        raise FileNotFoundError(f"No video file found for shot number {file_number}")
+
+    filepath = os.path.join(base_dir, cam_files[0])
+    print(f"Using video file: {filepath}")
+
+    tarr, frarr, dt = read_cine(filepath)
+
+    avi_path = filepath.replace('.cine', '.avi')
+    if not os.path.exists(avi_path):
+        print(f"Converting {filepath} to {avi_path}")
+        convert_cine_to_avi(frarr, avi_path)
+
+    print(f"Tracking object in {avi_path}")
+    parr, frarr, cf = track_object(avi_path)
+
+    # Plot frame with detected object at center of chamber
+    cap = cv2.VideoCapture(avi_path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, cf)
+    ret, frame = cap.read()
+    if not ret:
+        raise ValueError(f"Could not read frame")
+
+    # Detect chamber
+    (cx, cy), chamber_radius = detect_chamber(frame)
+    
+    # Plot in the provided axis
+    ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
+    ax.add_patch(chamber_circle)
+    ax.set_title(f"t={tarr[cf] * 1e3:.3f}ms")
+    ax.axis('off')
+
+    cap.release()
+    return tarr[cf]
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -310,9 +356,37 @@ def main_plot(file_numbers, base_dir, debug):
     plt.show(block=True)  # Block until all figures are closed
 
 def xray_wt_cam(file_numbers, base_dir, debug=False):
-
+    # Turn on interactive mode for the whole script
+    plt.ion()
+    
     for file_number in file_numbers:
+        # Create a single figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
+        
+        # Process video and plot in first panel
+        t0 = process_video(file_number, base_dir, fig=fig, ax=ax1)
+        
+        # Get and plot x-ray data in second panel
         bin_centers, counts = process_shot_2(file_number, base_dir)
+        uw_start = 0.017  # microwave start time (s)
+        
+        v = get_vel_freefall()  # velocity of ball at chamber center
+        r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)  # position of ball at each time bin
+        
+        # Plot counts vs r_arr in second panel
+        ax2.plot(r_arr, counts)
+        ax2.set_xlabel('Position (m)')
+        ax2.set_ylabel('Counts')
+        ax2.set_title('Position vs Counts')
+        ax2.grid(True)
+        
+        # Adjust layout and display
+        plt.tight_layout()
+        plt.draw()
+        plt.pause(0.1)  # Small pause to ensure the plot is rendered
+
+    # Keep the plots visible at the end
+    plt.show(block=True)  # This will block until all figures are closed
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -320,9 +394,10 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(11,15)]
+    file_numbers = [f"{i:05d}" for i in range(11,13)]
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
     base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30"
 
     # Uncomment one of these functions to run
-    main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots
+    # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots
+    xray_wt_cam(file_numbers, base_dir, debug=False)
