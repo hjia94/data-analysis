@@ -135,9 +135,11 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     old_interactive = plt.isinteractive()
     plt.ion()  # Turn on interactive mode so figures display immediately
 
-    # Parameters for P24 data
-    # detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=debug)
-    detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=debug)
+    if "p24" in f:
+        detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=debug)
+    elif "p30" in f:
+        detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=debug)
+    else: print('Huh?')
     detector.reduce_pulses()
 
     ax1_twin = ax1.twinx()
@@ -248,9 +250,9 @@ def process_shot_2(file_number, base_dir):
     shot_files = [f for f in all_files if file_number in f]
     xray_files = [f for f in shot_files if "xray" in f.lower()]
     
-
     xray_data = None
     tarr_x = None
+
     for f in xray_files:
         if f"C3--" in f:
             filepath = os.path.join(base_dir, f)
@@ -261,7 +263,12 @@ def process_shot_2(file_number, base_dir):
     if xray_data is None or tarr_x is None:
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
-    detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=False)        
+    if "p24" in f:
+        detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=False)
+    elif "p30" in f:
+        detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=False)
+    else: print('Huh?')
+
     detector.reduce_pulses()
 
     min_threshold = 0.015
@@ -284,17 +291,45 @@ def process_video(file_number, base_dir, fig=None, ax=None):
         raise FileNotFoundError(f"No video file found for shot number {file_number}")
 
     filepath = os.path.join(base_dir, cam_files[0])
+    avi_path = filepath.replace('.cine', '.avi')
     print(f"Using video file: {filepath}")
 
-    tarr, frarr, dt = read_cine(filepath)
+    # Define path for tracking results
+    tracking_file = os.path.join(base_dir, 'tracking_results.npy')
+    
+    # Initialize or load the tracking dictionary
+    tracking_dict = {}
+    if os.path.exists(tracking_file):
+        try:
+            tracking_dict = np.load(tracking_file, allow_pickle=True).item()
+            print(f"Loaded {len(tracking_dict)} existing tracking results")
+        except Exception as e:
+            print(f"Error loading tracking results: {e}")
+            tracking_dict = {}
 
-    avi_path = filepath.replace('.cine', '.avi')
-    if not os.path.exists(avi_path):
-        print(f"Converting {filepath} to {avi_path}")
-        convert_cine_to_avi(frarr, avi_path)
+    # Check if we already have results for this file
+    if filepath in tracking_dict:
+        print(f"Loading existing tracking results for {filepath}")
+        cf, ct = tracking_dict[filepath]
+    else:
+        print(f"No existing tracking results found. Processing video...")
+        tarr, frarr, dt = read_cine(filepath)
 
-    print(f"Tracking object in {avi_path}")
-    parr, frarr, cf = track_object(avi_path)
+        if not os.path.exists(avi_path):
+            print(f"Converting {filepath} to {avi_path}")
+            convert_cine_to_avi(frarr, avi_path)
+
+        print(f"Tracking object in {avi_path}")
+        parr, frarr, cf = track_object(avi_path)
+        ct = tarr[cf]
+        
+        # Add new result to the dictionary and save
+        tracking_dict[filepath] = (cf, ct)
+        try:
+            np.save(tracking_file, tracking_dict)
+            print(f"Added new tracking result and saved to {tracking_file}")
+        except Exception as e:
+            print(f"Error saving tracking results: {e}")
 
     # Plot frame with detected object at center of chamber
     cap = cv2.VideoCapture(avi_path)
@@ -310,11 +345,11 @@ def process_video(file_number, base_dir, fig=None, ax=None):
     ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
     ax.add_patch(chamber_circle)
-    ax.set_title(f"t={tarr[cf] * 1e3:.3f}ms")
+    ax.set_title(f"t={ct * 1e3:.3f}ms")
     ax.axis('off')
 
     cap.release()
-    return tarr[cf]
+    return ct
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -359,19 +394,47 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
     # Turn on interactive mode for the whole script
     plt.ion()
     
+    # Define path for analysis results
+    analysis_file = os.path.join(base_dir, 'analysis_results.npy')
+    
+    # Initialize or load the analysis dictionary
+    analysis_dict = {}
+    if os.path.exists(analysis_file):
+        try:
+            analysis_dict = np.load(analysis_file, allow_pickle=True).item()
+            print(f"Loaded {len(analysis_dict)} existing analysis results")
+        except Exception as e:
+            print(f"Error loading analysis results: {e}")
+            analysis_dict = {}
+    
     for file_number in file_numbers:
+        print(f"\nProcessing shot {file_number}")
         # Create a single figure with two subplots
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
         
-        # Process video and plot in first panel
+        # Always process video and plot in first panel
         t0 = process_video(file_number, base_dir, fig=fig, ax=ax1)
         
-        # Get and plot x-ray data in second panel
-        bin_centers, counts = process_shot_2(file_number, base_dir)
-        uw_start = 0.017  # microwave start time (s)
-        
-        v = get_vel_freefall()  # velocity of ball at chamber center
-        r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)  # position of ball at each time bin
+        # For the second panel, either load existing results or process new ones
+        if file_number in analysis_dict:
+            print(f"Loading existing analysis results for shot {file_number}")
+            bin_centers, counts, r_arr = analysis_dict[file_number]
+        else:
+            print(f"Processing new analysis for shot {file_number}")
+            # Get x-ray data
+            bin_centers, counts = process_shot_2(file_number, base_dir)
+            uw_start = 0.017  # microwave start time (s)
+            
+            v = get_vel_freefall()  # velocity of ball at chamber center
+            r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)  # position of ball at each time bin
+            
+            # Save new results
+            analysis_dict[file_number] = (bin_centers, counts, r_arr)
+            try:
+                np.save(analysis_file, analysis_dict)
+                print(f"Added new analysis result for shot {file_number}")
+            except Exception as e:
+                print(f"Error saving analysis results: {e}")
         
         # Plot counts vs r_arr in second panel
         ax2.plot(r_arr, counts)
@@ -394,9 +457,9 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(11,13)]
+    file_numbers = [f"{i:05d}" for i in range(8,25)]
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
-    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30"
+    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
 
     # Uncomment one of these functions to run
     # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots

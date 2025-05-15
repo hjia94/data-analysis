@@ -221,3 +221,54 @@ def get_vel_freefall(h=1):
 def get_pos_freefall(v,t):
     '''Get position of object in freefall after time t with initial velocity v'''
     return v*t + 0.5*9.8*t**2
+
+#===============================================================================================================================================
+def update_tracking_result(tr_ifn, filepath, cf_new, ct_new):
+    """
+    Update tracking results for a specific file
+    Args:
+        tr_ifn: tracking results file path
+        filepath: full path to the cine file
+        cf_new: new frame number where ball is at chamber center
+        ct_new: new time value corresponding to cf_new
+    """
+    if os.path.exists(tr_ifn):
+        # Load existing dictionary
+        tracking_dict = np.load(tr_ifn, allow_pickle=True).item()
+        print(f"Loaded existing tracking results with {len(tracking_dict)} entries")
+        
+        # Show current value if it exists
+        if filepath in tracking_dict:
+            cf_old, ct_old = tracking_dict[filepath]
+            print(f"\nCurrent values for {os.path.basename(filepath)}:")
+            print(f"  Frame: {cf_old}")
+            print(f"  Time: {ct_old:.6f}s")
+        else:
+            print(f"\nNo existing entry for {os.path.basename(filepath)}")
+        
+        # Update with new values
+        tracking_dict[filepath] = (cf_new, ct_new)
+        np.save(tr_ifn, tracking_dict)
+        print(f"\nUpdated values:")
+        print(f"  Frame: {cf_new}")
+        print(f"  Time: {ct_new:.6f}s")
+    else:
+        print(f"No tracking results file found at {tr_ifn}")
+
+# Example usage:
+# filepath = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30\Y20241102_P30_z13_x200_y0@-40_011.cine"
+# update_tracking_result(filepath, cf_new=100, ct_new=0.001)
+
+# Function to display current tracking results
+def show_tracking_results(tr_ifn):
+    if os.path.exists(tr_ifn):
+        tracking_dict = np.load(tr_ifn, allow_pickle=True).item()
+        print(f"Found {len(tracking_dict)} entries in tracking results\n")
+        
+        for filepath, (cf, ct) in tracking_dict.items():
+            print(f"File: {os.path.basename(filepath)}")
+            print(f"  Frame: {cf}")
+            print(f"  Time: {ct:.6f}s")
+            print()
+    else:
+        print(f"No tracking results file found at {tr_ifn}")
