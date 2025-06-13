@@ -13,6 +13,7 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
+from matplotlib import colors
 from screeninfo import get_monitors
 import tkinter as tk
 import cv2
@@ -166,7 +167,7 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     if "p24" in f:
         detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=debug)
     elif "p30" in f:
-        detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=debug)
+        detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[1, 300], debug=debug)
     else: print('Huh?')
     detector.reduce_pulses()
 
@@ -271,7 +272,7 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
 
     return fig
 
-def process_shot_2(file_number, base_dir):
+def process_shot_2(file_number, base_dir, debug=False):
     """Process a single shot and return data for averaging."""
     
     all_files = os.listdir(base_dir)
@@ -292,9 +293,9 @@ def process_shot_2(file_number, base_dir):
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
     if "p24" in f:
-        detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=False)
+        detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=debug)
     elif "p30" in f:
-        detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[9, 150], debug=False)
+        detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[1, 300], debug=debug)
     else: print('Huh?')
 
     detector.reduce_pulses()
@@ -443,12 +444,9 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
     print("Processing each shot...")
     for file_number in file_numbers:
         print(f"\nProcessing shot {file_number}")
-        if 'P24' in base_dir:
-            uw_start = 0.017  # microwave start time (s)
-        elif 'P30' in base_dir:
-            uw_start = 0.020  # microwave start time (s)
-        else:
-            raise ValueError(f"Unknown microwave start time for {base_dir}")
+        # Extract uw_start from base_dir name
+        uw_start = float('0.' + base_dir.split('uw')[1][:2])  # Convert to seconds
+        print(f"Microwave start time: {uw_start}s")
         
         # Create individual figure with two subplots (video + power)
         fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
@@ -497,7 +495,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
             bin_centers, counts, r_arr = analysis_dict[file_number]
         else:
             # Get x-ray data
-            bin_centers, counts = process_shot_2(file_number, base_dir)
+            bin_centers, counts = process_shot_2(file_number, base_dir, debug=debug)
             v = get_vel_freefall()  # velocity of ball at chamber center
             r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)  # position of ball at each time bin
             
@@ -525,7 +523,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
     # Create combined scatter plot after processing all shots
     print("\nCreating combined X-ray counts plot...")
     fig_combined, ax_combined = plt.subplots(figsize=(12, 8), num="Combined_X-ray_Counts")
-    colors = plt.cm.tab10(np.linspace(0, 1, len(file_numbers)))
+
     
     for i, data in enumerate(all_scatter_data):
         scatter = ax_combined.scatter(
@@ -533,10 +531,9 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
             data['r_arr']*100, 
             c=data['counts'], 
             cmap='viridis', 
-            s=50, 
+            s=50,
             alpha=0.7,
-            vmin=0, 
-            vmax=max_counts,
+            norm=colors.PowerNorm(gamma=0.5, vmin=0, vmax=max_counts),
             label=f"Shot {data['file_number']}"
         )
     
@@ -561,9 +558,9 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(8,25)]
+    file_numbers = [f"{i:05d}" for i in range(11,21)]
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
-    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
+    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
 
     # Uncomment one of these functions to run
     # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots
