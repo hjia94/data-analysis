@@ -33,6 +33,64 @@ from track_object import track_object, detect_chamber, get_vel_freefall, get_pos
 #===========================================================================================================
 #===========================================================================================================
 
+def get_magnetron_power_data(power_files, base_dir):
+    """
+    Calculate magnetron power data from oscilloscope files.
+    
+    Parameters:
+    -----------
+    power_files : list
+        List of power data filenames
+    base_dir : str
+        Base directory path containing the data files
+        
+    Returns:
+    --------
+    tuple
+        (P_data, tarr_I, I_data, V_data, Pref_data) where:
+        - P_data: calculated power array
+        - tarr_I: time array for current data
+        - I_data: current data array
+        - V_data: voltage data array
+        - Pref_data: reflected power data array (or None if not available)
+    """
+    # Find current data (Channel 2)
+    I_data = None
+    tarr_I = None
+    for f in power_files:
+        if f"C2--" in f:
+            filepath = os.path.join(base_dir, f)
+            I_data, tarr_I = read_trc_data(filepath)
+            print(f"Using current file: {f}")
+            break
+    
+    # Find voltage data (Channel 4)
+    V_data = None
+    tarr_V = None
+    for f in power_files:
+        if f"C4--" in f:
+            filepath = os.path.join(base_dir, f)
+            V_data, tarr_V = read_trc_data(filepath)
+            print(f"Using voltage file: {f}")
+            break
+    
+    # Find reflected power data (Channel 3)
+    Pref_data = None
+    for f in power_files:
+        if f"C3--" in f:
+            filepath = os.path.join(base_dir, f)
+            Pref_data, _ = read_trc_data(filepath)
+            print(f"Using reflected power file: {f}")
+            break
+    
+    # Calculate power if both current and voltage data are available
+    P_data = None
+    if I_data is not None and V_data is not None and tarr_I is not None:
+        # Calculate power: P = I * V (with scaling factor for current)
+        P_data = (I_data * 0.25) * (-V_data) * 0.6  # 1V ~ 0.25A; V is recorded negative; assume 60% of power goes to the plasma
+    
+    return P_data, tarr_I, I_data, V_data, Pref_data
+
 def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     """Process a single shot and create a combined figure."""
     
@@ -63,42 +121,13 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     print(f"Found {len(xray_files)} X-ray files, {len(bdot_files)} Bdot files, and {len(power_files)} power files")
     
     # Plot 1: Power and Reflected Power
-    # Find current data (Channel 2)
-    I_data = None
-    tarr_I = None
-    for f in power_files:
-        if f"C2--" in f:
-            filepath = os.path.join(base_dir, f)
-            I_data, tarr_I = read_trc_data(filepath)
-            print(f"Using current file: {f}")
-            break
-    
-    # Find voltage data (Channel 4)
-    V_data = None
-    tarr_V = None
-    for f in power_files:
-        if f"C4--" in f:
-            filepath = os.path.join(base_dir, f)
-            V_data, tarr_V = read_trc_data(filepath)
-            print(f"Using voltage file: {f}")
-            break
-    
-    # Find reflected power data (Channel 3)
-    Pref_data = None
-    for f in power_files:
-        if f"C3--" in f:
-            filepath = os.path.join(base_dir, f)
-            Pref_data, _ = read_trc_data(filepath)
-            print(f"Using reflected power file: {f}")
-            break
+    # Get magnetron power data using the standalone function
+    P_data, tarr_I, I_data, V_data, Pref_data = get_magnetron_power_data(power_files, base_dir)
     
     # Plot power data if available
-    if I_data is not None and V_data is not None and tarr_I is not None:
-        # Calculate power: P = I * V (with scaling factor for current)
-        P_data = (I_data * 0.25) * (-V_data)  # 1V ~ 0.25A; V is recorded negative
-        
+    if P_data is not None and tarr_I is not None:
         # Create power plot with twin y-axis
-        ax1.plot(tarr_I*1e3, P_data * 0.6e-3, label='Magnetron Power')
+        ax1.plot(tarr_I*1e3, P_data * 1e-3, label='Magnetron Power')
         ax1.set_xlabel('Time (ms)', fontsize=16)
         ax1.set_ylabel('Power (kW)', fontsize=16)
         ax1.tick_params(axis='y', labelsize=16)
@@ -110,7 +139,6 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
         del I_data
         del V_data
         del tarr_I
-        del tarr_V
     else:
         ax1.text(0.5, 0.5, 'Power data not available', 
                  horizontalalignment='center', verticalalignment='center',
@@ -345,7 +373,7 @@ def process_video(file_number, base_dir, fig=None, ax=None):
     ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
     ax.add_patch(chamber_circle)
-    ax.set_title(f"t={ct * 1e3:.3f}ms")
+    print(f"ball reaches chamber center at t={ct * 1e3:.3f}ms from plasma trigger")
     ax.axis('off')
 
     cap.release()
@@ -407,24 +435,69 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
             print(f"Error loading analysis results: {e}")
             analysis_dict = {}
     
+    # Storage for combined scatter plot data
+    all_scatter_data = []
+    max_counts = 0
+    
+    # Process each file: collect data and create individual figures
+    print("Processing each shot...")
     for file_number in file_numbers:
         print(f"\nProcessing shot {file_number}")
-        # Create a single figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
+        if 'P24' in base_dir:
+            uw_start = 0.017  # microwave start time (s)
+        elif 'P30' in base_dir:
+            uw_start = 0.020  # microwave start time (s)
+        else:
+            raise ValueError(f"Unknown microwave start time for {base_dir}")
         
-        # Always process video and plot in first panel
-        t0 = process_video(file_number, base_dir, fig=fig, ax=ax1)
+        # Create individual figure with two subplots (video + power)
+        fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
         
-        # For the second panel, either load existing results or process new ones
+        # Process video and plot in first panel
+        try:
+            t0 = process_video(file_number, base_dir, fig=fig, ax=ax1)
+        except Exception as e:
+            print(f"Error processing video for shot {file_number}: {e}")
+            ax1.text(0.5, 0.5, f'Video not available\nShot {file_number}', 
+                     horizontalalignment='center', verticalalignment='center',
+                     transform=ax1.transAxes, fontsize=14)
+            ax1.set_title(f'Shot {file_number} - Video')
+            t0 = 0  # Default value if video processing fails
+        
+        # Plot magnetron power in second panel
+        all_files = os.listdir(base_dir)
+        shot_files = [f for f in all_files if file_number in f]
+        power_files = [f for f in shot_files if "xray" not in f.lower() and "Bdot" not in f]
+        
+        # Get magnetron power data using the standalone function
+        P_data, tarr_I, I_data, V_data, Pref_data = get_magnetron_power_data(power_files, base_dir)
+        
+        # Plot power data if available
+        if P_data is not None and tarr_I is not None:
+            ax3.plot(tarr_I*1e3, P_data, 'b-', linewidth=2)
+            ax3.set_xlabel('Time (ms)')
+            ax3.set_ylabel('Power (kW)')
+            ax3.set_title('Magnetron Power')
+            ax3.grid(True)
+        else:
+            ax3.text(0.5, 0.5, 'Power data not available', 
+                     horizontalalignment='center', verticalalignment='center',
+                     transform=ax3.transAxes, fontsize=12)
+            ax3.set_title('Magnetron Power (Data Not Available)')
+            ax3.set_xlabel('Time (ms)')
+            ax3.set_ylabel('Power (kW)')
+        
+        # Adjust layout and display for individual figure
+        plt.tight_layout()
+        plt.draw()
+        plt.pause(0.1)  # Small pause to ensure the plot is rendered
+        
+        # Collect data for combined scatter plot
         if file_number in analysis_dict:
-            print(f"Loading existing analysis results for shot {file_number}")
             bin_centers, counts, r_arr = analysis_dict[file_number]
         else:
-            print(f"Processing new analysis for shot {file_number}")
             # Get x-ray data
             bin_centers, counts = process_shot_2(file_number, base_dir)
-            uw_start = 0.017  # microwave start time (s)
-            
             v = get_vel_freefall()  # velocity of ball at chamber center
             r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)  # position of ball at each time bin
             
@@ -436,17 +509,48 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
             except Exception as e:
                 print(f"Error saving analysis results: {e}")
         
-        # Plot counts vs r_arr in second panel
-        ax2.plot(r_arr, counts)
-        ax2.set_xlabel('Position (m)')
-        ax2.set_ylabel('Counts')
-        ax2.set_title('Position vs Counts')
-        ax2.grid(True)
+        # Store data for combined plot
+        all_scatter_data.append({
+            'file_number': file_number,
+            'bin_centers': bin_centers,
+            'counts': counts,
+            'r_arr': r_arr,
+            't0': t0,
+            'uw_start': uw_start
+        })
         
-        # Adjust layout and display
-        plt.tight_layout()
-        plt.draw()
-        plt.pause(0.1)  # Small pause to ensure the plot is rendered
+        # Update maximum counts
+        max_counts = max(max_counts, np.max(counts))
+    
+    # Create combined scatter plot after processing all shots
+    print("\nCreating combined X-ray counts plot...")
+    fig_combined, ax_combined = plt.subplots(figsize=(12, 8), num="Combined_X-ray_Counts")
+    colors = plt.cm.tab10(np.linspace(0, 1, len(file_numbers)))
+    
+    for i, data in enumerate(all_scatter_data):
+        scatter = ax_combined.scatter(
+            data['bin_centers'], 
+            data['r_arr']*100, 
+            c=data['counts'], 
+            cmap='viridis', 
+            s=50, 
+            alpha=0.7,
+            vmin=0, 
+            vmax=max_counts,
+            label=f"Shot {data['file_number']}"
+        )
+    
+    ax_combined.set_xlabel('Time (ms)', fontsize=14)
+    ax_combined.set_ylabel('Position (cm)', fontsize=14)
+    ax_combined.set_title('Combined X-ray Counts vs Position (All Shots)', fontsize=16)
+    ax_combined.grid(True)
+    
+    # Add colorbar to combined plot
+    cbar = plt.colorbar(scatter, ax=ax_combined, label='Counts')
+    cbar.ax.tick_params(labelsize=12)
+    
+    plt.draw()
+    plt.pause(0.1)
 
     # Keep the plots visible at the end
     plt.show(block=True)  # This will block until all figures are closed
