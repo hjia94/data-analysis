@@ -219,7 +219,12 @@ def get_vel_freefall(h=1):
     return np.sqrt(2*9.8*h)
 
 def get_pos_freefall(v,t):
-    '''Get position of object in freefall after time t with initial velocity v'''
+    '''
+    Get position of object in freefall after time t with initial velocity v
+    t is in seconds
+    v is in m/s
+    return is in meters
+    '''
     return v*t + 0.5*9.8*t**2
 
 #===============================================================================================================================================
