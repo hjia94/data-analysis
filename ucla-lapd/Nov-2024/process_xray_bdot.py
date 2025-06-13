@@ -32,6 +32,9 @@ from read_cine import read_cine, convert_cine_to_avi
 from track_object import track_object, detect_chamber, get_vel_freefall, get_pos_freefall
 
 #===========================================================================================================
+plt.rcParams.update({'font.size': 18})
+plt.rcParams.update({'xtick.labelsize': 18, 'ytick.labelsize': 18})
+
 #===========================================================================================================
 
 def get_magnetron_power_data(power_files, base_dir):
@@ -129,10 +132,10 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     if P_data is not None and tarr_I is not None:
         # Create power plot with twin y-axis
         ax1.plot(tarr_I*1e3, P_data * 1e-3, label='Magnetron Power')
-        ax1.set_xlabel('Time (ms)', fontsize=16)
-        ax1.set_ylabel('Power (kW)', fontsize=16)
-        ax1.tick_params(axis='y', labelsize=16)
-        ax1.tick_params(axis='x', labelsize=16)
+        ax1.set_xlabel('Time (ms)')
+        ax1.set_ylabel('Power (kW)')
+        ax1.tick_params(axis='y')
+        ax1.tick_params(axis='x')
         ax1.grid(True)
         
         # Free memory
@@ -143,8 +146,8 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     else:
         ax1.text(0.5, 0.5, 'Power data not available', 
                  horizontalalignment='center', verticalalignment='center',
-                 transform=ax1.transAxes, fontsize=14)
-        ax1.set_title('Power Plot (Data Not Available)', fontsize=14, pad=10)
+                 transform=ax1.transAxes)
+        ax1.set_title('Power Plot (Data Not Available)', pad=10)
     
     # Find X-ray data (Channel 3)
     xray_data = None
@@ -241,12 +244,12 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     #         print(f"Error calculating STFT: {e}")
     #         ax2.text(0.5, 0.5, f'Error calculating STFT: {str(e)}', 
     #                 horizontalalignment='center', verticalalignment='center',
-    #                 transform=ax2.transAxes, fontsize=12)
+    #                 transform=ax2.transAxes)
     # else:
     #     ax2.text(0.5, 0.5, 'Bdot data not available', 
     #             horizontalalignment='center', verticalalignment='center',
-    #             transform=ax2.transAxes, fontsize=14)
-    #     ax2.set_title('STFT Plot (Data Not Available)', fontsize=14, pad=10)
+    #             transform=ax2.transAxes)
+    #     ax2.set_title('STFT Plot (Data Not Available)', pad=10)
     
     # Add some padding around the entire figure
     plt.subplots_adjust(left=0.1, right=0.9, top=0.95, bottom=0.05)
@@ -268,7 +271,7 @@ def process_shot(file_number, base_dir, bdot_channel=1, debug=False):
     labels = labels1 + labels2
 
     # Create a single legend with all lines
-    ax1.legend(lines, labels, loc='upper right', fontsize=16)
+    ax1.legend(lines, labels, loc='upper right')
 
     return fig
 
@@ -311,6 +314,9 @@ def process_shot_2(file_number, base_dir, debug=False):
     return bin_centers, counts
 
 def process_video(file_number, base_dir, fig=None, ax=None):
+    '''
+    Process the video file for a given shot number and return the time at which the ball reaches the chamber center
+    '''
     all_files = os.listdir(base_dir)
     actual_number = int(file_number)
     cam_files = [f for f in all_files if f.startswith('Y') and f.endswith('.cine') and 
@@ -445,20 +451,20 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
     for file_number in file_numbers:
         print(f"\nProcessing shot {file_number}")
         # Extract uw_start from base_dir name
-        uw_start = float('0.' + base_dir.split('uw')[1][:2])  # Convert to seconds
+        uw_start = float('0.0' + base_dir.split('uw')[1][:2])  # Convert to seconds
         print(f"Microwave start time: {uw_start}s")
         
         # Create individual figure with two subplots (video + power)
         fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
         
-        # Process video and plot in first panel
-        try:
+
+        try: # find the time at which the ball reaches the chamber center
             t0 = process_video(file_number, base_dir, fig=fig, ax=ax1)
         except Exception as e:
             print(f"Error processing video for shot {file_number}: {e}")
             ax1.text(0.5, 0.5, f'Video not available\nShot {file_number}', 
                      horizontalalignment='center', verticalalignment='center',
-                     transform=ax1.transAxes, fontsize=14)
+                     transform=ax1.transAxes)
             ax1.set_title(f'Shot {file_number} - Video')
             t0 = 0  # Default value if video processing fails
         
@@ -480,7 +486,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         else:
             ax3.text(0.5, 0.5, 'Power data not available', 
                      horizontalalignment='center', verticalalignment='center',
-                     transform=ax3.transAxes, fontsize=12)
+                     transform=ax3.transAxes)
             ax3.set_title('Magnetron Power (Data Not Available)')
             ax3.set_xlabel('Time (ms)')
             ax3.set_ylabel('Power (kW)')
@@ -533,18 +539,17 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
             cmap='viridis', 
             s=50,
             alpha=0.7,
-            norm=colors.PowerNorm(gamma=0.5, vmin=0, vmax=max_counts),
+            norm=colors.PowerNorm(gamma=0.3, vmin=0, vmax=max_counts),
             label=f"Shot {data['file_number']}"
         )
     
-    ax_combined.set_xlabel('Time (ms)', fontsize=14)
-    ax_combined.set_ylabel('Position (cm)', fontsize=14)
-    ax_combined.set_title('Combined X-ray Counts vs Position (All Shots)', fontsize=16)
+    ax_combined.set_xlabel('Time (ms)')
+    ax_combined.set_ylabel('Radial position (cm)')
     ax_combined.grid(True)
     
     # Add colorbar to combined plot
     cbar = plt.colorbar(scatter, ax=ax_combined, label='Counts')
-    cbar.ax.tick_params(labelsize=12)
+    cbar.ax.tick_params(labelsize=18)
     
     plt.draw()
     plt.pause(0.1)
