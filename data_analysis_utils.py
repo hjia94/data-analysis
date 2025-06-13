@@ -358,14 +358,15 @@ class Photons:
         """Initialize photon pulse detector.
         
         Args:
-            tarr: Time array in seconds
-            data_array: Signal amplitude array
-            min_timescale: Minimum timescale to preserve in seconds
-            tsh_mult: [lower, upper] threshold multipliers
-            savgol_window: Window length for Savitzky-Golay filter
-            savgol_order: Polynomial order for Savitzky-Golay filter
-            downsample_rate: Optional manual downsample rate. If None, will be automatically determined.
-            debug: Whether to show debug plots
+            tarr (NDArray[np.float64]): Time array in seconds
+            data_array (NDArray[np.float64]): Signal amplitude array
+            min_timescale (float): Minimum timescale to preserve in seconds
+            tsh_mult (list[int]): [lower, upper] threshold multipliers for pulse detection
+            savgol_window (int): Window length for Savitzky-Golay filter
+            savgol_order (int): Polynomial order for Savitzky-Golay filter
+            distance_mult (float): Multiplier for baseline distance calculation
+            downsample_rate (Optional[int]): Manual downsample rate. If None, will be automatically determined
+            debug (bool): Whether to show debug plots
         """
         if len(tarr) != len(data_array):
             raise ValueError("Time and data arrays must have same length")
