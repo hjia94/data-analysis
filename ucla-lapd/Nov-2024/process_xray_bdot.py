@@ -286,7 +286,12 @@ def process_shot_2(file_number, base_dir, debug=False):
     tarr_x = None
 
     for f in xray_files:
-        if f"C3--" in f:
+        if 'kapton' in f and 'C2--' in f:
+            filepath = os.path.join(base_dir, f)
+            xray_data, tarr_x = read_trc_data(filepath)
+            print(f"Using X-ray file: {f}")
+            break
+        elif f"C3--" in f:
             filepath = os.path.join(base_dir, f)
             xray_data, tarr_x = read_trc_data(filepath)
             print(f"Using X-ray file: {f}")
@@ -295,16 +300,29 @@ def process_shot_2(file_number, base_dir, debug=False):
     if xray_data is None or tarr_x is None:
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
-    if "p24" in f:
-        detector = Photons(tarr_x, xray_data, savgol_window=31, distance_mult=0.001, tsh_mult=[9, 150], debug=debug)
+    if 'kapton' in f:
+        threshold = [9, 300]
+        min_ts = 4e-5
+        d = 0
+        min_threshold = 0.01
+        max_threshold = 0.5
+    elif "p24" in f:
+        threshold = [9, 150]
+        min_ts = 1e-6
+        d = 1
+        min_threshold = 0.025
+        max_threshold = 0.3
     elif "p30" in f:
-        detector = Photons(tarr_x, xray_data, min_timescale=1e-6, distance_mult=1, tsh_mult=[1, 300], debug=debug)
-    else: print('Huh?')
+        threshold = [1, 300]
+        min_ts = 1e-6
+        d = 1
+        min_threshold = 0.015
+        max_threshold = 0.3
+
+    detector = Photons(tarr_x, xray_data, min_timescale=min_ts, distance_mult=d, tsh_mult=threshold, debug=debug)
 
     detector.reduce_pulses()
 
-    min_threshold = 0.015
-    max_threshold = 0.3
     t_bin = 1
     bin_centers, counts = detector.counts_per_bin(t_bin, amplitude_min=min_threshold, amplitude_max=max_threshold)
 
@@ -450,14 +468,10 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
     print("Processing each shot...")
     for file_number in file_numbers:
         print(f"\nProcessing shot {file_number}")
-        # Extract uw_start from base_dir name
-        uw_start = float('0.0' + base_dir.split('uw')[1][:2])  # Convert to seconds
-        print(f"Microwave start time: {uw_start}s")
         
         # Create individual figure with two subplots (video + power)
         fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
         
-
         try: # find the time at which the ball reaches the chamber center
             t0 = process_video(file_number, base_dir, fig=fig, ax=ax1)
         except Exception as e:
@@ -472,6 +486,9 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         all_files = os.listdir(base_dir)
         shot_files = [f for f in all_files if file_number in f]
         power_files = [f for f in shot_files if "xray" not in f.lower() and "Bdot" not in f]
+        # Extract uw_start from file name
+        uw_start = 0.015 #float('0.0' + base_dir.split('uw')[1][:2])  # Convert to seconds
+
         
         # Get magnetron power data using the standalone function
         P_data, tarr_I, I_data, V_data, Pref_data = get_magnetron_power_data(power_files, base_dir)
@@ -539,7 +556,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
             cmap='viridis', 
             s=50,
             alpha=0.7,
-            norm=colors.PowerNorm(gamma=0.3, vmin=0, vmax=max_counts),
+            norm=colors.PowerNorm(gamma=0.5, vmin=0, vmax=max_counts),
             label=f"Shot {data['file_number']}"
         )
     
@@ -563,9 +580,10 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(11,21)]
-    # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t45_P24"
-    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
+    file_numbers = [f"{i:05d}" for i in range(57,58)]
+    # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
+    # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
+    base_dir = r"E:\good_data\kapton\20241217"
 
     # Uncomment one of these functions to run
     # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots

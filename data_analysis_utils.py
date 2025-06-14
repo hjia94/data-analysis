@@ -380,6 +380,7 @@ class Photons:
         self.min_timescale = min_timescale * 1000  # Convert to ms
         self.upths_mult = tsh_mult[1]
         self.lowths_mult = tsh_mult[0]
+        self.distance_mult = distance_mult
         self.debug = debug
 
         # Initial signal filtering
@@ -410,18 +411,35 @@ class Photons:
         self._detect_pulses()
         
     def _compute_baseline(self) -> None:
-        """Compute baseline using envelope detection."""
+        """Compute baseline using envelope detection or constant baseline."""
         
-        # Get upper envelope points
-        _, harr = hl_envelopes_idx(self.data_ds, dmin=1, dmax=self.baseline_dis, split=False)
-        
-        # Get noise amplitude from last 0.1% of data
-        noise_sample = self.data_ds[-int(len(self.data_ds)*0.001):]
-        noise_amplitude = (np.max(np.abs(noise_sample)) - np.min(np.abs(noise_sample))) / 2
-        
-        # Interpolate baseline using upper envelope points
-        self.baseline = np.interp(np.arange(len(self.data_ds)), harr, self.data_ds[harr]) - noise_amplitude
-        self.baseline_subtracted = self.baseline - self.data_ds
+        if self.distance_mult == 0:
+            # Use constant baseline: average of first 5% and last 5% of data
+            n_samples = len(self.data_ds)
+            first_5_percent = self.data_ds[:int(n_samples * 0.05)]
+            last_5_percent = self.data_ds[-int(n_samples * 0.05):]
+            
+            # Calculate constant baseline value
+            baseline_value = (np.mean(first_5_percent) + np.mean(last_5_percent)) / 2
+            
+            # Create constant baseline array
+            self.baseline = np.full_like(self.data_ds, baseline_value)
+            self.baseline_subtracted = self.data_ds - self.baseline
+            
+            print(f"Using constant baseline: {baseline_value:.6f}")
+            
+        else:
+            # Use envelope detection method (original implementation)
+            # Get upper envelope points
+            _, harr = hl_envelopes_idx(self.data_ds, dmin=1, dmax=self.baseline_dis, split=False)
+            
+            # Get noise amplitude from last 0.1% of data
+            noise_sample = self.data_ds[-int(len(self.data_ds)*0.001):]
+            noise_amplitude = (np.max(np.abs(noise_sample)) - np.min(np.abs(noise_sample))) / 2
+            
+            # Interpolate baseline using upper envelope points
+            self.baseline = np.interp(np.arange(len(self.data_ds)), harr, self.data_ds[harr]) - noise_amplitude
+            self.baseline_subtracted = self.baseline - self.data_ds
 
         if self.debug:
             plt.figure()
