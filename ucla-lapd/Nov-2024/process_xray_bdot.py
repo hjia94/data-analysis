@@ -580,7 +580,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(57,58)]
+    file_numbers = [f"{i:05d}" for i in range(57,72)]
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
     base_dir = r"E:\good_data\kapton\20241217"
