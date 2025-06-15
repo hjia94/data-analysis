@@ -30,6 +30,7 @@ Feb.2024 update:
 
 import numpy as np
 import struct
+from datetime import datetime
 
 from LeCroy_Scope_Header import LeCroy_Scope_Header
 
@@ -42,6 +43,95 @@ def decode_header_info(hdr_bytes):
         print("Error decoding LeCroy_Scope_Header info:", e)
         header = None
     return header
+
+#======================================================================================
+
+def get_trigger_time(file_path):
+    """
+    Extract trigger timing information from LeCroy scope file header.
+    
+    Parameters:
+    -----------
+    file_path : str
+        Path to the .trc file
+        
+    Returns:
+    --------
+    datetime
+        datetime object of when the trace was triggered
+    """
+    
+    with open(file_path, mode='rb') as file:
+        file_content = file.read()
+    
+    first_11 = file_content[:11].decode()
+    if not first_11.startswith('#9'):
+        raise SyntaxError('First two bytes are not #9')
+    
+    hdr_bytes = file_content[11:11+346]
+    header = decode_header_info(hdr_bytes)
+    
+    if header is None:
+        raise ValueError("Could not decode header information")
+    
+    # Extract trigger time components from header
+    # Note: LeCroy stores year as offset from 1900
+    year = header.hdr.tt_year
+    month = header.hdr.tt_months
+    day = header.hdr.tt_days
+    hour = header.hdr.tt_hours
+    minute = header.hdr.tt_minute
+    second = header.hdr.tt_second
+    
+    
+    return {'year': year, 'month': month, 'day': day, 'hour': hour, 'minute': minute, 'second': second}
+
+#======================================================================================
+
+def compare_trigger_times(file_path1, file_path2, debug=False):
+    """
+    Compare trigger times of two LeCroy scope files.
+    
+    Parameters:
+    -----------
+    file_path1 : str
+        Path to the first .trc file
+    file_path2 : str
+        Path to the second .trc file
+    tolerance_seconds : float, optional
+        Maximum difference in seconds to consider times as "same" (default: 1 second)
+        
+    Returns:
+    --------
+    bool
+        True if trigger times are the same (within tolerance), False otherwise
+    """
+    
+    try:
+        time1 = get_trigger_time(file_path1)
+        time2 = get_trigger_time(file_path2)
+        
+        if time1['year'] != time2['year']: 
+            return False
+        elif time1['month'] != time2['month']: 
+            return False
+        elif time1['day'] != time2['day']: 
+            return False
+        elif time1['hour'] != time2['hour']: 
+            return False
+        elif time1['minute'] != time2['minute'] or time1['second'] != time2['second']:
+            if debug:
+                # Calculate total seconds for both times (minute*60 + second)
+                total_seconds1 = time1['minute'] * 60 + time1['second']
+                total_seconds2 = time2['minute'] * 60 + time2['second']
+                diff_seconds = total_seconds2 - total_seconds1
+                print(f'Time difference: {diff_seconds} seconds')
+            return False
+        else: 
+            return True
+    except Exception as e:
+        print(f"Error comparing trigger times: {e}")
+        return False
 
 #======================================================================================
 
