@@ -17,6 +17,7 @@ from matplotlib import colors
 from screeninfo import get_monitors
 import tkinter as tk
 import cv2
+import re
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
 # Add paths for custom modules
@@ -289,7 +290,13 @@ def process_shot_2(file_number, base_dir, debug=False):
         if 'kapton' in f and 'C2--' in f:
             filepath = os.path.join(base_dir, f)
             xray_data, tarr_x = read_trc_data(filepath)
+
+            match = re.search(r'd(\d+)ms', filepath)
+            delay = float(match.group(1)) * 1e-3
+            tarr_x += delay
+
             print(f"Using X-ray file: {f}")
+            print(f"Delay: {delay}")
             break
         elif f"C3--" in f:
             filepath = os.path.join(base_dir, f)
@@ -301,7 +308,7 @@ def process_shot_2(file_number, base_dir, debug=False):
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
     if 'kapton' in f:
-        threshold = [9, 300]
+        threshold = [9, 500]
         min_ts = 4e-5
         d = 0
         min_threshold = 0.01
@@ -337,7 +344,7 @@ def process_video(file_number, base_dir, fig=None, ax=None):
     '''
     all_files = os.listdir(base_dir)
     actual_number = int(file_number)
-    cam_files = [f for f in all_files if f.startswith('Y') and f.endswith('.cine') and 
+    cam_files = [f for f in all_files if f.endswith('.cine') and 
                  int(f.split('_')[-1].replace('.cine', '')) == actual_number]
 
     if not cam_files:
@@ -402,7 +409,7 @@ def process_video(file_number, base_dir, fig=None, ax=None):
     ax.axis('off')
 
     cap.release()
-    return ct
+    return ct, filepath
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -468,27 +475,22 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
     print("Processing each shot...")
     for file_number in file_numbers:
         print(f"\nProcessing shot {file_number}")
+
         
         # Create individual figure with two subplots (video + power)
         fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
         
-        try: # find the time at which the ball reaches the chamber center
-            t0 = process_video(file_number, base_dir, fig=fig, ax=ax1)
-        except Exception as e:
-            print(f"Error processing video for shot {file_number}: {e}")
-            ax1.text(0.5, 0.5, f'Video not available\nShot {file_number}', 
-                     horizontalalignment='center', verticalalignment='center',
-                     transform=ax1.transAxes)
-            ax1.set_title(f'Shot {file_number} - Video')
-            t0 = 0  # Default value if video processing fails
-        
+
+        t0, filepath = process_video(file_number, base_dir, fig=fig, ax=ax1)
+        match = re.search(r'uw(\d+)t', filepath)
+        uw_start = int(match.group(1)) * 1e-3
+        print(f"uw_start: {uw_start}")
+
+              
         # Plot magnetron power in second panel
         all_files = os.listdir(base_dir)
         shot_files = [f for f in all_files if file_number in f]
         power_files = [f for f in shot_files if "xray" not in f.lower() and "Bdot" not in f]
-        # Extract uw_start from file name
-        uw_start = 0.015 #float('0.0' + base_dir.split('uw')[1][:2])  # Convert to seconds
-
         
         # Get magnetron power data using the standalone function
         P_data, tarr_I, I_data, V_data, Pref_data = get_magnetron_power_data(power_files, base_dir)
@@ -549,17 +551,9 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
 
     
     for i, data in enumerate(all_scatter_data):
-        scatter = ax_combined.scatter(
-            data['bin_centers'], 
-            data['r_arr']*100, 
-            c=data['counts'], 
-            cmap='viridis', 
-            s=50,
-            alpha=0.7,
-            norm=colors.PowerNorm(gamma=0.5, vmin=0, vmax=max_counts),
-            label=f"Shot {data['file_number']}"
-        )
-    
+        scatter = ax_combined.scatter(data['bin_centers'], data['r_arr']*100, c=data['counts'], s=50, alpha=0.7)
+        # norm=colors.PowerNorm(gamma=0.5, vmin=0, vmax=max_counts)
+        
     ax_combined.set_xlabel('Time (ms)')
     ax_combined.set_ylabel('Radial position (cm)')
     ax_combined.grid(True)
@@ -580,7 +574,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(57,72)]
+    file_numbers = [f"{i:05d}" for i in [58,59,60,61,63,64,65,66]]
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
     base_dir = r"E:\good_data\kapton\20241217"
