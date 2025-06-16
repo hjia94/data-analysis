@@ -375,7 +375,6 @@ class Photons:
             
         # Convert everything to milliseconds for consistency
         self.tarr = tarr * 1000  # Convert to ms
-        self.data = data_array
         self.dt = (self.tarr[1] - self.tarr[0])
         self.min_timescale = min_timescale * 1000  # Convert to ms
         self.upths_mult = tsh_mult[1]
@@ -385,22 +384,22 @@ class Photons:
 
         # Initial signal filtering
         print("Applying Savitzky-Golay filter...")
-        self.filtered_data = signal.savgol_filter(self.data, window_length=savgol_window, polyorder=savgol_order)
+        self.filtered_data = signal.savgol_filter(data_array, window_length=savgol_window, polyorder=savgol_order)
         
         # Determine downsample rate if not provided
         if downsample_rate is None:
             print("Analyzing optimal downsample rate...")
-            downsample_rate = analyze_downsample_options(self.data, self.tarr, self.filtered_data,
+            downsample_rate = analyze_downsample_options(data_array, self.tarr, self.filtered_data,
                                                        min_timescale_ms=self.min_timescale,
                                                        verbose=self.debug)
             print(f"Downsample rate: {downsample_rate}")
         self.downsample_rate = downsample_rate
 
         # Downsample filtered data
-        self.tarr_ds = self.tarr[::downsample_rate]
-        self.data_ds = self.filtered_data[::downsample_rate]
+        self.tarr_ds = self.tarr[::self.downsample_rate]
+        self.data_ds = self.filtered_data[::self.downsample_rate]
         self.dt = (self.tarr_ds[1] - self.tarr_ds[0])
-        self.baseline_dis = int(self.min_timescale / self.dt * distance_mult)
+        self.baseline_dis = int(self.min_timescale / self.dt * self.distance_mult)
         self.peak_detect_dis = int(self.min_timescale / self.dt)
         
         print("Computing baseline...")
@@ -433,8 +432,8 @@ class Photons:
             # Get upper envelope points
             _, harr = hl_envelopes_idx(self.data_ds, dmin=1, dmax=self.baseline_dis, split=False)
             
-            # Get noise amplitude from last 0.1% of data
-            noise_sample = self.data_ds[-int(len(self.data_ds)*0.001):]
+            # Get noise amplitude from first 1% of data
+            noise_sample = self.data_ds[:int(len(self.data_ds)*0.01)]
             noise_amplitude = (np.max(np.abs(noise_sample)) - np.min(np.abs(noise_sample))) / 2
             
             # Interpolate baseline using upper envelope points
