@@ -432,8 +432,8 @@ class Photons:
             # Get upper envelope points
             _, harr = hl_envelopes_idx(self.data_ds, dmin=1, dmax=self.baseline_dis, split=False)
             
-            # Get noise amplitude from first 1% of data
-            noise_sample = self.data_ds[:int(len(self.data_ds)*0.01)]
+            # Get noise amplitude from first 0.1% of data
+            noise_sample = self.data_ds[:int(len(self.data_ds)*0.001)]
             noise_amplitude = (np.max(np.abs(noise_sample)) - np.min(np.abs(noise_sample))) / 2
             
             # Interpolate baseline using upper envelope points
@@ -445,13 +445,13 @@ class Photons:
             plt.plot(self.tarr_ds, self.data_ds, label='Original')
             plt.plot(self.tarr_ds, self.baseline, label='Baseline')
             # plt.plot(self.tarr_ds, self.baseline_subtracted, label='Baseline Subtracted')
-            plt.legend(loc='upper right')
+            plt.legend(loc='lower right')
             plt.show()
         
     def _compute_thresholds(self) -> None:
         """Compute detection thresholds based on noise statistics."""
-        # Use first 5% of data as noise sample
-        noise_sample = self.baseline_subtracted[:int(len(self.baseline_subtracted)*0.05)]
+
+        noise_sample = self.baseline_subtracted[:int(len(self.baseline_subtracted)*0.001)]
         self.noise_mean = np.mean(noise_sample)
         self.noise_std = np.std(noise_sample)
         
@@ -488,7 +488,7 @@ class Photons:
             plt.xlabel('Time (ms)')
             plt.ylabel('Signal')
             plt.title('Detected Pulses')
-            plt.legend(loc='upper right')
+            plt.legend(loc='upper left')
             plt.show()
 
     def reduce_pulses(self) -> None:
@@ -520,53 +520,6 @@ class Photons:
             )
             self.pulses.append(pulse)
 
-    def counts_per_bin(self, bin_width_ms=0.2, amplitude_min=None, amplitude_max=None):
-        """
-        Calculate number of pulses in each time bin with optional amplitude filtering.
-        
-        Args:
-            bin_width_ms (float): Width of time bins in milliseconds
-            amplitude_min (float, optional): Minimum amplitude threshold for counting pulses
-            amplitude_max (float, optional): Maximum amplitude threshold for counting pulses
-        Returns:
-            tuple: (bin_centers, counts) arrays where counts shows number of pulses in each bin
-        """
-        # Use the pulse_times that were already detected
-        if not hasattr(self, 'pulse_times') or len(self.pulse_times) == 0:
-            return np.array([]), np.array([])
-        
-        # Use pulse_times and pulse_amplitudes directly from _detect_pulses
-        times = self.pulse_times.copy()
-        amplitudes = self.pulse_amplitudes.copy()
-        
-        # Apply amplitude filtering if requested
-        if amplitude_min is not None or amplitude_max is not None:
-            mask = np.ones(len(times), dtype=bool)
-            
-            if amplitude_min is not None:
-                mask &= (amplitudes >= amplitude_min)
-                
-            if amplitude_max is not None:
-                mask &= (amplitudes <= amplitude_max)
-                
-            times = times[mask]
-        
-        # If no pulses remain, return empty arrays
-        if len(times) == 0:
-            return np.array([]), np.array([])
-        
-        # Create time bins
-        time_min = np.min(times)
-        time_max = np.max(times)
-        n_bins = max(1, int((time_max - time_min) / bin_width_ms))
-        bins = np.linspace(time_min, time_max, n_bins + 1)
-        bin_centers = (bins[:-1] + bins[1:]) / 2
-        
-        # Count pulses in each bin
-        counts, _ = np.histogram(times, bins=bins)
-        
-        return bin_centers, counts
-
     @property
     def pulse_count(self) -> int:
         """Return number of detected pulses."""
@@ -584,7 +537,51 @@ class Photons:
         times = np.array([p.time for p in self.pulses])
         areas = np.array([p.area for p in self.pulses])
         return times, areas
-
+    
+def counts_per_bin(tarr, amplitudes, bin_width=0.2, amplitude_min=None, amplitude_max=None):
+    """
+    Calculate number of pulses in each time bin with optional amplitude filtering.
+    
+    Args:
+        tarr (array-like): Array of pulse times
+        amplitudes (array-like): Array of pulse amplitudes
+        bin_width (float): Width of time bins
+        amplitude_min (float, optional): Minimum amplitude threshold for counting pulses
+        amplitude_max (float, optional): Maximum amplitude threshold for counting pulses
+    Returns:
+        tuple: (bin_centers, counts) arrays where counts shows number of pulses in each bin
+    """
+    # Check if we have any pulses
+    if len(tarr) == 0:
+        return np.array([]), np.array([])
+    
+    # Apply amplitude filtering if requested
+    if amplitude_min is not None or amplitude_max is not None:
+        mask = np.ones(len(tarr), dtype=bool)
+        
+        if amplitude_min is not None:
+            mask &= (amplitudes >= amplitude_min)
+            
+        if amplitude_max is not None:
+            mask &= (amplitudes <= amplitude_max)
+            
+        tarr = tarr[mask]
+    
+    # If no pulses remain after filtering, return empty arrays
+    if len(tarr) == 0:
+        return np.array([]), np.array([])
+    
+    # Create time bins
+    time_min = np.min(tarr)
+    time_max = np.max(tarr)
+    n_bins = max(1, int((time_max - time_min) / bin_width))
+    bins = np.linspace(time_min, time_max, n_bins + 1)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    
+    # Count pulses in each bin
+    counts, _ = np.histogram(tarr, bins=bins)
+    
+    return bin_centers, counts
 #===============================================================================================================================================
 def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, window='hanning', freq_min=None, freq_max=None):
     """

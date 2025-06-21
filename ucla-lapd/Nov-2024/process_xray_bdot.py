@@ -27,7 +27,7 @@ sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
 
 
 from read_scope_data import read_trc_data
-from data_analysis_utils import Photons, calculate_stft
+from data_analysis_utils import Photons, calculate_stft, counts_per_bin
 from plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
 from read_cine import read_cine, convert_cine_to_avi
 from track_object import track_object, detect_chamber, get_vel_freefall, get_pos_freefall
@@ -297,31 +297,22 @@ def process_shot_2(file_number, base_dir, debug=False):
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
     if 'kapton' in f:
-        threshold = [20, 1000]
-        min_threshold = 0.01
-        max_threshold = 0.5
+        threshold = [10, 1000]
+        min_ts = 0.8e-6
+        d = 0.2
     elif "p24" in f:
-        threshold = [9, 150]
-        min_threshold = 0.025
-        max_threshold = 0.3
+        threshold = [10, 150]
+        min_ts = 1e-6
+        d = 1
     elif "p30" in f:
-        threshold = [1, 300]
-        min_threshold = 0.015
-        max_threshold = 0.3
+        threshold = [10, 150]
+        min_ts = 1e-6
+        d = 1
 
-    min_ts = 1e-6
-    d = 1
     detector = Photons(tarr_x, xray_data, min_timescale=min_ts, distance_mult=d, tsh_mult=threshold, debug=debug)
-
     detector.reduce_pulses()
 
-    t_bin = 1
-    bin_centers, counts = detector.counts_per_bin(t_bin, amplitude_min=min_threshold, amplitude_max=max_threshold)
-
-    # Free memory
-    del xray_data
-    del tarr_x
-    return bin_centers, counts
+    return detector.pulse_times, detector.pulse_amplitudes
 
 def process_video(file_number, base_dir, fig=None, ax=None):
     '''
@@ -482,10 +473,9 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         
         # Plot power data if available
         if P_data is not None and tarr_I is not None:
-            ax3.plot(tarr_I*1e3, P_data, 'b-', linewidth=2)
+            ax3.plot(tarr_I*1e3, P_data*1e-4, 'b-', linewidth=2)
             ax3.set_xlabel('Time (ms)')
             ax3.set_ylabel('Power (kW)')
-            ax3.set_title('Magnetron Power')
             ax3.grid(True)
         else:
             ax3.text(0.5, 0.5, 'Power data not available', 
@@ -500,51 +490,138 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         plt.draw()
         plt.pause(0.1)  # Small pause to ensure the plot is rendered
         
-        # Collect data for combined scatter plot
+        # X-ray data
         if file_number in analysis_dict:
-            bin_centers, counts, r_arr = analysis_dict[file_number]
+            pulse_tarr, pulse_amp = analysis_dict[file_number]
         else:
-            # Get x-ray data
-            bin_centers, counts = process_shot_2(file_number, base_dir, debug=debug)
-            v = get_vel_freefall()  # velocity of ball at chamber center
-            r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)  # position of ball at each time bin
+            pulse_tarr, pulse_amp = process_shot_2(file_number, base_dir, debug=debug)
             
             # Save new results
-            analysis_dict[file_number] = (bin_centers, counts, r_arr)
+            analysis_dict[file_number] = (pulse_tarr, pulse_amp)
             try:
                 np.save(analysis_file, analysis_dict)
                 print(f"Added new analysis result for shot {file_number}")
             except Exception as e:
                 print(f"Error saving analysis results: {e}")
+
+        # Calculate counts per bin for ALL pulses (no amplitude filtering)
+        bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=1)
         
-        # Store data for combined plot
-        all_scatter_data.append({
+        v = get_vel_freefall()  # velocity of ball at chamber center
+        r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)  # position of ball at each time bin
+        
+        # Store ALL pulse data for later filtering during plotting
+        shot_data = {
             'file_number': file_number,
+            't0': t0,
+            'uw_start': uw_start,
+            'v': v,
+            'pulse_tarr': pulse_tarr,
+            'pulse_amp': pulse_amp,
             'bin_centers': bin_centers,
             'counts': counts,
-            'r_arr': r_arr,
-            't0': t0,
-            'uw_start': uw_start
-        })
+            'r_arr': r_arr
+        }
         
-        # Update maximum counts
-        max_counts = max(max_counts, np.max(counts))
-    
-    # Create combined scatter plot after processing all shots
-    print("\nCreating combined X-ray counts plot...")
-    fig_combined, ax_combined = plt.subplots(figsize=(12, 8), num="Combined_X-ray_Counts")
+        all_scatter_data.append(shot_data)
+
+    plot_combined_scatter(all_scatter_data)
 
     
-    for i, data in enumerate(all_scatter_data):
-        scatter = ax_combined.scatter(data['bin_centers'], data['r_arr']*100, c=data['counts'], s=50, alpha=0.7)
-        # norm=colors.PowerNorm(gamma=0.5, vmin=0, vmax=max_counts)
-        
-    ax_combined.set_xlabel('Time (ms)')
-    ax_combined.set_ylabel('Radial position (cm)')
-    ax_combined.grid(True)
+def plot_combined_scatter(all_scatter_data):
+    # Create combined scatter plot with 2 panels after processing all shots
+    print("\nCreating combined X-ray counts plot with 2 amplitude ranges...")
+    fig_combined, axes = plt.subplots(1, 2, figsize=(16, 6), num="Combined_X-ray_Counts")
     
-    # Add colorbar to combined plot
-    cbar = plt.colorbar(scatter, ax=ax_combined, label='Counts')
+    # Define panel titles for the 2 amplitude ranges
+    panel_titles = [
+        '0-50% Amplitude Range',
+        '50-100% Amplitude Range'
+    ]
+    
+    # Determine time axis range from magnetron power plot (matching individual shot plots)
+    time_min, time_max = -5, 40  # Same range as used in individual power plots
+    
+    # Calculate global amplitude range across all shots for consistent thresholding
+    all_pulse_amps = []
+    for shot_data in all_scatter_data:
+        all_pulse_amps.extend(shot_data['pulse_amp'])
+    
+    if len(all_pulse_amps) > 0:
+        global_min = np.min(all_pulse_amps)
+        global_max = np.max(all_pulse_amps) / 2
+        global_range = global_max - global_min
+        
+        # Define 2 threshold ranges based on global amplitude range
+        threshold_ranges = [
+            (global_min, global_min + 0.50 * global_range),  # 0-50%
+            (global_min + 0.50 * global_range, global_max)   # 50-100%
+        ]
+    else:
+        threshold_ranges = [(0, 1), (1, 2)]  # Fallback ranges
+    
+    # Plot data for each amplitude range in separate panels with individual normalization
+    scatter_list = []  # Store scatter objects for colorbar
+    
+    for panel_idx in range(2):
+        ax = axes[panel_idx]
+        min_thresh, max_thresh = threshold_ranges[panel_idx]
+        
+        # Collect data points for this amplitude range across all shots
+        all_bin_centers = []
+        all_r_positions = []
+        all_counts = []
+        
+        for shot_data in all_scatter_data:
+            # Filter pulses by amplitude range for this panel
+            pulse_tarr = shot_data['pulse_tarr']
+            pulse_amp = shot_data['pulse_amp']
+            
+            # Create mask for pulses in this amplitude range
+            amp_mask = (pulse_amp >= min_thresh) & (pulse_amp <= max_thresh)
+            filtered_pulse_tarr = pulse_tarr[amp_mask]
+            filtered_pulse_amp = pulse_amp[amp_mask]
+            
+            if len(filtered_pulse_tarr) > 0:
+                # Recalculate counts per bin for filtered pulses
+                bin_centers, counts = counts_per_bin(filtered_pulse_tarr, filtered_pulse_amp, bin_width=1)
+                
+                if len(counts) > 0:
+                    # Calculate radial positions for this shot
+                    v = shot_data['v']
+                    t0 = shot_data['t0']
+                    uw_start = shot_data['uw_start']
+                    r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)
+                    
+                    all_bin_centers.extend(bin_centers)
+                    all_r_positions.extend(r_arr * 100)  # Convert to cm
+                    all_counts.extend(counts)
+        
+        # Create scatter plot for this panel if there's data
+        if len(all_counts) > 0:
+            # Normalize counts for this panel to 0-1 range
+            panel_max = np.max(all_counts)
+            normalized_counts = np.array(all_counts) / panel_max if panel_max > 0 else np.array(all_counts)
+            
+            scatter = ax.scatter(all_bin_centers, all_r_positions, c=normalized_counts, 
+                               s=50, alpha=0.7, vmin=0, vmax=1)
+            scatter_list.append(scatter)
+        else:
+            # Create empty scatter for panels with no data
+            scatter = ax.scatter([], [], c=[], s=50, alpha=0.7, vmin=0, vmax=1)
+            scatter_list.append(scatter)
+        
+        # Set consistent time axis range to match magnetron power plots
+        ax.set_xlim(time_min, time_max)
+        ax.set_ylim(0,40)
+        ax.set_xlabel('Time (ms)')
+        ax.set_ylabel('Radial position (cm)')
+        ax.grid(True)
+    
+    # Add a single colorbar for all panels with normalized scale
+    plt.tight_layout()
+    cbar = fig_combined.colorbar(scatter_list[0], ax=axes, label='normalized counts', shrink=0.8, aspect=30)
+    cbar.set_ticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
     cbar.ax.tick_params(labelsize=18)
     
     plt.draw()
@@ -559,10 +636,11 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(30,40)]
-    # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
+    file_numbers = [f"{i:05d}" for i in range(6,25)]
+    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
-    base_dir = r"E:\good_data\kapton\He3kA_B380G800G_pl0t20_uw15t35"
+    # base_dir = r"E:\good_data\kapton\He3kA_B250G500G_pl0t20_uw15t35"
+
 
     # Uncomment one of these functions to run
     # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots
