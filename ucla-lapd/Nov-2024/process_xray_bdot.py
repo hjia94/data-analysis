@@ -96,36 +96,60 @@ def get_magnetron_power_data(power_files, base_dir):
     
     return P_data, tarr_I, I_data, V_data, Pref_data
 
-def process_shot(file_number, base_dir, debug=False):
+def process_shot_bdot(file_number, base_dir, debug=False):
+    '''
+    Process a single shot of bdot data and return data for averaging.
+    '''
     all_files = os.listdir(base_dir)
-    bdot_files = [f for f in all_files if "Bdot" in f]
+    shot_files = [f for f in all_files if file_number in f]
+    bdot_files = [f for f in shot_files if "Bdot" in f]
+
+    By_P21 = None
+    Bx_P20 = None
+    By_P20 = None
+    tarr_B = None
 
     for f in bdot_files:
         if "C1--" in f:
             filepath = os.path.join(base_dir, f)
             By_P21, tarr_B = read_trc_data(filepath)
             print(f"found By_P21 at {filepath}")
-            break
-    for f in bdot_files:
+
         if "C2--" in f:
             filepath = os.path.join(base_dir, f)
             Bx_P20, tarr_B = read_trc_data(filepath)
             print(f"found Bx_P20 at {filepath}")
-            break
-    for f in bdot_files:
+
         if "C3--" in f:
             filepath = os.path.join(base_dir, f)
             By_P20, tarr_B = read_trc_data(filepath)
             print(f"found By_P20 at {filepath}")
-            break
-
-    if By_P21 is None or Bx_P20 is None or By_P20 is None:
-        raise FileNotFoundError(f"Required Bdot data files not found for file number {file_number}")
     
+    # Calculate STFT for each Bdot signal
+    freq_bins = 1000
+    overlap_fraction = 0.05
+    freq_min = 10e6  # 100 MHz
+    freq_max = 1000e6  # 800 MHz
 
+    if By_P21 is not None:
+        freq, stft_matrix1, stft_time = calculate_stft(tarr_B, By_P21, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
+    else:
+        stft_matrix1 = None
 
-def process_shot_2(file_number, base_dir, debug=False):
-    """Process a single shot and return data for averaging."""
+    if Bx_P20 is not None:
+        freq, stft_matrix2, stft_time = calculate_stft(tarr_B, Bx_P20, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
+    else:
+        stft_matrix2 = None
+
+    if By_P20 is not None:
+        freq, stft_matrix3, stft_time = calculate_stft(tarr_B, By_P20, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
+    else:
+        stft_matrix3 = None
+
+    return stft_time, freq, stft_matrix1, stft_matrix2, stft_matrix3
+
+def process_shot_xray(file_number, base_dir, debug=False):
+    """Process a single shot of xray data and return data for averaging."""
     
     all_files = os.listdir(base_dir)
     shot_files = [f for f in all_files if file_number in f]
@@ -145,7 +169,7 @@ def process_shot_2(file_number, base_dir, debug=False):
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
     if 'kapton' in f:
-        threshold = [10, 1000]
+        threshold = [10, 450]
         min_ts = 0.8e-6
         d = 0.2
     elif "p24" in f:
@@ -162,7 +186,7 @@ def process_shot_2(file_number, base_dir, debug=False):
 
     return detector.pulse_times, detector.pulse_amplitudes
 
-def process_video(file_number, base_dir, fig=None, ax=None):
+def process_video(file_number, base_dir):
     '''
     Process the video file for a given shot number and return the time at which the ball reaches the chamber center
     '''
@@ -224,16 +248,9 @@ def process_video(file_number, base_dir, fig=None, ax=None):
 
     # Detect chamber
     (cx, cy), chamber_radius = detect_chamber(frame)
-    
-    # Plot in the provided axis
-    ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
-    ax.add_patch(chamber_circle)
-    print(f"ball reaches chamber center at t={ct * 1e3:.3f}ms from plasma trigger")
-    ax.axis('off')
 
     cap.release()
-    return ct, filepath
+    return ct, frame, (cx, cy), chamber_radius, filepath
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -295,23 +312,19 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
     all_scatter_data = []
     max_counts = 0
     
+    # Storage for STFT data averaging
+    all_stft_matrix1 = []
+    all_stft_matrix2 = []
+    all_stft_matrix3 = []
+    stft_time_ref = None
+    freq_ref = None
+    
     # Process each file: collect data and create individual figures
     print("Processing each shot...")
     for file_number in file_numbers:
         print(f"\nProcessing shot {file_number}")
-
         
-        # Create individual figure with two subplots (video + power)
-        fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
-        
-
-        t0, filepath = process_video(file_number, base_dir, fig=fig, ax=ax1)
-        match = re.search(r'uw(\d+)t', filepath)
-        uw_start = int(match.group(1)) * 1e-3
-        print(f"uw_start: {uw_start}")
-
-              
-        # Plot magnetron power in second panel
+        # Magnetron power data
         all_files = os.listdir(base_dir)
         shot_files = [f for f in all_files if file_number in f]
         power_files = [f for f in shot_files if "xray" not in f.lower() and "Bdot" not in f]
@@ -319,6 +332,24 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         # Get magnetron power data using the standalone function
         P_data, tarr_I, I_data, V_data, Pref_data = get_magnetron_power_data(power_files, base_dir)
         
+        # Video data
+        t0, frame, (cx, cy), chamber_radius, filepath = process_video(file_number, base_dir)
+
+        # Microwave start time
+        match = re.search(r'uw(\d+)t', filepath)
+        uw_start = int(match.group(1)) * 1e-3
+        print(f"uw_start: {uw_start}")
+
+        
+        # Create individual figure with two subplots (video + power)
+        fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
+
+        ax1.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
+        ax1.add_patch(chamber_circle)
+        print(f"ball reaches chamber center at t={t0 * 1e3:.3f}ms from plasma trigger")
+        ax1.axis('off')
+
         # Plot power data if available
         if P_data is not None and tarr_I is not None:
             ax3.plot(tarr_I*1e3, P_data*1e-4, 'b-', linewidth=2)
@@ -336,13 +367,14 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         # Adjust layout and display for individual figure
         plt.tight_layout()
         plt.draw()
-        plt.pause(0.1)  # Small pause to ensure the plot is rendered
+        plt.pause(0.1)
+        
         
         # X-ray data
         if file_number in analysis_dict:
             pulse_tarr, pulse_amp = analysis_dict[file_number]
         else:
-            pulse_tarr, pulse_amp = process_shot_2(file_number, base_dir, debug=debug)
+            pulse_tarr, pulse_amp = process_shot_xray(file_number, base_dir, debug=debug)
             
             # Save new results
             analysis_dict[file_number] = (pulse_tarr, pulse_amp)
@@ -373,19 +405,66 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         
         all_scatter_data.append(shot_data)
 
+    '''
+        # Bdot data - collect for averaging
+        stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
+        
+        # Collect STFT matrices for averaging
+        if stft_matrix1 is not None:
+            all_stft_matrix1.append(stft_matrix1)
+        if stft_matrix2 is not None:
+            all_stft_matrix2.append(stft_matrix2)
+        if stft_matrix3 is not None:
+            all_stft_matrix3.append(stft_matrix3)
+
+    # Average the STFT matrices with optional time axis limitation
+    avg_stft_matrix1 = None
+    avg_stft_matrix2 = None
+    avg_stft_matrix3 = None
+    
+    # Option to limit time axis to first half (set to True to enable)
+    limit_time_axis = False
+    
+    if len(all_stft_matrix1) > 0:
+        matrices = np.array(all_stft_matrix1)
+        if limit_time_axis:
+            index = matrices.shape[1] // 2
+            matrices = matrices[:, :index, :]
+        avg_stft_matrix1 = np.mean(matrices, axis=0)
+        print(f"Averaged {len(all_stft_matrix1)} By_P21 STFT matrices")
+    
+    if len(all_stft_matrix2) > 0:
+        matrices = np.array(all_stft_matrix2)
+        if limit_time_axis:
+            index = matrices.shape[1] // 2
+            matrices = matrices[:, :index, :]
+        avg_stft_matrix2 = np.mean(matrices, axis=0)
+        print(f"Averaged {len(all_stft_matrix2)} Bx_P20 STFT matrices")
+    
+    if len(all_stft_matrix3) > 0:
+        matrices = np.array(all_stft_matrix3)
+        if limit_time_axis:
+            index = matrices.shape[1] // 2
+            matrices = matrices[:, :index, :]
+        avg_stft_matrix3 = np.mean(matrices, axis=0)
+        print(f"Averaged {len(all_stft_matrix3)} By_P20 STFT matrices")
+    
+    if limit_time_axis:
+        stft_tarr = stft_tarr[:index]
+        freq_arr = freq_arr[:index]
+
+    plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr)
+
+    '''
     plot_combined_scatter(all_scatter_data)
 
+    plt.show(block=True)  # Keep the plots visible at the end
     
+
 def plot_combined_scatter(all_scatter_data):
     # Create combined scatter plot with 2 panels after processing all shots
     print("\nCreating combined X-ray counts plot with 2 amplitude ranges...")
     fig_combined, axes = plt.subplots(1, 2, figsize=(16, 6), num="Combined_X-ray_Counts")
-    
-    # Define panel titles for the 2 amplitude ranges
-    panel_titles = [
-        '0-50% Amplitude Range',
-        '50-100% Amplitude Range'
-    ]
     
     # Determine time axis range from magnetron power plot (matching individual shot plots)
     time_min, time_max = -5, 40  # Same range as used in individual power plots
@@ -465,18 +544,83 @@ def plot_combined_scatter(all_scatter_data):
         ax.set_xlabel('Time (ms)')
         ax.set_ylabel('Radial position (cm)')
         ax.grid(True)
-    
-    # Add a single colorbar for all panels with normalized scale
+
     plt.tight_layout()
+    # Add a single colorbar for all panels with normalized scale
     cbar = fig_combined.colorbar(scatter_list[0], ax=axes, label='normalized counts', shrink=0.8, aspect=30)
     cbar.set_ticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
     cbar.ax.tick_params(labelsize=18)
-    
+
     plt.draw()
     plt.pause(0.1)
 
-    # Keep the plots visible at the end
-    plt.show(block=True)  # This will block until all figures are closed
+def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr):
+    """
+    Plot averaged STFT matrices for the three Bdot signals.
+    """
+    print("\nCreating averaged Bdot STFT plots...")
+    
+    # Create figure with 3 subplots (similar to notebook)
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15), num="Averaged_Bdot_STFT", sharex=True)
+    
+    # Plot averaged STFT for By_P21 with log scale
+    if avg_stft_matrix1 is not None:
+        im1 = ax1.imshow(avg_stft_matrix1.T,
+                         aspect='auto',
+                         origin='lower',
+                         extent=[stft_tarr[0]*1e3, stft_tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
+                         interpolation='None',
+                         cmap='jet',
+                         norm=colors.LogNorm(vmin=avg_stft_matrix1.T[avg_stft_matrix1.T > 0].min(), 
+                                           vmax=avg_stft_matrix1.T.max()))
+        ax1.set_ylabel('Frequency (MHz)')
+        ax1.text(0.98, 0.95, 'By_P21 (x=8cm, y=0cm)', transform=ax1.transAxes, 
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), 
+                 horizontalalignment='right', verticalalignment='top')
+        fig.colorbar(im1, ax=ax1, label='Magnitude')
+    
+    if avg_stft_matrix2 is not None:
+        im2 = ax2.imshow(avg_stft_matrix2.T,
+                         aspect='auto',
+                         origin='lower',
+                         extent=[stft_tarr[0]*1e3, stft_tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
+                         interpolation='None',
+                         cmap='jet',
+                         norm=colors.LogNorm(vmin=avg_stft_matrix2.T[avg_stft_matrix2.T > 0].min(), 
+                                           vmax=avg_stft_matrix2.T.max()))
+        ax2.set_ylabel('Frequency (MHz)')
+        ax2.text(0.98, 0.95, 'Bx_P20 (x=0cm, y=0cm)', transform=ax2.transAxes, 
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), 
+                 horizontalalignment='right', verticalalignment='top')
+        fig.colorbar(im2, ax=ax2, label='Magnitude')
+
+    if avg_stft_matrix3 is not None:
+        im3 = ax3.imshow(avg_stft_matrix3.T,
+                         aspect='auto',
+                         origin='lower',
+                         extent=[stft_tarr[0]*1e3, stft_tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
+                         interpolation='None',
+                         cmap='jet',
+                         norm=colors.LogNorm(vmin=avg_stft_matrix3.T[avg_stft_matrix3.T > 0].min(), 
+                                           vmax=avg_stft_matrix3.T.max()))
+        ax3.set_xlabel('Time (ms)')
+        ax3.set_ylabel('Frequency (MHz)')
+        ax3.text(0.98, 0.95, 'By_P20 (x=0cm, y=0cm)', transform=ax3.transAxes, 
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), 
+                 horizontalalignment='right', verticalalignment='top')
+        fig.colorbar(im3, ax=ax3, label='Magnitude')
+
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save the figure as PNG
+    ifn = r"C:\Users\hjia9\Documents\lapd\e-ring\diagnostic_fig"
+    output_filename = os.path.join(ifn, "averaged_bdot_stft.png")
+    fig.savefig(output_filename, dpi=300, bbox_inches='tight')
+    print(f"Saved averaged Bdot STFT plot to: {output_filename}")
+    
+    plt.close(fig)  # Close the figure to free memory
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -484,10 +628,10 @@ def plot_combined_scatter(all_scatter_data):
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(6,25)]
-    base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
+    file_numbers = [f"{i:05d}" for i in range(90,99)]
+    # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
-    # base_dir = r"E:\good_data\kapton\He3kA_B250G500G_pl0t20_uw15t35"
+    base_dir = r"E:\good_data\kapton\He3kA_B250G500G_pl0t20_uw15t35"
 
 
     # Uncomment one of these functions to run
