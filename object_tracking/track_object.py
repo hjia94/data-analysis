@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import os
 from pathlib import Path
+from scipy.constants import g
 
 #===============================================================================================================================================
 def extract_calibration(cine_filename):
@@ -218,14 +219,22 @@ def get_vel_freefall(h=1):
     '''Get velocity (m) of object freefalling from height h in meter'''
     return np.sqrt(2*9.8*h)
 
-def get_pos_freefall(v,t):
+def get_pos_freefall(t, t0):
     '''
-    Get position of object in freefall after time t with initial velocity v
-    t is in seconds
-    v is in m/s
-    return is in meters
+    Get position of object in freefall relative to chamber center
+    At time t0, the ball reaches chamber center (y = 0) having fallen 1 meter
+    t is in seconds, t0 is time when ball reaches chamber center
+    return is in meters relative to chamber center
     '''
-    return v*t + 0.5*9.8*t**2
+    # Time to fall 1 meter from rest
+    fall_time = np.sqrt(2.0 / g)
+    t_start = t0 - fall_time
+    
+    # Time since falling started (negative means hasn't started yet)
+    dt = np.asarray(t) - t_start
+    
+    # Position: 0.5*g*dt² - 1, but only for dt >= 0 (after falling started)
+    return np.where(dt >= 0, 0.5 * g * dt**2 - 1.0, -1.0)
 
 #===============================================================================================================================================
 def update_tracking_result(tr_ifn, filepath, cf_new, ct_new):

@@ -169,9 +169,9 @@ def process_shot_xray(file_number, base_dir, debug=False):
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
     if 'kapton' in f:
-        threshold = [10, 450]
+        threshold = [10, 900]
         min_ts = 0.8e-6
-        d = 0.2
+        d = 0.1
     elif "p24" in f:
         threshold = [10, 150]
         min_ts = 1e-6
@@ -383,24 +383,14 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
                 print(f"Added new analysis result for shot {file_number}")
             except Exception as e:
                 print(f"Error saving analysis results: {e}")
-
-        # Calculate counts per bin for ALL pulses (no amplitude filtering)
-        bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=1)
         
-        v = get_vel_freefall()  # velocity of ball at chamber center
-        r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)  # position of ball at each time bin
-        
-        # Store ALL pulse data for later filtering during plotting
+        # Store ALL pulse data for plot in the end
         shot_data = {
             'file_number': file_number,
             't0': t0,
             'uw_start': uw_start,
-            'v': v,
             'pulse_tarr': pulse_tarr,
             'pulse_amp': pulse_amp,
-            'bin_centers': bin_centers,
-            'counts': counts,
-            'r_arr': r_arr
         }
         
         all_scatter_data.append(shot_data)
@@ -512,14 +502,9 @@ def plot_combined_scatter(all_scatter_data):
             if len(filtered_pulse_tarr) > 0:
                 # Recalculate counts per bin for filtered pulses
                 bin_centers, counts = counts_per_bin(filtered_pulse_tarr, filtered_pulse_amp, bin_width=1)
+                r_arr = get_pos_freefall(bin_centers*1e-3+shot_data['uw_start'], shot_data['t0'])  # position of ball at each time bin
                 
                 if len(counts) > 0:
-                    # Calculate radial positions for this shot
-                    v = shot_data['v']
-                    t0 = shot_data['t0']
-                    uw_start = shot_data['uw_start']
-                    r_arr = get_pos_freefall(v, uw_start-t0+bin_centers*1e-3)
-                    
                     all_bin_centers.extend(bin_centers)
                     all_r_positions.extend(r_arr * 100)  # Convert to cm
                     all_counts.extend(counts)
@@ -540,7 +525,7 @@ def plot_combined_scatter(all_scatter_data):
         
         # Set consistent time axis range to match magnetron power plots
         ax.set_xlim(time_min, time_max)
-        ax.set_ylim(0,40)
+        ax.set_ylim(-40,40)
         ax.set_xlabel('Time (ms)')
         ax.set_ylabel('Radial position (cm)')
         ax.grid(True)
@@ -628,7 +613,7 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(90,99)]
+    file_numbers = [f"{i:05d}" for i in range(50,59)] + [f"{i:05d}" for i in range(90,99)]
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
     base_dir = r"E:\good_data\kapton\He3kA_B250G500G_pl0t20_uw15t35"
