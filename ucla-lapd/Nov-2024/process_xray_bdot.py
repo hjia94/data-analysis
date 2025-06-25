@@ -451,13 +451,34 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
     plt.show(block=True)  # Keep the plots visible at the end
     
 
-def plot_combined_scatter(all_scatter_data):
-    # Create combined scatter plot with 2 panels after processing all shots
-    print("\nCreating combined X-ray counts plot with 2 amplitude ranges...")
-    fig_combined, axes = plt.subplots(1, 2, figsize=(16, 6), num="Combined_X-ray_Counts")
+def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
+    """
+    Plot combined X-ray counts scatter plot with configurable amplitude ranges.
     
-    # Determine time axis range from magnetron power plot (matching individual shot plots)
-    time_min, time_max = -5, 40  # Same range as used in individual power plots
+    Parameters:
+    -----------
+    all_scatter_data : list
+        List of shot data dictionaries
+    amplitude_ranges : list of tuples, default=None
+        List of (start_fraction, end_fraction) tuples defining amplitude ranges as fractions of total range.
+        Default is [(0, 0.25), (0.25, 0.5), (0.5, 1.0)] for 0-25%, 25-50%, 50-100% ranges.
+        Example: [(0, 0.3), (0.3, 0.7), (0.7, 1.0)] for 0-30%, 30-70%, 70-100% ranges.
+    """
+    
+    # Set default ranges if none provided
+    if amplitude_ranges is None:
+        amplitude_ranges = [(0, 0.25), (0.25, 0.5), (0.5, 1.0)]
+    
+    num_ranges = len(amplitude_ranges)
+    print(f"\nCreating combined X-ray counts plot with {num_ranges} amplitude ranges...")
+    
+    # Calculate figure width based on number of ranges
+    fig_width = max(12, num_ranges * 5)
+    fig_combined, axes = plt.subplots(1, num_ranges, figsize=(fig_width, 6), sharey=True)
+    
+    # Ensure axes is always a list, even for single subplot
+    if num_ranges == 1:
+        axes = [axes]
     
     # Calculate global amplitude range across all shots for consistent thresholding
     all_pulse_amps = []
@@ -469,18 +490,21 @@ def plot_combined_scatter(all_scatter_data):
         global_max = np.max(all_pulse_amps) / 2
         global_range = global_max - global_min
         
-        # Define 2 threshold ranges based on global amplitude range
-        threshold_ranges = [
-            (global_min, global_min + 0.50 * global_range),  # 0-50%
-            (global_min + 0.50 * global_range, global_max)   # 50-100%
-        ]
+        # Define threshold ranges based on specified amplitude ranges
+        threshold_ranges = []
+        for i, (start_frac, end_frac) in enumerate(amplitude_ranges):
+            range_start = global_min + start_frac * global_range
+            range_end = global_min + end_frac * global_range
+            threshold_ranges.append((range_start, range_end))
+            print(f"Range {i+1}: {start_frac*100:.1f}%-{end_frac*100:.1f}% of amplitude range")
     else:
-        threshold_ranges = [(0, 1), (1, 2)]  # Fallback ranges
+        # Fallback ranges
+        threshold_ranges = [(i, i+1) for i in range(num_ranges)]
     
     # Plot data for each amplitude range in separate panels with individual normalization
     scatter_list = []  # Store scatter objects for colorbar
     
-    for panel_idx in range(2):
+    for panel_idx in range(num_ranges):
         ax = axes[panel_idx]
         min_thresh, max_thresh = threshold_ranges[panel_idx]
         
@@ -506,7 +530,7 @@ def plot_combined_scatter(all_scatter_data):
                 
                 if len(counts) > 0:
                     all_bin_centers.extend(bin_centers)
-                    all_r_positions.extend(r_arr * 100)  # Convert to cm
+                    all_r_positions.extend((r_arr) * 100)  # Convert to cm
                     all_counts.extend(counts)
         
         # Create scatter plot for this panel if there's data
@@ -523,18 +547,24 @@ def plot_combined_scatter(all_scatter_data):
             scatter = ax.scatter([], [], c=[], s=50, alpha=0.7, vmin=0, vmax=1)
             scatter_list.append(scatter)
         
-        # Set consistent time axis range to match magnetron power plots
-        ax.set_xlim(time_min, time_max)
+
+        ax.set_xlim(0, 40)
         ax.set_ylim(-40,40)
         ax.set_xlabel('Time (ms)')
-        ax.set_ylabel('Radial position (cm)')
+        
+        # Only set ylabel on the first panel since they share y-axis
+        if panel_idx == 0:
+            ax.set_ylabel('Position (cm)')
+        
         ax.grid(True)
+
 
     plt.tight_layout()
     # Add a single colorbar for all panels with normalized scale
-    cbar = fig_combined.colorbar(scatter_list[0], ax=axes, label='normalized counts', shrink=0.8, aspect=30)
-    cbar.set_ticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
-    cbar.ax.tick_params(labelsize=18)
+    if scatter_list:
+        cbar = fig_combined.colorbar(scatter_list[0], ax=axes, label='normalized counts', shrink=0.8, aspect=30)
+        cbar.set_ticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
+        cbar.ax.tick_params(labelsize=18)
 
     plt.draw()
     plt.pause(0.1)
