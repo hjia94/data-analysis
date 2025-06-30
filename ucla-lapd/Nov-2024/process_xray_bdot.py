@@ -128,8 +128,8 @@ def process_shot_bdot(file_number, base_dir, debug=False):
     # Calculate STFT for each Bdot signal
     freq_bins = 1000
     overlap_fraction = 0.05
-    freq_min = 10e6  # 100 MHz
-    freq_max = 1000e6  # 800 MHz
+    freq_min = 200e6  # 100 MHz
+    freq_max = 2000e6  # 800 MHz
 
     if By_P21 is not None:
         freq, stft_matrix1, stft_time = calculate_stft(tarr_B, By_P21, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
@@ -168,18 +168,22 @@ def process_shot_xray(file_number, base_dir, debug=False):
     if xray_data is None or tarr_x is None:
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
-    if 'kapton' in f:
+    if 'kapton' in base_dir:
         threshold = [10, 900]
         min_ts = 0.8e-6
         d = 0.1
-    elif "p24" in f:
+    elif "P24" and "250G500G"in base_dir:
         threshold = [10, 150]
         min_ts = 1e-6
         d = 1
-    elif "p30" in f:
+    elif "P30" and "250G500G" in base_dir:
         threshold = [10, 150]
         min_ts = 1e-6
         d = 1
+    elif "500G1kG" in base_dir:
+        threshold = [20, 250]
+        min_ts = 1e-6
+        d = 0.1
 
     detector = Photons(tarr_x, xray_data, min_timescale=min_ts, distance_mult=d, tsh_mult=threshold, debug=debug)
     detector.reduce_pulses()
@@ -395,7 +399,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         
         all_scatter_data.append(shot_data)
 
-    '''
+
         # Bdot data - collect for averaging
         stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
         
@@ -445,7 +449,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
 
     plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr)
 
-    '''
+    
     plot_combined_scatter(all_scatter_data)
 
     plt.show(block=True)  # Keep the plots visible at the end
@@ -643,10 +647,11 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(50,59)] + [f"{i:05d}" for i in range(90,99)]
+    file_numbers = [f"{i:05d}" for i in range(3,10)]
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
-    base_dir = r"E:\good_data\kapton\He3kA_B250G500G_pl0t20_uw15t35"
+    # base_dir = r"E:\good_data\kapton\He3kA_B250G500G_pl0t20_uw15t35" # file numbers 50-59 90-99
+    base_dir = r"E:\good_data\He3kA_B500G1kG_pl0t20_uw17t37_P30"
 
 
     # Uncomment one of these functions to run
