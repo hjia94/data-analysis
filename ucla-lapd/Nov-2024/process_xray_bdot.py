@@ -168,8 +168,8 @@ def process_shot_xray(file_number, base_dir, debug=False):
     if xray_data is None or tarr_x is None:
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
-    if 'kapton' in base_dir:
-        threshold = [10, 900]
+    if "kapton" and "380G800G" in base_dir:
+        threshold = [8, 400]
         min_ts = 0.8e-6
         d = 0.1
     elif "P24" and "250G500G"in base_dir:
@@ -184,6 +184,10 @@ def process_shot_xray(file_number, base_dir, debug=False):
         threshold = [20, 250]
         min_ts = 1e-6
         d = 0.1
+
+    # analyze only the first half of the data
+    tarr_x = tarr_x[:int(len(tarr_x)/2)]
+    xray_data = xray_data[:int(len(xray_data)/2)]
 
     detector = Photons(tarr_x, xray_data, min_timescale=min_ts, distance_mult=d, tsh_mult=threshold, debug=debug)
     detector.reduce_pulses()
@@ -344,7 +348,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         uw_start = int(match.group(1)) * 1e-3
         print(f"uw_start: {uw_start}")
 
-        
+        '''
         # Create individual figure with two subplots (video + power)
         fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
 
@@ -372,7 +376,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         plt.tight_layout()
         plt.draw()
         plt.pause(0.1)
-        
+        '''
         
         # X-ray data
         if file_number in analysis_dict:
@@ -399,7 +403,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         
         all_scatter_data.append(shot_data)
 
-
+    '''
         # Bdot data - collect for averaging
         stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
         
@@ -448,9 +452,9 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         freq_arr = freq_arr[:index]
 
     plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr)
-
+    '''
     
-    plot_combined_scatter(all_scatter_data)
+    plot_combined_scatter(all_scatter_data, amplitude_ranges=[(0, 0.5), (0.5, 1.0)])
 
     plt.show(block=True)  # Keep the plots visible at the end
     
@@ -647,12 +651,13 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(3,10)]
+    file_numbers = [f"{i:05d}" for i in range(110,114)] + [f"{i:05d}" for i in range(60, 89)]
+    file_numbers = [num for num in file_numbers if int(num) not in [63,69,77,79,84,85]]
+    
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
     # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
-    # base_dir = r"E:\good_data\kapton\He3kA_B250G500G_pl0t20_uw15t35" # file numbers 50-59 90-99
-    base_dir = r"E:\good_data\He3kA_B500G1kG_pl0t20_uw17t37_P30"
-
+    # base_dir = r"E:\good_data\He3kA_B500G1kG_pl0t20_uw17t37_P30"
+    base_dir = r"E:\good_data\kapton\He3kA_B380G800G_pl0t20_uw15t35"
 
     # Uncomment one of these functions to run
     # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots

@@ -224,7 +224,7 @@ def get_pos_freefall(t, t0):
     Get position of object in freefall relative to chamber center
     At time t0, the ball reaches chamber center (y = 0) having fallen 1 meter
     t is in seconds, t0 is time when ball reaches chamber center
-    return is in meters relative to chamber center
+    return is in meters relative to chamber center (positive = above, negative = below)
     '''
     # Time to fall 1 meter from rest
     fall_time = np.sqrt(2.0 / g)
@@ -233,8 +233,9 @@ def get_pos_freefall(t, t0):
     # Time since falling started (negative means hasn't started yet)
     dt = np.asarray(t) - t_start
     
-    # Position: 0.5*g*dt² - 1, but only for dt >= 0 (after falling started)
-    return np.where(dt >= 0, 0.5 * g * dt**2 - 1.0, -1.0)
+    # Position: -(0.5*g*dt² - 1), but only for dt >= 0 (after falling started)
+    # Negative sign corrects coordinate system: positive = above center, negative = below
+    return -np.where(dt >= 0, 0.5 * g * dt**2 - 1.0, -1.0)
 
 #===============================================================================================================================================
 def update_tracking_result(tr_ifn, filepath, cf_new, ct_new):
