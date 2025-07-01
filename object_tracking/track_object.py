@@ -16,7 +16,7 @@ def extract_calibration(cine_filename):
     return calibration
 
 #===============================================================================================================================================
-def detect_chamber(frame):
+def detect_chamber(frame, debug=False):
     """
     Detects the bright chamber circle using optimized thresholding and validation.
     
@@ -108,7 +108,8 @@ def detect_chamber(frame):
         origin = (frame.shape[1]//2, frame.shape[0]//2)
         radius = int((min_radius_px + max_radius_px)/2)
 
-    print(f"Chamber detected at {origin} with radius {radius}px")
+    if debug:
+        print(f"Chamber detected at {origin} with radius {radius}px")
     return origin, radius
 
 #===============================================================================================================================================

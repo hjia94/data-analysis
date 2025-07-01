@@ -66,7 +66,6 @@ def get_magnetron_power_data(power_files, base_dir):
         if f"C2--" in f:
             filepath = os.path.join(base_dir, f)
             I_data, tarr_I = read_trc_data(filepath)
-            print(f"Using current file: {f}")
             break
     
     # Find voltage data (Channel 4)
@@ -76,7 +75,6 @@ def get_magnetron_power_data(power_files, base_dir):
         if f"C4--" in f:
             filepath = os.path.join(base_dir, f)
             V_data, tarr_V = read_trc_data(filepath)
-            print(f"Using voltage file: {f}")
             break
     
     # Find reflected power data (Channel 3)
@@ -85,7 +83,6 @@ def get_magnetron_power_data(power_files, base_dir):
         if f"C3--" in f:
             filepath = os.path.join(base_dir, f)
             Pref_data, _ = read_trc_data(filepath)
-            print(f"Using reflected power file: {f}")
             break
     
     # Calculate power if both current and voltage data are available
@@ -93,6 +90,7 @@ def get_magnetron_power_data(power_files, base_dir):
     if I_data is not None and V_data is not None and tarr_I is not None:
         # Calculate power: P = I * V (with scaling factor for current)
         P_data = (I_data * 0.25) * (-V_data) * 0.6  # 1V ~ 0.25A; V is recorded negative; assume 60% of power goes to the plasma
+        print("Magnetron power data found")
     
     return P_data, tarr_I, I_data, V_data, Pref_data
 
@@ -103,6 +101,10 @@ def process_shot_bdot(file_number, base_dir, debug=False):
     all_files = os.listdir(base_dir)
     shot_files = [f for f in all_files if file_number in f]
     bdot_files = [f for f in shot_files if "Bdot" in f]
+
+    # Check if any Bdot files exist for this shot
+    if not bdot_files:
+        raise FileNotFoundError(f"No Bdot files found for file number {file_number}")
 
     By_P21 = None
     Bx_P20 = None
@@ -124,7 +126,8 @@ def process_shot_bdot(file_number, base_dir, debug=False):
             filepath = os.path.join(base_dir, f)
             By_P20, tarr_B = read_trc_data(filepath)
             print(f"found By_P20 at {filepath}")
-    
+
+
     # Calculate STFT for each Bdot signal
     freq_bins = 1000
     overlap_fraction = 0.05
@@ -168,10 +171,15 @@ def process_shot_xray(file_number, base_dir, debug=False):
     if xray_data is None or tarr_x is None:
         raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
 
-    if "kapton" and "380G800G" in base_dir:
-        threshold = [8, 400]
-        min_ts = 0.8e-6
+    if "380G800G" in base_dir:
         d = 0.1
+        if "kapton" in base_dir:
+            threshold = [8, 400]
+            min_ts = 0.8e-6
+        else:
+            threshold = [20, 150]
+            min_ts = 1e-6
+            
     elif "P24" and "250G500G"in base_dir:
         threshold = [10, 150]
         min_ts = 1e-6
@@ -331,6 +339,12 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
     print("Processing each shot...")
     for file_number in file_numbers:
         print(f"\nProcessing shot {file_number}")
+        # Video data
+        try:
+            t0, frame, (cx, cy), chamber_radius, filepath = process_video(file_number, base_dir)
+        except FileNotFoundError as e:
+            print(f"No video file found for shot {file_number}; skipping...")
+            continue
         
         # Magnetron power data
         all_files = os.listdir(base_dir)
@@ -339,16 +353,14 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         
         # Get magnetron power data using the standalone function
         P_data, tarr_I, I_data, V_data, Pref_data = get_magnetron_power_data(power_files, base_dir)
-        
-        # Video data
-        t0, frame, (cx, cy), chamber_radius, filepath = process_video(file_number, base_dir)
 
         # Microwave start time
         match = re.search(r'uw(\d+)t', filepath)
         uw_start = int(match.group(1)) * 1e-3
-        print(f"uw_start: {uw_start}")
+        if debug:
+            print(f"uw_start: {uw_start}")
 
-        '''
+        
         # Create individual figure with two subplots (video + power)
         fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
 
@@ -376,7 +388,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         plt.tight_layout()
         plt.draw()
         plt.pause(0.1)
-        '''
+        
         
         # X-ray data
         if file_number in analysis_dict:
@@ -403,9 +415,13 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         
         all_scatter_data.append(shot_data)
 
-    '''
+    
         # Bdot data - collect for averaging
-        stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
+        try:
+            stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
+        except FileNotFoundError as e:
+            print(f"No Bdot data found for shot {file_number}; skipping...")
+            continue
         
         # Collect STFT matrices for averaging
         if stft_matrix1 is not None:
@@ -452,7 +468,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         freq_arr = freq_arr[:index]
 
     plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr)
-    '''
+    
     
     plot_combined_scatter(all_scatter_data, amplitude_ranges=[(0, 0.5), (0.5, 1.0)])
 
@@ -534,11 +550,11 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
             if len(filtered_pulse_tarr) > 0:
                 # Recalculate counts per bin for filtered pulses
                 bin_centers, counts = counts_per_bin(filtered_pulse_tarr, filtered_pulse_amp, bin_width=1)
-                r_arr = get_pos_freefall(bin_centers*1e-3+shot_data['uw_start'], shot_data['t0'])  # position of ball at each time bin
+                r_arr = get_pos_freefall(bin_centers*1e-3+shot_data['uw_start'], shot_data['t0'])
                 
                 if len(counts) > 0:
                     all_bin_centers.extend(bin_centers)
-                    all_r_positions.extend((r_arr) * 100)  # Convert to cm
+                    all_r_positions.extend((r_arr) * 100 - 5)  # Convert to cm
                     all_counts.extend(counts)
         
         # Create scatter plot for this panel if there's data
@@ -548,15 +564,15 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
             normalized_counts = np.array(all_counts) / panel_max if panel_max > 0 else np.array(all_counts)
             
             scatter = ax.scatter(all_bin_centers, all_r_positions, c=normalized_counts, 
-                               s=50, alpha=0.7, vmin=0, vmax=1)
+                               s=30, alpha=0.7, vmin=0, vmax=1)
             scatter_list.append(scatter)
         else:
             # Create empty scatter for panels with no data
-            scatter = ax.scatter([], [], c=[], s=50, alpha=0.7, vmin=0, vmax=1)
+            scatter = ax.scatter([], [], c=[], s=30, alpha=0.7, vmin=0, vmax=1)
             scatter_list.append(scatter)
         
 
-        ax.set_xlim(0, 40)
+        ax.set_xlim(0, 30)
         ax.set_ylim(-40,40)
         ax.set_xlabel('Time (ms)')
         
@@ -651,13 +667,10 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(110,114)] + [f"{i:05d}" for i in range(60, 89)]
-    file_numbers = [num for num in file_numbers if int(num) not in [63,69,77,79,84,85]]
+    file_numbers = [f"{i:05d}" for i in range(25,36)] #+ [f"{i:05d}" for i in range(60, 89)]
     
-    # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t47_P24"
-    # base_dir = r"E:\good_data\He3kA_B250G500G_pl0t20_uw17t27_P30"
-    # base_dir = r"E:\good_data\He3kA_B500G1kG_pl0t20_uw17t37_P30"
-    base_dir = r"E:\good_data\kapton\He3kA_B380G800G_pl0t20_uw15t35"
+    # base_dir = r"E:\good_data\kapton\He3kA_B380G800G_pl0t20_uw15t35"
+    base_dir = r"E:\good_data\He3kA_B380G800G_pl0t20_uw17t27_P30"
 
     # Uncomment one of these functions to run
     # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots

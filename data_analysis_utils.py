@@ -654,31 +654,37 @@ def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, wi
     else:
         win = np.ones(samples_per_fft)
     
+    # Store original data length before padding
+    original_length = len(data_arr)
+    
     # Pad signal if necessary
     pad_length = (samples_per_fft - len(data_arr) % hop) % hop
     if pad_length > 0:
         data_arr = np.pad(data_arr, (0, pad_length), mode='constant')
-        # Also pad the time array (extrapolate time values)
-        if len(time_array) < len(data_arr):
-            dt = time_array[1] - time_array[0]
-            extra_times = np.arange(len(time_array), len(data_arr)) * dt + time_array[-1]
-            time_array = np.concatenate([time_array, extra_times])
     
     # Calculate indices of the start of each segment
     num_segments = (len(data_arr) - samples_per_fft) // hop + 1
     segment_indices = np.arange(num_segments) * hop
     
-    # Calculate the middle time point for each segment
+    # Calculate the middle time point for each segment, but only for segments within original data
     mid_indices = segment_indices + samples_per_fft // 2
+    
+    # Only keep segments where the middle point is within the original data range
+    valid_segments = mid_indices < original_length
+    segment_indices = segment_indices[valid_segments]
+    mid_indices = mid_indices[valid_segments]
+    num_segments = len(segment_indices)
+    
     stft_time = time_array[mid_indices]
     
     # Create strided array of segments using numpy's stride tricks
-    shape = (samples_per_fft, num_segments)
-    strides = (data_arr.strides[0], data_arr.strides[0] * hop)
+    # Use only the valid segments that fit within original data
+    shape = (num_segments, samples_per_fft)
+    strides = (data_arr.strides[0] * hop, data_arr.strides[0])
     segments = np.lib.stride_tricks.as_strided(data_arr, shape=shape, strides=strides)
     
     # Apply window to all segments at once
-    segments = segments.T * win
+    segments = segments * win
     
     # Compute FFT for all segments at once
     stft_matrix = np.fft.rfft(segments, axis=1)
