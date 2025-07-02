@@ -415,7 +415,7 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         
         all_scatter_data.append(shot_data)
 
-    
+    '''
         # Bdot data - collect for averaging
         try:
             stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
@@ -468,11 +468,11 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         freq_arr = freq_arr[:index]
 
     plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr)
+    '''
     
-    
-    plot_combined_scatter(all_scatter_data, amplitude_ranges=[(0, 0.5), (0.5, 1.0)])
+    plot_combined_scatter(all_scatter_data, amplitude_ranges=None) # [(0, 0.5), (0.5, 1.0)])
 
-    plt.show(block=True)  # Keep the plots visible at the end
+    plt.show(block=True)
     
 
 def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
@@ -485,111 +485,129 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
         List of shot data dictionaries
     amplitude_ranges : list of tuples, default=None
         List of (start_fraction, end_fraction) tuples defining amplitude ranges as fractions of total range.
-        Default is [(0, 0.25), (0.25, 0.5), (0.5, 1.0)] for 0-25%, 25-50%, 50-100% ranges.
-        Example: [(0, 0.3), (0.3, 0.7), (0.7, 1.0)] for 0-30%, 30-70%, 70-100% ranges.
+        If None, creates a single plot with all counts combined.
     """
     
-    # Set default ranges if none provided
+    def process_shot_data(shot_data, min_thresh=None, max_thresh=None):
+        """Extract and process data from a single shot with optional amplitude filtering."""
+        pulse_tarr, pulse_amp = shot_data['pulse_tarr'], shot_data['pulse_amp']
+        
+        if len(pulse_tarr) == 0:
+            return [], [], []
+            
+        # Apply amplitude filtering if thresholds provided
+        if min_thresh is not None and max_thresh is not None:
+            mask = (pulse_amp >= min_thresh) & (pulse_amp <= max_thresh)
+            pulse_tarr, pulse_amp = pulse_tarr[mask], pulse_amp[mask]
+            
+        if len(pulse_tarr) == 0:
+            return [], [], []
+            
+        # Calculate counts and positions
+        bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=1)
+        if len(counts) == 0:
+            return [], [], []
+            
+        r_arr = get_pos_freefall(bin_centers*1e-3 + shot_data['uw_start'], shot_data['t0'])
+        return bin_centers, (r_arr * 100), counts  # Convert to cm
+    
+    def create_scatter_plot(ax, bin_centers, r_positions, counts, vmax, add_colorbar=False):
+        """Create a scatter plot with consistent formatting."""
+        if len(counts) > 0:
+            scatter = ax.scatter(bin_centers, r_positions, c=counts, s=30, alpha=0.7, 
+                               vmin=0, vmax=vmax, cmap='viridis')
+            if add_colorbar:
+                cbar = plt.colorbar(scatter, ax=ax, label='counts', shrink=0.8)
+                cbar.ax.tick_params(labelsize=18)
+            return scatter
+        return ax.scatter([], [], c=[], s=30, alpha=0.7, vmin=0, vmax=vmax, cmap='viridis')
+    
+    # Handle single plot case
     if amplitude_ranges is None:
+        print("\nCreating single combined X-ray counts plot with all data...")
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        
+        # Collect all data
+        all_bin_centers, all_r_positions, all_counts = [], [], []
+        for shot_data in all_scatter_data:
+            bin_centers, r_positions, counts = process_shot_data(shot_data)
+            all_bin_centers.extend(bin_centers)
+            all_r_positions.extend(r_positions)
+            all_counts.extend(counts)
+        
+        # Create plot
+        max_counts = np.max(all_counts) if all_counts else 1
+        create_scatter_plot(ax, all_bin_centers, all_r_positions, all_counts, max_counts, add_colorbar=True)
+        
+        ax.set_ylim(-40, 40)
+        ax.set_xlabel('Time (ms)')
+        ax.set_ylabel('Position (cm)')
+        ax.grid(True)
+        plt.tight_layout()
+        plt.draw()
+        plt.pause(0.1)
+        return
+    
+    # Multi-panel case
+    if len(amplitude_ranges) == 0:
         amplitude_ranges = [(0, 0.25), (0.25, 0.5), (0.5, 1.0)]
     
     num_ranges = len(amplitude_ranges)
     print(f"\nCreating combined X-ray counts plot with {num_ranges} amplitude ranges...")
     
-    # Calculate figure width based on number of ranges
+    # Setup figure
     fig_width = max(12, num_ranges * 5)
-    fig_combined, axes = plt.subplots(1, num_ranges, figsize=(fig_width, 6), sharey=True)
-    
-    # Ensure axes is always a list, even for single subplot
+    fig, axes = plt.subplots(1, num_ranges, figsize=(fig_width, 6), sharey=True)
     if num_ranges == 1:
         axes = [axes]
     
-    # Calculate global amplitude range across all shots for consistent thresholding
-    all_pulse_amps = []
-    for shot_data in all_scatter_data:
-        all_pulse_amps.extend(shot_data['pulse_amp'])
-    
-    if len(all_pulse_amps) > 0:
-        global_min = np.min(all_pulse_amps)
-        global_max = np.max(all_pulse_amps) / 2
+    # Calculate amplitude thresholds
+    all_pulse_amps = [amp for shot_data in all_scatter_data for amp in shot_data['pulse_amp']]
+    if all_pulse_amps:
+        global_min, global_max = np.min(all_pulse_amps), np.max(all_pulse_amps) / 2
         global_range = global_max - global_min
-        
-        # Define threshold ranges based on specified amplitude ranges
-        threshold_ranges = []
-        for i, (start_frac, end_frac) in enumerate(amplitude_ranges):
-            range_start = global_min + start_frac * global_range
-            range_end = global_min + end_frac * global_range
-            threshold_ranges.append((range_start, range_end))
-            print(f"Range {i+1}: {start_frac*100:.1f}%-{end_frac*100:.1f}% of amplitude range")
+        threshold_ranges = [(global_min + start * global_range, global_min + end * global_range) 
+                           for start, end in amplitude_ranges]
     else:
-        # Fallback ranges
         threshold_ranges = [(i, i+1) for i in range(num_ranges)]
     
-    # Plot data for each amplitude range in separate panels with individual normalization
-    scatter_list = []  # Store scatter objects for colorbar
+    # Collect data for all panels and find global max
+    panel_data_list = []
+    global_max_counts = 0
     
-    for panel_idx in range(num_ranges):
-        ax = axes[panel_idx]
-        min_thresh, max_thresh = threshold_ranges[panel_idx]
-        
-        # Collect data points for this amplitude range across all shots
-        all_bin_centers = []
-        all_r_positions = []
-        all_counts = []
-        
+    for min_thresh, max_thresh in threshold_ranges:
+        all_bin_centers, all_r_positions, all_counts = [], [], []
         for shot_data in all_scatter_data:
-            # Filter pulses by amplitude range for this panel
-            pulse_tarr = shot_data['pulse_tarr']
-            pulse_amp = shot_data['pulse_amp']
-            
-            # Create mask for pulses in this amplitude range
-            amp_mask = (pulse_amp >= min_thresh) & (pulse_amp <= max_thresh)
-            filtered_pulse_tarr = pulse_tarr[amp_mask]
-            filtered_pulse_amp = pulse_amp[amp_mask]
-            
-            if len(filtered_pulse_tarr) > 0:
-                # Recalculate counts per bin for filtered pulses
-                bin_centers, counts = counts_per_bin(filtered_pulse_tarr, filtered_pulse_amp, bin_width=1)
-                r_arr = get_pos_freefall(bin_centers*1e-3+shot_data['uw_start'], shot_data['t0'])
-                
-                if len(counts) > 0:
-                    all_bin_centers.extend(bin_centers)
-                    all_r_positions.extend((r_arr) * 100 - 5)  # Convert to cm
-                    all_counts.extend(counts)
+            bin_centers, r_positions, counts = process_shot_data(shot_data, min_thresh, max_thresh)
+            all_bin_centers.extend(bin_centers)
+            all_r_positions.extend(r_positions)
+            all_counts.extend(counts)
         
-        # Create scatter plot for this panel if there's data
-        if len(all_counts) > 0:
-            # Normalize counts for this panel to 0-1 range
-            panel_max = np.max(all_counts)
-            normalized_counts = np.array(all_counts) / panel_max if panel_max > 0 else np.array(all_counts)
-            
-            scatter = ax.scatter(all_bin_centers, all_r_positions, c=normalized_counts, 
-                               s=30, alpha=0.7, vmin=0, vmax=1)
-            scatter_list.append(scatter)
-        else:
-            # Create empty scatter for panels with no data
-            scatter = ax.scatter([], [], c=[], s=30, alpha=0.7, vmin=0, vmax=1)
-            scatter_list.append(scatter)
+        panel_data_list.append((all_bin_centers, all_r_positions, all_counts))
+        if all_counts:
+            global_max_counts = max(global_max_counts, np.max(all_counts))
+    
+    print(f"Global maximum counts across all panels: {global_max_counts}")
+    
+    # Create plots
+    scatter_list = []
+    for i, (ax, (bin_centers, r_positions, counts)) in enumerate(zip(axes, panel_data_list)):
+        scatter = create_scatter_plot(ax, bin_centers, r_positions, counts, global_max_counts)
+        scatter_list.append(scatter)
         
-
-        ax.set_xlim(0, 30)
-        ax.set_ylim(-40,40)
+        ax.set_ylim(-40, 40)
         ax.set_xlabel('Time (ms)')
-        
-        # Only set ylabel on the first panel since they share y-axis
-        if panel_idx == 0:
+        if i == 0:
             ax.set_ylabel('Position (cm)')
-        
         ax.grid(True)
-
-
+    
+    # Add shared colorbar
     plt.tight_layout()
-    # Add a single colorbar for all panels with normalized scale
-    if scatter_list:
-        cbar = fig_combined.colorbar(scatter_list[0], ax=axes, label='normalized counts', shrink=0.8, aspect=30)
-        cbar.set_ticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    reference_scatter = next((s for s in scatter_list if s.get_array().size > 0), None)
+    if reference_scatter:
+        cbar = fig.colorbar(reference_scatter, ax=axes, label='counts', shrink=0.8, aspect=30)
         cbar.ax.tick_params(labelsize=18)
-
+    
     plt.draw()
     plt.pause(0.1)
 
