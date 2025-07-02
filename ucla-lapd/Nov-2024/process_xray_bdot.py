@@ -193,9 +193,8 @@ def process_shot_xray(file_number, base_dir, debug=False):
         min_ts = 1e-6
         d = 0.1
 
-    # analyze only the first half of the data
-    tarr_x = tarr_x[:int(len(tarr_x)/2)]
-    xray_data = xray_data[:int(len(xray_data)/2)]
+    tarr_x = tarr_x #[:int(len(tarr_x)/2)]
+    xray_data = xray_data #[:int(len(xray_data)/2)]
 
     detector = Photons(tarr_x, xray_data, min_timescale=min_ts, distance_mult=d, tsh_mult=threshold, debug=debug)
     detector.reduce_pulses()
@@ -307,7 +306,7 @@ def main_plot(file_numbers, base_dir, debug):
     plt.ioff()
     plt.show(block=True)  # Block until all figures are closed
 
-def xray_wt_cam(file_numbers, base_dir, debug=False):
+def xray_wt_cam(file_numbers, base_dir, plot_Bdot=False, debug=False):
     # Turn on interactive mode for the whole script
     plt.ion()
     
@@ -415,60 +414,60 @@ def xray_wt_cam(file_numbers, base_dir, debug=False):
         
         all_scatter_data.append(shot_data)
 
-    '''
-        # Bdot data - collect for averaging
-        try:
-            stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
-        except FileNotFoundError as e:
-            print(f"No Bdot data found for shot {file_number}; skipping...")
-            continue
-        
-        # Collect STFT matrices for averaging
-        if stft_matrix1 is not None:
-            all_stft_matrix1.append(stft_matrix1)
-        if stft_matrix2 is not None:
-            all_stft_matrix2.append(stft_matrix2)
-        if stft_matrix3 is not None:
-            all_stft_matrix3.append(stft_matrix3)
+    
+        if plot_Bdot:
+            try:
+                stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
+            except FileNotFoundError as e:
+                print(f"No Bdot data found for shot {file_number}; skipping...")
+                continue
+            
+            # Collect STFT matrices for averaging
+            if stft_matrix1 is not None:
+                all_stft_matrix1.append(stft_matrix1)
+            if stft_matrix2 is not None:
+                all_stft_matrix2.append(stft_matrix2)
+            if stft_matrix3 is not None:
+                all_stft_matrix3.append(stft_matrix3)
 
-    # Average the STFT matrices with optional time axis limitation
-    avg_stft_matrix1 = None
-    avg_stft_matrix2 = None
-    avg_stft_matrix3 = None
-    
-    # Option to limit time axis to first half (set to True to enable)
-    limit_time_axis = False
-    
-    if len(all_stft_matrix1) > 0:
-        matrices = np.array(all_stft_matrix1)
-        if limit_time_axis:
-            index = matrices.shape[1] // 2
-            matrices = matrices[:, :index, :]
-        avg_stft_matrix1 = np.mean(matrices, axis=0)
-        print(f"Averaged {len(all_stft_matrix1)} By_P21 STFT matrices")
-    
-    if len(all_stft_matrix2) > 0:
-        matrices = np.array(all_stft_matrix2)
-        if limit_time_axis:
-            index = matrices.shape[1] // 2
-            matrices = matrices[:, :index, :]
-        avg_stft_matrix2 = np.mean(matrices, axis=0)
-        print(f"Averaged {len(all_stft_matrix2)} Bx_P20 STFT matrices")
-    
-    if len(all_stft_matrix3) > 0:
-        matrices = np.array(all_stft_matrix3)
-        if limit_time_axis:
-            index = matrices.shape[1] // 2
-            matrices = matrices[:, :index, :]
-        avg_stft_matrix3 = np.mean(matrices, axis=0)
-        print(f"Averaged {len(all_stft_matrix3)} By_P20 STFT matrices")
-    
-    if limit_time_axis:
-        stft_tarr = stft_tarr[:index]
-        freq_arr = freq_arr[:index]
+            # Average the STFT matrices with optional time axis limitation
+            avg_stft_matrix1 = None
+            avg_stft_matrix2 = None
+            avg_stft_matrix3 = None
+            
+            # Option to limit time axis to first half (set to True to enable)
+            limit_time_axis = False
+            
+            if len(all_stft_matrix1) > 0:
+                matrices = np.array(all_stft_matrix1)
+                if limit_time_axis:
+                    index = matrices.shape[1] // 2
+                    matrices = matrices[:, :index, :]
+                avg_stft_matrix1 = np.mean(matrices, axis=0)
+                print(f"Averaged {len(all_stft_matrix1)} By_P21 STFT matrices")
+            
+            if len(all_stft_matrix2) > 0:
+                matrices = np.array(all_stft_matrix2)
+                if limit_time_axis:
+                    index = matrices.shape[1] // 2
+                    matrices = matrices[:, :index, :]
+                avg_stft_matrix2 = np.mean(matrices, axis=0)
+                print(f"Averaged {len(all_stft_matrix2)} Bx_P20 STFT matrices")
+            
+            if len(all_stft_matrix3) > 0:
+                matrices = np.array(all_stft_matrix3)
+                if limit_time_axis:
+                    index = matrices.shape[1] // 2
+                    matrices = matrices[:, :index, :]
+                avg_stft_matrix3 = np.mean(matrices, axis=0)
+                print(f"Averaged {len(all_stft_matrix3)} By_P20 STFT matrices")
+            
+            if limit_time_axis:
+                stft_tarr = stft_tarr[:index]
+                freq_arr = freq_arr[:index]
 
-    plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr)
-    '''
+            plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr)
+    
     
     plot_combined_scatter(all_scatter_data, amplitude_ranges=None) # [(0, 0.5), (0.5, 1.0)])
 
@@ -514,13 +513,13 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
     def create_scatter_plot(ax, bin_centers, r_positions, counts, vmax, add_colorbar=False):
         """Create a scatter plot with consistent formatting."""
         if len(counts) > 0:
-            scatter = ax.scatter(bin_centers, r_positions, c=counts, s=30, alpha=0.7, 
+            scatter = ax.scatter(bin_centers, r_positions, c=counts, s=50, alpha=0.7, 
                                vmin=0, vmax=vmax, cmap='viridis')
             if add_colorbar:
                 cbar = plt.colorbar(scatter, ax=ax, label='counts', shrink=0.8)
                 cbar.ax.tick_params(labelsize=18)
             return scatter
-        return ax.scatter([], [], c=[], s=30, alpha=0.7, vmin=0, vmax=vmax, cmap='viridis')
+        return ax.scatter([], [], c=[], s=50, alpha=0.7, vmin=0, vmax=vmax, cmap='viridis')
     
     # Handle single plot case
     if amplitude_ranges is None:
@@ -685,11 +684,11 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(25,36)] #+ [f"{i:05d}" for i in range(60, 89)]
+    file_numbers = [f"{i:05d}" for i in range(0,11)] #+ [f"{i:05d}" for i in range(60, 89)]
     
     # base_dir = r"E:\good_data\kapton\He3kA_B380G800G_pl0t20_uw15t35"
-    base_dir = r"E:\good_data\He3kA_B380G800G_pl0t20_uw17t27_P30"
+    base_dir = r"E:\good_data\He3kA_B500G1kG_pl0t20_uw17t37_P30"
 
     # Uncomment one of these functions to run
     # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots
-    xray_wt_cam(file_numbers, base_dir, debug=False)
+    xray_wt_cam(file_numbers, base_dir, plot_Bdot=False, debug=False)
