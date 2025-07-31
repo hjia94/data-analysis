@@ -26,7 +26,8 @@ import math
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
-from .magnetic_field_calculator import RingCurrent, calculate_field_from_ring_currents
+from .magnetic_field_calculator import (RingCurrent, calculate_field_from_ring_currents, 
+                                         calculate_flux_from_ring_currents, calculate_vector_potential_from_ring_currents)
 
 # Color constants for coil identification
 YELLOW = 1
@@ -218,10 +219,11 @@ def create_LaB6_coil_set() -> List[CoilData]:
     Create the LaB6 (Lanthanum Hexaboride) coil set configuration.
     
     This includes additional Black coils plus the complete BaO coil set.
+    The coils must be sorted by decreasing z-coordinate for proper port number interpolation.
     
     Returns:
     --------
-    List[CoilData] : List of coil data objects
+    List[CoilData] : List of coil data objects sorted by decreasing z-coordinate
     """
     coils = []
     
@@ -252,6 +254,9 @@ def create_LaB6_coil_set() -> List[CoilData]:
     # Add BaO coil set
     coils.extend(create_BaO_coil_set())
     
+    # Note: Don't sort here - the C++ version concatenates in specific order
+    # The port number interpolation should work with the natural ordering
+    
     return coils
 
 
@@ -271,14 +276,118 @@ class LAPDCoilSet:
         List of all coil data
     ring_currents : List[RingCurrent]
         Ring current representations for field calculations
+    supply1-supply12 : float
+        Current values for each of the 12 power supplies in Amperes
     """
     
     def __init__(self):
         """Initialize LAPD coil set with LaB6 configuration and uniform field."""
         self.coils = create_LaB6_coil_set()
         self.ring_currents = []
+        
+        # Initialize the 12 power supply currents
+        self.supply1 = 0.0
+        self.supply2 = 0.0
+        self.supply3 = 0.0
+        self.supply4 = 0.0
+        self.supply5 = 0.0
+        self.supply6 = 0.0
+        self.supply7 = 0.0
+        self.supply8 = 0.0
+        self.supply9 = 0.0
+        self.supply10 = 0.0
+        self.supply11 = 0.0
+        self.supply12 = 0.0
+        
         self.set_uniform_field(0.1)  # Default 0.1 Tesla uniform field
         self._update_ring_currents()
+    
+    # =============================================================================
+    # SUPPLY CURRENT MANAGEMENT
+    # =============================================================================
+    
+    def get_supply_currents(self) -> List[float]:
+        """
+        Get current values for all 12 power supplies.
+        
+        Returns:
+        --------
+        List[float] : List of 12 supply currents in Amperes [I1, I2, ..., I12]
+        """
+        return [
+            self.supply1, self.supply2, self.supply3, self.supply4,
+            self.supply5, self.supply6, self.supply7, self.supply8,
+            self.supply9, self.supply10, self.supply11, self.supply12
+        ]
+    
+    def get_supply_current(self, supply_number: int) -> float:
+        """
+        Get current for a specific power supply.
+        
+        Parameters:
+        -----------
+        supply_number : int
+            Supply number (1-12)
+            
+        Returns:
+        --------
+        float : Current in Amperes
+        """
+        self._validate_supply_number(supply_number)
+        return getattr(self, f'supply{supply_number}')
+    
+    def set_individual_supply_current(self, supply_number: int, current: float):
+        """
+        Set current for a single power supply.
+        
+        Parameters:
+        -----------
+        supply_number : int
+            Supply number (1-12)
+        current : float
+            Current in Amperes
+        """
+        self._validate_supply_number(supply_number)
+        # Update the supply attribute
+        setattr(self, f'supply{supply_number}', current)
+        
+        # Update all coils connected to this supply
+        for coil in self.coils:
+            if coil.supply_number == supply_number:
+                coil.current = current
+    
+    def set_supply_current(self, current: float, *supply_numbers: int):
+        """
+        Set current for specified power supplies.
+        
+        Parameters:
+        -----------
+        current : float
+            Current in Amperes
+        supply_numbers : int
+            Variable number of supply numbers to set
+        """
+        for supply_num in supply_numbers:
+            self.set_individual_supply_current(supply_num, current)
+    
+    def set_supply_currents(self, i1: float, i2: float, i3: float, i4: float,
+                           i5: float, i6: float, i7: float, i8: float,
+                           i9: float, i10: float, i11: float, i12: float):
+        """
+        Set individual currents for all 12 power supplies.
+        
+        Parameters:
+        -----------
+        i1-i12 : float
+            Current for each power supply in Amperes
+        """
+        currents = [i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12]
+        for supply_num, current in enumerate(currents, 1):
+            self.set_individual_supply_current(supply_num, current)
+    
+    # =============================================================================
+    # FIELD CONFIGURATION
+    # =============================================================================
     
     def set_uniform_field(self, B0: float):
         """
@@ -296,45 +405,9 @@ class LAPDCoilSet:
         self.set_supply_current(910.0 * m, 5, 6, 7, 8, 9, 10)  # 910 A for supplies 5-10
         self.set_supply_current(555.0 * m, 11, 12)             # 555 A for supplies 11-12
     
-    def set_supply_current(self, current: float, *supply_numbers: int):
-        """
-        Set current for specified power supplies.
-        
-        Parameters:
-        -----------
-        current : float
-            Current in Amperes
-        supply_numbers : int
-            Variable number of supply numbers to set
-        """
-        for coil in self.coils:
-            if coil.supply_number in supply_numbers:
-                coil.current = current
-    
-    def set_supply_currents(self, i1: float, i2: float, i3: float, i4: float,
-                           i5: float, i6: float, i7: float, i8: float,
-                           i9: float, i10: float, i11: float, i12: float):
-        """
-        Set individual currents for all 12 power supplies.
-        
-        Parameters:
-        -----------
-        i1-i12 : float
-            Current for each power supply in Amperes
-        """
-        currents = [i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12]
-        for i, current in enumerate(currents, 1):
-            self.set_supply_current(current, i)
-    
-    def _update_ring_currents(self):
-        """Update ring current representations for field calculations."""
-        self.ring_currents = []
-        for coil in self.coils:
-            if coil.current != 0.0:  # Only include coils with current
-                # Create ring current with total current = coil.current * num_turns
-                total_current = coil.current * coil.num_turns
-                ring_current = RingCurrent(R=coil.a, z=coil.z, cur=total_current)
-                self.ring_currents.append(ring_current)
+    # =============================================================================
+    # MAGNETIC FIELD COMPUTATION
+    # =============================================================================
     
     def compute_B(self, x: float, y: float, z: float) -> Tuple[float, float, float, float]:
         """
@@ -408,10 +481,7 @@ class LAPDCoilSet:
         float : Azimuthal vector potential in Wb/m
         """
         self._update_ring_currents()
-        Aphi_total = 0.0
-        for ring_current in self.ring_currents:
-            Aphi_total += ring_current.Aphi(R, z)
-        return Aphi_total
+        return calculate_vector_potential_from_ring_currents(self.ring_currents, R, z)
     
     def compute_Psi(self, R: float, z: float) -> float:
         """
@@ -428,7 +498,12 @@ class LAPDCoilSet:
         --------
         float : Magnetic flux in Wb
         """
-        return 2 * math.pi * R * self.compute_Aphi(R, z)
+        self._update_ring_currents()
+        return calculate_flux_from_ring_currents(self.ring_currents, R, z)
+    
+    # =============================================================================
+    # UTILITY METHODS
+    # =============================================================================
     
     def z_to_eff_port_number(self, z: float) -> float:
         """
@@ -443,20 +518,38 @@ class LAPDCoilSet:
         --------
         float : Effective port number
         """
-        if z < self.coils[-1].z:
-            return self.coils[-1].eff_port_number
-        if z > self.coils[0].z:
-            return self.coils[0].eff_port_number
+        # Find coils with valid port numbers (not -1)
+        valid_coils = [coil for coil in self.coils if coil.eff_port_number >= 0]
         
-        for i in range(len(self.coils) - 1):
-            if self.coils[i].z >= z >= self.coils[i+1].z:
+        if not valid_coils:
+            return 0.0
+            
+        # Sort valid coils by z-coordinate (decreasing)
+        valid_coils.sort(key=lambda c: c.z, reverse=True)
+        
+        # Boundary checks
+        if z > valid_coils[0].z:
+            return valid_coils[0].eff_port_number
+        if z < valid_coils[-1].z:
+            return valid_coils[-1].eff_port_number
+        
+        # Find interpolation interval
+        for i in range(len(valid_coils) - 1):
+            if valid_coils[i].z >= z >= valid_coils[i+1].z:
                 # Linear interpolation
-                f = (z - self.coils[i+1].z) / (self.coils[i].z - self.coils[i+1].z)
-                epn = (self.coils[i+1].eff_port_number + 
-                       f * (self.coils[i].eff_port_number - self.coils[i+1].eff_port_number))
+                dz = valid_coils[i].z - valid_coils[i+1].z
+                if dz == 0:
+                    return valid_coils[i].eff_port_number
+                f = (z - valid_coils[i+1].z) / dz
+                epn = (valid_coils[i+1].eff_port_number + 
+                       f * (valid_coils[i].eff_port_number - valid_coils[i+1].eff_port_number))
                 return epn
         
         return 0.0
+    
+    # =============================================================================
+    # SPECIAL METHODS (DUNDER METHODS)
+    # =============================================================================
     
     def __getitem__(self, index: int) -> CoilData:
         """Get coil data by index."""
@@ -475,6 +568,25 @@ class LAPDCoilSet:
                    f"{coil.current:10.4f} {coil.supply_number:10d}\n")
             lines.append(line)
         return ''.join(lines)
+    
+    # =============================================================================
+    # PRIVATE METHODS
+    # =============================================================================
+    
+    def _validate_supply_number(self, supply_number: int):
+        """Validate supply number is in valid range."""
+        if not (1 <= supply_number <= 12):
+            raise ValueError(f"Supply number must be between 1 and 12, got {supply_number}")
+    
+    def _update_ring_currents(self):
+        """Update ring current representations for field calculations."""
+        self.ring_currents = []
+        for coil in self.coils:
+            if coil.current != 0.0:  # Only include coils with current
+                # Create ring current with total current = coil.current * num_turns
+                total_current = coil.current * coil.num_turns
+                ring_current = RingCurrent(R=coil.a, z=coil.z, cur=total_current)
+                self.ring_currents.append(ring_current)
 
 
 # =============================================================================
@@ -520,4 +632,25 @@ if __name__ == "__main__":
         lapd.set_uniform_field(B0)
         _, _, Bz, Bmag = lapd.compute_B(0.0, 0.0, 8.5)
         print(f"  B0 = {B0:.2f} T → |B| = {Bmag:.6f} T (Bz = {Bz:.6f} T)")
+    
+    # Test new supply current interface
+    print("\nTesting supply current interface...")
+    lapd.set_uniform_field(0.1)  # Reset to uniform field
+    
+    print("Supply currents after uniform field setup:")
+    currents = lapd.get_supply_currents()
+    for i, current in enumerate(currents, 1):
+        print(f"  Supply {i:2d}: {current:8.1f} A")
+    
+    # Test individual supply access
+    print(f"\nIndividual supply access:")
+    print(f"  Supply 1: {lapd.get_supply_current(1):.1f} A")
+    print(f"  Supply 5: {lapd.get_supply_current(5):.1f} A")
+    print(f"  Supply 12: {lapd.get_supply_current(12):.1f} A")
+    
+    # Test individual supply setting
+    print(f"\nSetting supply 1 to 3000 A...")
+    lapd.set_individual_supply_current(1, 3000.0)
+    print(f"  Supply 1 after change: {lapd.get_supply_current(1):.1f} A")
+    print(f"  Direct access: lapd.supply1 = {lapd.supply1:.1f} A")
     

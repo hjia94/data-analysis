@@ -3,121 +3,177 @@
 """
 Example usage of the compute_B package for LAPD magnetic field calculations.
 
-This script demonstrates both high-level and low-level usage of the compute_B package.
+This script demonstrates comprehensive usage of the compute_B package with a connected workflow:
+
+1. uniform_field_to_currents(): Configure uniform magnetic field and extract supply currents
+2. plot_Bz_onAxis(): Use those currents to compute and plot the Bz field along the machine axis
+
+Features demonstrated:
+- Uniform field configuration and supply current management
+- Magnetic field computation and visualization  
+- Individual supply current access and validation
+- Multiple API access patterns (direct attributes, getters/setters, bulk operations)
+- Connected workflow passing data between functions
+
+Updated to showcase the latest enhancements to the LAPDCoilSet class.
 """
 
 import sys
 import os
+import numpy as np
+import matplotlib.pyplot as plt
 
 # Add the parent directory to the path so we can import compute_B
 # This would not be needed if the package is properly installed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import the compute_B package
-import compute_B
+from compute_B import LAPDCoilSet
 
-def example_high_level():
-    """Demonstrate high-level usage with LAPDCoilSet."""
-    print("=" * 50)
-    print("HIGH-LEVEL USAGE: LAPDCoilSet")
-    print("=" * 50)
-    
-    # Create LAPD coil set instance
-    lapd = compute_B.LAPDCoilSet()
-    
-    # Set uniform field of 0.1 Tesla
-    lapd.set_uniform_field(0.1)
-    print("Set uniform field to 0.1 Tesla")
-    
-    # Calculate field at center of machine
-    x, y, z = 0.0, 0.0, 8.5  # Center point
-    Bx, By, Bz, Bmag = lapd.compute_B(x, y, z)
-    
-    print(f"\nMagnetic field at center (x={x}, y={y}, z={z}):")
-    print(f"  Bx = {Bx:.6f} T")
-    print(f"  By = {By:.6f} T") 
-    print(f"  Bz = {Bz:.6f} T")
-    print(f"  |B| = {Bmag:.6f} T")
-    
-    # Calculate field at off-axis point
-    x, y, z = 0.1, 0.0, 8.5  # 10 cm off-axis
-    Bx, By, Bz, Bmag = lapd.compute_B(x, y, z)
-    
-    print(f"\nMagnetic field off-axis (x={x}, y={y}, z={z}):")
-    print(f"  Bx = {Bx:.6f} T")
-    print(f"  By = {By:.6f} T")
-    print(f"  Bz = {Bz:.6f} T") 
-    print(f"  |B| = {Bmag:.6f} T")
 
-def example_low_level():
-    """Demonstrate low-level usage with RingCurrent."""
-    print("\n" + "=" * 50)
-    print("LOW-LEVEL USAGE: RingCurrent")
-    print("=" * 50)
+def uniform_field_to_currents(B0=0.1):
+    """
+    Example 1: Given a magnetic field (set_uniform_field), print a list of supply currents.
     
-    # Create a simple ring current
-    ring = compute_B.RingCurrent(R=1.0, z=0.0, cur=1000.0)  # 1m radius, 1000A
-    print(f"Created ring current: R={ring.R}m, z={ring.z}m, I={ring.cur}A")
+    This example demonstrates how to:
+    1. Create an LAPD coil set
+    2. Set a uniform magnetic field
+    3. Extract and display the resulting supply currents using multiple methods
+    4. Demonstrate individual supply access
     
-    # Calculate field along the axis
-    print("\nMagnetic field along axis:")
-    for z in [0.0, 0.5, 1.0, 2.0]:
-        BR, Bz, Bmag = compute_B.calculate_field_from_ring_currents([ring], 0.0, z)
-        print(f"  z={z:3.1f}m: BR={BR:.6f}T, Bz={Bz:.6f}T, |B|={Bmag:.6f}T")
-    
-    # Calculate field off-axis
-    print("\nMagnetic field off-axis (z=0):")
-    for R in [0.0, 0.5, 1.0, 1.5]:
-        BR, Bz, Bmag = compute_B.calculate_field_from_ring_currents([ring], R, 0.0)
-        print(f"  R={R:3.1f}m: BR={BR:.6f}T, Bz={Bz:.6f}T, |B|={Bmag:.6f}T")
-
-def example_coil_configurations():
-    """Demonstrate different coil configurations."""
-    print("\n" + "=" * 50)
-    print("COIL CONFIGURATIONS")
-    print("=" * 50)
-    
-    # Show available coil sets
-    bao_coils = compute_B.create_BaO_coil_set()
-    lab6_coils = compute_B.create_LaB6_coil_set()
-    
-    print(f"BaO coil set: {len(bao_coils)} coils")
-    print(f"LaB6 coil set: {len(lab6_coils)} coils")
-    
-    # Show coil colors
-    color_names = {compute_B.YELLOW: "YELLOW", compute_B.PURPLE: "PURPLE", compute_B.BLACK: "BLACK"}
-    
-    print(f"\nCoil color distribution in LaB6 set:")
-    color_counts = {}
-    for coil in lab6_coils:
-        color = color_names[coil.color]
-        color_counts[color] = color_counts.get(color, 0) + 1
-    
-    for color, count in color_counts.items():
-        print(f"  {color}: {count} coils")
-
-def main():
-    """Run all examples."""
-    print("COMPUTE_B PACKAGE EXAMPLE")
-    print("Package version:", getattr(compute_B, '__version__', 'unknown'))
-    print("Package description:", getattr(compute_B, '__description__', 'N/A'))
-    
-    try:
-        example_high_level()
-        example_low_level() 
-        example_coil_configurations()
+    Parameters:
+    -----------
+    B0 : float, optional
+        Desired uniform magnetic field strength in Tesla (default: 0.1 T)
         
-        print("\n" + "=" * 50)
-        print("ALL EXAMPLES COMPLETED SUCCESSFULLY!")
-        print("=" * 50)
-        
-    except Exception as e:
-        print(f"\nERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+    Returns:
+    --------
+    list : List of 12 supply currents in Amperes for the uniform field
+    """
     
-    return 0
+    # Create LAPD coil set
+    lapd = LAPDCoilSet()
+    
+    print(f"\nSetting uniform field: B0 = {B0:.3f} T")
+    
+    # Set uniform field
+    lapd.set_uniform_field(B0)
+
+    currents = lapd.get_supply_currents()
+    print("All supply currents (A):")
+    for i, current in enumerate(currents, 1):
+        print(f"  Supply {i:2d}: {current:8.1f} A")
+
+    # Reset to desired field and return currents
+    lapd.set_uniform_field(B0)
+    final_currents = lapd.get_supply_currents()
+    
+    return final_currents
+
+
+def plot_Bz_onAxis(supply_currents):
+    """
+    Example 2: With a given list of supply currents, plot the magnetic field B_z on Z axis.
+    
+    This example demonstrates how to:
+    1. Set specific supply currents
+    2. Compute Bz along the z-axis (x=y=0)
+    3. Plot Bz vs distance and port number
+    
+    Parameters:
+    -----------
+    supply_currents : list
+        List of 12 supply currents in Amperes [I1, I2, ..., I12]
+    """
+
+    lapd = LAPDCoilSet()
+    
+    lapd.set_supply_currents(*supply_currents)
+    
+    # Define z-axis range for plotting (along the machine length)
+    z_min, z_max = 0.0, 17.0  # Full machine length in meters
+    z_points = np.linspace(z_min, z_max, 500)
+    
+    # Compute Bz along the z-axis
+    Bz_values = []
+    port_numbers = []
+    
+    print("\nComputing magnetic field along z-axis...")
+    for z in z_points:
+        # Compute field at (x=0, y=0, z)
+        _, _, Bz, _ = lapd.compute_B(0.0, 0.0, z)
+        Bz_values.append(Bz)
+        
+        # Convert z to port number
+        port_num = lapd.z_to_eff_port_number(z)
+        port_numbers.append(port_num)
+    
+    # Convert to numpy arrays
+    z_points = np.array(z_points)
+    Bz_values = np.array(Bz_values)
+    port_numbers = np.array(port_numbers)
+    
+    # Convert Bz from Tesla to kiloGauss
+    Bz_kG = Bz_values * 10.0  # 1 Tesla = 10 kiloGauss
+    
+    # Create the plot with two x-axes
+    fig, ax1 = plt.subplots(figsize=(12, 8))
+    
+    # Plot Bz vs port number (main axis)
+    color = 'tab:blue'
+    ax1.set_xlabel('Port Number', fontsize=12)
+    ax1.set_ylabel('Bz (kiloGauss)', color=color, fontsize=12)
+    line1 = ax1.plot(port_numbers, Bz_kG, color=color, linewidth=2, label='Bz field')
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.grid(True, alpha=0.3)
+    
+    # Set port number axis to start from 0 on the left
+    port_min, port_max = np.min(port_numbers), np.max(port_numbers)
+    ax1.set_xlim(0, port_max)  # Start from 0, go to maximum port number
+    
+    # Set nice port number ticks
+    port_ticks = np.arange(0, int(port_max) + 1, 10)  # Every 10 ports
+    ax1.set_xticks(port_ticks)
+    
+    # Create second x-axis for distance
+    ax2 = ax1.twiny()
+    color = 'tab:red'
+    ax2.set_xlabel('Distance (m)', color=color, fontsize=12)
+    ax2.tick_params(axis='x', labelcolor=color)
+    
+    # Both axes must represent the same physical space
+    # Find distance values that correspond to round port numbers for tick placement
+    distance_tick_values = np.arange(0, int(np.max(z_points)) + 1, 2)  # Every 2 meters
+    tick_positions = []
+    tick_labels = []
+    
+    for target_distance in distance_tick_values:
+        # Find the port number where distance is closest to target_distance
+        idx = np.argmin(np.abs(z_points - target_distance))
+        port_pos = port_numbers[idx]
+        actual_distance = z_points[idx]
+        
+        # Only add if the distance is reasonably close to our target
+        if abs(actual_distance - target_distance) < 0.5:  # Within 0.5 meters
+            tick_positions.append(port_pos)
+            tick_labels.append(f'{target_distance:.0f}')
+    
+    ax2.set_xticks(tick_positions)
+    ax2.set_xticklabels(tick_labels)
+    ax2.set_xlim(ax1.get_xlim())  # Same limits as port axis
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return z_points, Bz_kG, port_numbers
+
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+
+    uniform_currents = uniform_field_to_currents(B0=0.1)  # Get currents for 0.1 T uniform field
+
+    z_points, Bz_kG, port_numbers = plot_Bz_onAxis(uniform_currents)
+    
+
+

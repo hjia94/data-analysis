@@ -395,6 +395,29 @@ def calculate_flux_from_ring_currents(ring_currents, R, z):
     return psi_total
 
 
+def calculate_vector_potential_from_ring_currents(ring_currents, R, z):
+    """
+    Calculate total azimuthal vector potential from multiple ring currents.
+    
+    Parameters:
+    -----------
+    ring_currents : list
+        List of RingCurrent objects
+    R : float
+        Radial position where to calculate vector potential (m)
+    z : float
+        Axial position where to calculate vector potential (m)
+        
+    Returns:
+    --------
+    float : Total azimuthal vector potential Aphi (Wb/m)
+    """
+    aphi_total = 0.0
+    for rc in ring_currents:
+        aphi_total += rc.Aphi(R, z)
+    return aphi_total
+
+
 # =============================================================================
 # TESTING AND VALIDATION
 # =============================================================================
