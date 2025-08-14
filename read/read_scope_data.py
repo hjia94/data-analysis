@@ -31,6 +31,7 @@ Feb.2024 update:
 import numpy as np
 import struct
 from datetime import datetime
+import h5py
 
 from LeCroy_Scope_Header import LeCroy_Scope_Header
 
@@ -206,3 +207,76 @@ def read_txt_data(ifn):
 	print('Done')
 
 	return data[:,1], data[:,0] - data[0,0] # signal, time array
+
+#======================================================================================
+
+def read_hdf5_scope_tarr(ifn, scope_name):
+	"""
+	Read time array from HDF5 file format stored by LAPD_DAQ.
+	"""
+	
+	with h5py.File(ifn, 'r') as f:
+		# Check if scope group exists
+		if scope_name not in f:
+			raise KeyError(f"Scope group '{scope_name}' not found in HDF5 file")
+		
+		scope_group = f[scope_name]
+		
+		# Get time array for this scope
+		if 'time_array' not in scope_group:
+			raise KeyError(f"Time array not found for scope '{scope_name}'")
+		
+		time_array = scope_group['time_array'][:]
+		
+		return time_array
+
+#======================================================================================
+
+def read_hdf5_scope_data(ifn, scope_name, channel_name, shot_number):
+	"""
+	Read raw scope data from HDF5 file format stored by LAPD_DAQ and convert to voltage.
+	"""
+	
+	with h5py.File(ifn, 'r') as f:
+		# Check if scope group exists
+		if scope_name not in f:
+			raise KeyError(f"Scope group '{scope_name}' not found in HDF5 file")
+		
+		scope_group = f[scope_name]
+		
+		# Construct shot group name
+		shot_group_name = f'shot_{shot_number}'
+		if shot_group_name not in scope_group:
+			raise KeyError(f"Shot '{shot_group_name}' not found for scope '{scope_name}'")
+		
+		shot_group = scope_group[shot_group_name]
+		
+		# Check if this shot was skipped
+		if 'skipped' in shot_group.attrs and shot_group.attrs['skipped']:
+			skip_reason = shot_group.attrs.get('skip_reason', 'Unknown reason')
+			raise ValueError(f"Shot {shot_number} was skipped. Reason: {skip_reason}")
+		
+		# Get raw data and header
+		data_key = f'{channel_name}_data'
+		header_key = f'{channel_name}_header'
+		
+		if data_key not in shot_group:
+			raise KeyError(f"Channel data '{data_key}' not found in shot {shot_number}")
+		if header_key not in shot_group:
+			raise KeyError(f"Channel header '{header_key}' not found in shot {shot_number}")
+		
+		# Read raw int16 data
+		raw_data = shot_group[data_key][:]
+		
+		# Read and decode binary header
+		header_bytes = shot_group[header_key][()]  # <-- Fix: use [()] for scalar dataspace
+		header = decode_header_info(header_bytes)
+		
+		if header is None:
+			raise ValueError(f"Could not decode header for {scope_name}/{shot_group_name}/{channel_name}")
+		
+		# Convert raw data to voltage using header information
+		# Formula: voltage = vertical_gain * raw_data - vertical_offset
+		voltage_data = raw_data.astype(np.float64) * header.hdr.vertical_gain - header.hdr.vertical_offset
+		
+		return voltage_data
