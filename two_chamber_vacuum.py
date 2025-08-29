@@ -38,6 +38,8 @@ import numpy as np
 from scipy.constants import physical_constants, elementary_charge as QE
 from scipy.constants import atomic_mass as AMU
 
+from plasma_utils import ion_sound_speed
+
 # ----------------------------- Constants -----------------------------
 K_B = 1.380649e-23      # Boltzmann constant [J/K]
 TORR_TO_PA = 133.322368 # 1 Torr = 133.322368 Pa
@@ -66,7 +68,7 @@ class Geometry:
     A_wall_B_cm2: float = 2*np.pi*(d_B_cm/2)**2 + np.pi*d_B_cm * l_B_cm * 1.1
     A_wall_B_m2: float = A_wall_B_cm2 * 1e-4  # Convert to m^2
     
-    pinhole_diameter_mm: float = 0.01      # If using pinhole model (molecular flow)
+    pinhole_diameter_mm: float = 1      # If using pinhole model (molecular flow)
     A_hole_cm2: float = np.pi * (pinhole_diameter_mm * 1e-2 / 2)**2  # aperture (hole) area between A and B [cm^2]
     A_hole_m2: float = A_hole_cm2 * 1e-4  # Convert to m^2
 
@@ -274,11 +276,6 @@ def pretty_print(results, verbose=False):
             P = dyn["pressure_history_Torr"]
             print(f"\nSimulated {t[-1]:.3g} s with {len(t)} steps.")
             print("Final simulated pressures [Torr]: P_A = %.6g, P_B = %.6g" % (P[-1,0], P[-1,1]))
-
-def ion_sound_speed(Te_eV: float, mi_amu: float) -> float:
-    """Isothermal ion-acoustic (Bohm) speed: c_s = sqrt(e*Te / m_i)  [m/s]."""
-    mi = mi_amu * AMU
-    return math.sqrt(QE * max(Te_eV, 1e-6) / mi)
 
 def estimate_nB_ambipolar(geom: Geometry, plasma: PlasmaParams, TeB_eV: float | None = None) -> dict:
     """

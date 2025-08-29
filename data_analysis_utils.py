@@ -290,20 +290,6 @@ def read_from_npy(npy_file_path):
     return data
 
 #===============================================================================================================================================
-
-def ion_sound_speed(Te, Ti, mi=const.m_p):
-    '''
-    Compute ion sound speed in m/s
-    input:
-    Te: electron temperature in eV
-    Ti: ion temperature in eV
-    mi: ion mass in kg
-    '''
-    gamma = 5/3 # adiabatic index; monoatomic gas is 5/3
-    cs = np.sqrt((const.e * (Te + gamma*Ti)) / (mi))
-
-    return cs
-
 #===============================================================================================================================================
 '''
 PhotonPulse and Photons classes pulse-width analysis 

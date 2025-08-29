@@ -27,53 +27,10 @@ from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
 
 
-#===============================================================================================================================================
-
 qe = constants.e # electron charge (C)
 me = constants.electron_mass # electron mass (kg)
 mi = constants.proton_mass # proton mass (kg)
-
 epsilon = constants.epsilon_0 #permittivity (F/m)
-
-#===============================================================================================================================================
-def collision(n):
-
-	n0 = 3.3e20 #neutral density (Van der Waal calculation ~10^23)
-	xs = 8.6e-20 #e-n collision cross section for elastic collision in m^-3
-	vth = math.sqrt(qe*Te/(math.pi*me)) #electron thermal speed 
-	ve = n0 * xs * vth 	# collision frequency (equation from NRL)
-	sigma = n * qe**2 / (me * ve)
-
-	return ve, sigma
-
-def collision_ee(Te, ne):
-	return 2.91 * 10**-6 * ne/Te**(3/2) * 10
-
-def collision_en(Te, ng, tfn = r"C:\data\cross-section\num.txt"):
-	'''
-	return collision frequency from electron neutral collision cross section
-	Cross section data comes from LXCAT
-	Neutral gas density calculated from ideal gas law (see collision-Oct2019.xlsx)
-	'''    
-	
-	data = np.loadtxt(tfn) # Read cross section info from txt file
-
-	f = interpolate.interp1d(data[:,0], data[:,1]) # Interpolation return f(Te)
-	sig = f(Te) # collision cross section in m^2
-	mfp = 1/(ng * sig) # unit is m if ng is m^-3
-
-	Vth = 4.19e5 * np.sqrt(Te) # Thermal velocity (unit:m/s, see NRL)
-
-	return sig, mfp, Vth/mfp
-
-def conductivity(ne, nu, w): # conductivity from e-n collision
-
-	wpe = 5.64e4 * np.sqrt(ne) # ne in cm^-3, wpe in rad/sec
-
-	nume = epsilon * wpe**2 * nu # in rad/sec
-	deno = w**2 + nu**2
-
-	return  nume / deno
 #===============================================================================================================================================
 
 def analyze_Isat(Iisat, cs): #Iisat in A/cm^2, cs in cm/s
@@ -219,9 +176,8 @@ def analyze_IV(voltage, current, plot = False):
 
 
 	if Te > 0:
-		vth = math.sqrt(qe*Te / me)
-								# electron thermal velocity in cm/s
-		ne = I/(vth * qe)
+		vth = math.sqrt(constants.e*Te / me) # electron thermal velocity in cm/s
+		ne = I/(vth * constants.e)
 	else:
 		ne = 0
 		raise Exception('Te is negative')
