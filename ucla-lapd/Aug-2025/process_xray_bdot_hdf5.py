@@ -21,19 +21,13 @@ import re
 import h5py
 import glob
 
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__ if '__file__' in globals() else os.getcwd()), '../..'))
+sys.path = [repo_root, f"{repo_root}/read", f"{repo_root}/object_tracking"] + sys.path
 
-# Dynamically add all subdirectories under the parent folder to sys.path
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-for subdir in glob.glob(os.path.join(parent_dir, '**'), recursive=True):
-    if os.path.isdir(subdir):
-        sys.path.append(subdir)
-
-
-from read_scope_data import read_trc_data, read_hdf5_scope_data, read_hdf5_scope_tarr
+from read.read_scope_data import read_trc_data, read_hdf5_all_scopes_channels, read_scope_channel_descriptions
 from data_analysis_utils import Photons, calculate_stft, counts_per_bin
-from plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
-from read_cine import read_cine, convert_cine_to_avi
-from track_object import track_object, detect_chamber, get_vel_freefall, get_pos_freefall
+from object_tracking.read_cine import read_cine, convert_cine_to_avi
+from object_tracking.track_object import track_object, detect_chamber, get_vel_freefall, get_pos_freefall
 
 #===========================================================================================================
 plt.rcParams.update({'font.size': 18})
@@ -41,239 +35,88 @@ plt.rcParams.update({'xtick.labelsize': 18, 'ytick.labelsize': 18})
 
 #===========================================================================================================
 
-def get_magnetron_power_data(hdf5_filename, shot_number=1, scope_name='magscope'):
+def get_magnetron_power_data(f, result, scope_name='magscope'):
     """
     Calculate magnetron power from HDF5 file data.
-    
-    Parameters:
-    -----------
-    hdf5_filename : str
-        Path to the HDF5 file
-    shot_number : int
-        Shot number to process (default: 1)
-    scope_name : str
-        Name of the scope group to use (default: 'magscope')
-        
-    Returns:
-    --------
-    tuple: (P_data, tarr, I_data, V_data, Pref_data)
-        P_data : Power calculation (W)
-        tarr : Time array (s)
-        I_data : Current data
-        V_data : Voltage data
-        Pref_data : Reflected power data
     """
-    # Initialize return variables
+    if scope_name not in result:
+        print(f"Scope '{scope_name}' not found.")
+        return None, None, None, None, None
+
+    tarr = result[scope_name].get('time_array')
+    chan_data = result[scope_name].get('channels', {})
+    descriptions = read_scope_channel_descriptions(f,'magscope')
+
     I_data = None
     V_data = None
     Pref_data = None
-    I_channel = None
-    V_channel = None
-    Pref_channel = None
-    
-    # Read time array
-    try:
-        tarr = read_hdf5_scope_tarr(hdf5_filename, scope_name)
-    except Exception as e:
-        print(f"Error reading time array: {e}")
-        return None, None, None, None, None
-    
-    # Find the appropriate channels based on descriptions
-    with h5py.File(hdf5_filename, 'r') as f:
-        # Check if scope exists
-        if scope_name not in f:
-            print(f"Scope '{scope_name}' not found in file.")
-            return None, tarr, None, None, None
-            
-        scope_group = f[scope_name]
-        
-        # Find the first non-skipped shot for channel descriptions
-        shot_groups = [k for k in scope_group.keys() if k.startswith('shot_')]
-        if not shot_groups:
-            print("No shot data found in this scope group.")
-            return None, tarr, None, None, None
-            
-        # Get first available shot for channel descriptions
-        shot_group = None
-        for shot_name in shot_groups:
-            current_shot = scope_group[shot_name]
-            if 'skipped' not in current_shot.attrs or not current_shot.attrs['skipped']:
-                shot_group = current_shot
-                break
-                
-        if shot_group is None:
-            print("All shots were skipped in this scope group.")
-            return None, tarr, None, None, None
-            
-        # Find channels based on descriptions
-        channel_names = [k.split('_')[0] for k in shot_group.keys() if k.endswith('_data')]
-        
-        for channel in channel_names:
-            data_key = f"{channel}_data"
-            if data_key in shot_group:
-                if 'description' in shot_group[data_key].attrs:
-                    desc = shot_group[data_key].attrs['description'].lower()
-                    if 'magnetron current' in desc:
-                        I_channel = channel
-                        print(f"Found current channel: {channel} - {shot_group[data_key].attrs['description']}")
-                    elif 'magnetron voltage' in desc:
-                        V_channel = channel
-                        print(f"Found voltage channel: {channel} - {shot_group[data_key].attrs['description']}")
-                    elif 'reflected power' in desc:
-                        Pref_channel = channel
-                        print(f"Found reflected power channel: {channel} - {shot_group[data_key].attrs['description']}")
-    
-    # Read data for the requested shot number
-    if I_channel is not None:
-        try:
-            I_data = read_hdf5_scope_data(hdf5_filename, scope_name, I_channel, shot_number)
-            
-            # Apply scaling if specified in description
-            with h5py.File(hdf5_filename, 'r') as f:
-                shot_group = f[scope_name][f'shot_{shot_number}']
-                desc = shot_group[f'{I_channel}_data'].attrs['description'].lower()
-                
-                # Extract scaling factor if present (e.g., "0.25A/V")
-                import re
-                match = re.search(r'(\d+\.?\d*)a/v', desc)
-                if match:
-                    scale_factor = float(match.group(1))
+
+    for ch, desc in descriptions.items():
+        if 'current' in desc:
+            I_data = chan_data[ch]
+            if isinstance(desc, str):
+                m = re.search(r'(\d+\.?\d*)\s*a/v', desc.lower())
+                if m:
+                    scale_factor = float(m.group(1))
                     print(f"Applying current scaling factor: {scale_factor} A/V")
                     I_data = I_data * scale_factor
-        except Exception as e:
-            print(f"Error reading current data: {e}")
-            I_data = None
-    
-    if V_channel is not None:
-        try:
-            V_data = read_hdf5_scope_data(hdf5_filename, scope_name, V_channel, shot_number)
-        except Exception as e:
-            print(f"Error reading voltage data: {e}")
-            V_data = None
-    
-    if Pref_channel is not None:
-        try:
-            Pref_data = read_hdf5_scope_data(hdf5_filename, scope_name, Pref_channel, shot_number)
-        except Exception as e:
-            print(f"Error reading reflected power data: {e}")
-            Pref_data = None
-    
-    # Calculate power if both current and voltage data are available
+
+        if 'voltage' in desc:
+            V_data = chan_data[ch]
+        if 'pref' in desc:
+            Pref_data = chan_data[ch]
+
     P_data = None
     if I_data is not None and V_data is not None:
-        # Calculate power: P = I * V
-        # Voltage is typically recorded negative in these experiments
-        # Also assuming 60% efficiency factor (power delivered to plasma)
-        # Apply Gaussian filter to smooth output power
-        P_data = I_data * (-V_data) * 0.6
-        P_data = ndimage.gaussian_filter1d(P_data, sigma=100)
-        print(f"Magnetron power calculated for shot {shot_number}")
+        P_data = ndimage.gaussian_filter1d(I_data * (-V_data) * 0.6, sigma=100)
+        print(f"Magnetron power calculated")
     else:
         print("Cannot calculate power: missing current or voltage data")
-    
-    return P_data, tarr, I_data, V_data, Pref_data
 
-def process_shot_bdot(file_number, base_dir, debug=False):
+    return tarr, P_data
+
+def get_xray_data(result, scope_name = 'xrayscope'):
+    tarr_x = result[scope_name].get('time_array')
+    xray_data = result[scope_name]['channels']['C2']
+    return tarr_x, xray_data
+
+def get_bdot_data(result, scope_name='bdotscope'):
+
+    tarr = result[scope_name].get('time_array')
+    chan_data = result[scope_name].get('channels', {})
+    descriptions = read_scope_channel_descriptions(f, scope_name)
+
+    # for ch, desc in descriptions.items():
+
+    #     m = re.search(r'P(\d+)', desc)
+    #     if m:
+    #         p_number = int(m.group(1))
+
+    return tarr, chan_data
+
+def calculate_bdot_stft(tarr_B, bdot_data, channel_info, freq_bins=1000, overlap_fraction=0.05, freq_min=200e6, freq_max=2000e6):
     '''
-    Process a single shot of bdot data and return data for averaging.
+    Calculates STFT for each Bdot signal in bdot_data.
+    Returns: stft_time, freq, stft_matrix1, stft_matrix2, stft_matrix3, stft_matrices
     '''
-    all_files = os.listdir(base_dir)
-    shot_files = [f for f in all_files if file_number in f]
-    bdot_files = [f for f in shot_files if "Bdot" in f]
-
-    # Check if any Bdot files exist for this shot
-    if not bdot_files:
-        raise FileNotFoundError(f"No Bdot files found for file number {file_number}")
-
-    By_P21 = None
-    Bx_P20 = None
-    By_P20 = None
-    tarr_B = None
-
-    for f in bdot_files:
-        if "C1--" in f:
-            filepath = os.path.join(base_dir, f)
-            By_P21, tarr_B = read_trc_data(filepath)
-            print(f"found By_P21 at {filepath}")
-
-        if "C2--" in f:
-            filepath = os.path.join(base_dir, f)
-            Bx_P20, tarr_B = read_trc_data(filepath)
-            print(f"found Bx_P20 at {filepath}")
-
-        if "C3--" in f:
-            filepath = os.path.join(base_dir, f)
-            By_P20, tarr_B = read_trc_data(filepath)
-            print(f"found By_P20 at {filepath}")
-
-
-    # Calculate STFT for each Bdot signal
-    freq_bins = 1000
-    overlap_fraction = 0.05
-    freq_min = 200e6  # 100 MHz
-    freq_max = 2000e6  # 800 MHz
-
-    if By_P21 is not None:
-        freq, stft_matrix1, stft_time = calculate_stft(tarr_B, By_P21, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
-    else:
-        stft_matrix1 = None
-
-    if Bx_P20 is not None:
-        freq, stft_matrix2, stft_time = calculate_stft(tarr_B, Bx_P20, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
-    else:
-        stft_matrix2 = None
-
-    if By_P20 is not None:
-        freq, stft_matrix3, stft_time = calculate_stft(tarr_B, By_P20, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
-    else:
-        stft_matrix3 = None
-
-    return stft_time, freq, stft_matrix1, stft_matrix2, stft_matrix3
-
-def process_shot_xray(file_number, base_dir, debug=False):
-    """Process a single shot of xray data and return data for averaging."""
-    
-    all_files = os.listdir(base_dir)
-    shot_files = [f for f in all_files if file_number in f]
-    xray_files = [f for f in shot_files if "xray" in f.lower()]
-    
-    xray_data = None
-    tarr_x = None
-
-    for f in xray_files:
-        if "C3--" in f:
-            filepath = os.path.join(base_dir, f)
-            xray_data, tarr_x = read_trc_data(filepath)
-            print(f"Using X-ray file: {f}")
-            break
-
-    if xray_data is None or tarr_x is None:
-        raise FileNotFoundError(f"Required X-ray data files not found for file number {file_number}")
-
-    if "380G800G" in base_dir:
-        d = 0.1
-        if "kapton" in base_dir:
-            threshold = [8, 400]
-            min_ts = 0.8e-6
+    stft_matrices = {}
+    stft_time = None
+    freq = None
+    for channel, data in bdot_data.items():
+        if data is not None:
+            freq, stft_matrix, stft_time = calculate_stft(tarr_B, data, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
+            stft_matrices[channel] = stft_matrix
         else:
-            threshold = [20, 150]
-            min_ts = 1e-6
-            
-    elif "P24" and "250G500G"in base_dir:
-        threshold = [10, 150]
-        min_ts = 1e-6
-        d = 1
-    elif "P30" and "250G500G" in base_dir:
-        threshold = [10, 150]
-        min_ts = 1e-6
-        d = 1
-    elif "500G1kG" in base_dir:
-        threshold = [20, 250]
-        min_ts = 1e-6
-        d = 0.1
+            stft_matrices[channel] = None
+    channels = sorted([ch for ch in channel_info.keys() if ch.startswith('C')])
+    stft_matrix1 = stft_matrices.get(channels[0]) if len(channels) > 0 else None
+    stft_matrix2 = stft_matrices.get(channels[1]) if len(channels) > 1 else None
+    stft_matrix3 = stft_matrices.get(channels[2]) if len(channels) > 2 else None
+    return stft_time, freq, stft_matrix1, stft_matrix2, stft_matrix3, stft_matrices
 
-    tarr_x = tarr_x #[:int(len(tarr_x)/2)]
-    xray_data = xray_data #[:int(len(xray_data)/2)]
+def process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False):
+    """Process a single shot of xray data and return data for averaging.
+    """
 
     detector = Photons(tarr_x, xray_data, min_timescale=min_ts, distance_mult=d, tsh_mult=threshold, debug=debug)
     detector.reduce_pulses()
@@ -349,41 +192,6 @@ def process_video(file_number, base_dir):
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================
-
-def main_plot(file_numbers, base_dir, debug):
-    
-    print(f"Starting processing for {len(file_numbers)} shots")
-    print(f"Data directory: {base_dir}")
-    
-    # Turn on interactive mode for the whole script
-    plt.ion()
-    
-    # List to store figures so they don't get garbage collected
-    all_figures = []
-    
-    for file_number in file_numbers:
-        try:
-            fig = process_shot(file_number, base_dir, bdot_channel=2, debug=debug)
-            all_figures.append(fig)
-            
-            # Add explicit pause to ensure the display updates
-            plt.pause(0.5)
-        except FileNotFoundError as e:
-            print(f"Error: {e}")
-        except KeyboardInterrupt:
-            print("Process terminated by KeyboardInterrupt")
-            break
-
-    print("\nScript execution completed")
-    
-    # Create a small tkinter window to keep the plots alive without blocking
-    # This helps prevent figures from closing when script ends
-    root = tk.Tk()
-    root.withdraw()  # Hide the window
-    
-    # Turn off interactive mode and show all figures
-    plt.ioff()
-    plt.show(block=True)  # Block until all figures are closed
 
 def xray_wt_cam(file_numbers, base_dir, plot_Bdot=False, debug=False):
     # Turn on interactive mode for the whole script
@@ -689,6 +497,52 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
     plt.draw()
     plt.pause(0.1)
 
+def process_shot_bdot(file_number, base_dir, debug=False):
+    """
+    Process Bdot signals for a specific shot number.
+    Returns the STFT time array, frequency array, and STFT matrices for three channels.
+    
+    Args:
+        file_number: The shot number to process
+        base_dir: Base directory containing the HDF5 files
+        debug: Whether to print debug information
+        
+    Returns:
+        stft_tarr: Time array for the STFT
+        freq_arr: Frequency array for the STFT
+        stft_matrix1, stft_matrix2, stft_matrix3: STFT matrices for three channels
+    """
+    # Construct the HDF5 filename
+    hdf5_filename = os.path.join(base_dir, f'{file_number}.hdf5')
+    
+    if not os.path.exists(hdf5_filename):
+        print(f"Error: HDF5 file not found: {hdf5_filename}")
+        return None, None, None, None, None
+    
+    # Read the Bdot signals
+    tarr_B, bdot_data, channel_info = read_bdot_signals_from_hdf5(hdf5_filename, debug=debug)
+    
+    if tarr_B is None or len(bdot_data) == 0:
+        print(f"Error: Failed to read Bdot signals from {hdf5_filename}")
+        return None, None, None, None, None
+    
+    # Calculate the STFT for each channel
+    stft_tarr, freq_arr, stft_matrices = calculate_bdot_stft(tarr_B, bdot_data, channel_info)
+    
+    # Extract the STFT matrices for the three channels (assuming they exist)
+    channels = list(stft_matrices.keys())
+    if len(channels) >= 3:
+        stft_matrix1 = stft_matrices[channels[0]]
+        stft_matrix2 = stft_matrices[channels[1]]
+        stft_matrix3 = stft_matrices[channels[2]]
+    else:
+        # Handle the case where we don't have three channels
+        stft_matrix1 = stft_matrices.get(channels[0], None) if channels else None
+        stft_matrix2 = stft_matrices.get(channels[1], None) if len(channels) > 1 else None
+        stft_matrix3 = stft_matrices.get(channels[2], None) if len(channels) > 2 else None
+    
+    return stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3
+
 def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr):
     """
     Plot averaged STFT matrices for the three Bdot signals.
@@ -763,11 +617,21 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
 
 if __name__ == "__main__":
 
-    file_numbers = [f"{i:05d}" for i in range(0,11)] #+ [f"{i:05d}" for i in range(60, 89)]
-    
-    # base_dir = r"E:\good_data\kapton\He3kA_B380G800G_pl0t20_uw15t35"
-    base_dir = r"E:\good_data\He3kA_B500G1kG_pl0t20_uw17t37_P30"
+    ifn = r"F:\AUG2025\P24\00_He1kG430G_5800A_K-25_2025-08-12.hdf5"
+    with h5py.File(ifn, 'r') as f:
+        result = read_hdf5_all_scopes_channels(f, 1, include_tarr=True)
+        P_tarr, P_data = get_magnetron_power_data(f, result)
+        tarr_x, xray_data = get_xray_data(result)
 
-    # Uncomment one of these functions to run
-    # main_plot(file_numbers, base_dir, debug=False)  # Process and display individual shots
-    xray_wt_cam(file_numbers, base_dir, plot_Bdot=False, debug=False)
+        plt.figure()
+        plt.plot(tarr_x*1e3, -xray_data, linewidth=2)
+        plt.plot(P_tarr*1e3, P_data*1e-4, linewidth=2)
+        plt.xlabel('Time (ms)')
+        plt.ylabel('Power (kW)')
+        plt.grid(True)
+        plt.show(block=False)
+
+    threshold = [5, 50]
+    min_ts = 0.8e-6
+    d = 0.1
+    pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=True)
