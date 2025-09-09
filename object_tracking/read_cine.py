@@ -170,3 +170,32 @@ def convert_cine_to_avi(frame_arr, avi_path, scale_factor=8):
         if 'out' in locals():
             out.release()
         raise RuntimeError(f"Error during video conversion: {str(e)}")
+    
+
+def batch_convert_cine_to_avi(base_path):
+    """
+    Convert all .cine files in the specified directory to .avi videos.
+    Each .avi file will be saved in the same directory with the same base name.
+    Skip conversion if .avi file already exists.
+    """
+    dir_path = Path(base_path)
+    cine_files = list(dir_path.glob('*.cine'))
+    if not cine_files:
+        print(f"No .cine files found in {base_path}")
+        return
+
+    for cine_file in cine_files:
+        avi_path = cine_file.with_suffix('.avi')
+        if avi_path.exists():
+            print(f"{avi_path.name} already exists.")
+            continue
+        try:
+            print(f"Processing {cine_file}...")
+            time_arr, frame_arr, dt = read_cine(str(cine_file))
+            convert_cine_to_avi(frame_arr, str(avi_path))
+        except Exception as e:
+            print(f"Failed to convert {cine_file}: {str(e)}")
+
+if __name__ == "__main__":
+    base_path = r"F:\AUG2025\P24"
+    batch_convert_cine_to_avi(base_path)
