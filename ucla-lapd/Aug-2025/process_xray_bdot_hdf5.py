@@ -10,6 +10,7 @@ Each figure will contain 4 subplots:
 
 import os
 import sys
+from unittest import result
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
@@ -123,27 +124,18 @@ def process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False):
 
     return detector.pulse_times, detector.pulse_amplitudes
 
-def process_video(file_number, base_dir):
+def process_video(base_dir, cam_file):
     '''
     Process the video file for a given shot number and return the time at which the ball reaches the chamber center
     '''
-    all_files = os.listdir(base_dir)
-    actual_number = int(file_number)
-    cam_files = [f for f in all_files if f.endswith('.cine') and 
-                 int(f.split('_')[-1].replace('.cine', '')) == actual_number]
-
-    if not cam_files:
-        raise FileNotFoundError(f"No video file found for shot number {file_number}")
-
-    filepath = os.path.join(base_dir, cam_files[0])
-    avi_path = filepath.replace('.cine', '.avi')
-    print(f"Using video file: {filepath}")
-
-    # Define path for tracking results
-    tracking_file = os.path.join(base_dir, 'tracking_results.npy')
     
+    filepath = os.path.join(base_dir, cam_file)
+    avi_path = os.path.join(base_dir, f"{os.path.splitext(cam_file)[0]}.avi")
+
     # Initialize or load the tracking dictionary
     tracking_dict = {}
+    tracking_file = os.path.join(base_dir, f"tracking_{cam_file[:2]}.npy")
+
     if os.path.exists(tracking_file):
         try:
             tracking_dict = np.load(tracking_file, allow_pickle=True).item()
@@ -187,17 +179,15 @@ def process_video(file_number, base_dir):
     (cx, cy), chamber_radius = detect_chamber(frame)
 
     cap.release()
-    return ct, frame, (cx, cy), chamber_radius, filepath
+    return ct, frame, (cx, cy), chamber_radius
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================
 
-def xray_wt_cam(file_numbers, base_dir, plot_Bdot=False, debug=False):
-    # Turn on interactive mode for the whole script
-    plt.ion()
-    
-    # Define path for analysis results
+def xray_wt_cam(base_dir, fn, plot_Bdot=False, debug=False):
+    # Define path
+    ifn = os.path.join(base_dir, fn)
     analysis_file = os.path.join(base_dir, 'analysis_results.npy')
     
     # Initialize or load the analysis dictionary
@@ -221,34 +211,31 @@ def xray_wt_cam(file_numbers, base_dir, plot_Bdot=False, debug=False):
     stft_time_ref = None
     freq_ref = None
     
-    # Process each file: collect data and create individual figures
-    print("Processing each shot...")
-    for file_number in file_numbers:
-        print(f"\nProcessing shot {file_number}")
-        # Video data
+    with h5py.File(ifn, 'r') as f:
+        shot_numbers = f['Control/FastCam']['shot number'][()]
+
+    for shot_num in shot_numbers:
+        print(f"\nProcessing shot {shot_num}")        
+
+        with h5py.File(ifn, 'r') as f:
+            print(f"Reading data from {ifn}")
+            cine_narr = f['Control/FastCam/cine file name'][()]
+            cam_file = cine_narr[shot_num-1]
+            if shot_num != int(cam_file[-8:-5]):
+                print(f"Warning: shot number {shot_num} does not match {cam_file}")
+
+            result = read_hdf5_all_scopes_channels(f, shot_num, include_tarr=True)
+            tarr_P, P_data = get_magnetron_power_data(f, result)
+            tarr_x, xray_data = get_xray_data(result)
+
         try:
-            t0, frame, (cx, cy), chamber_radius, filepath = process_video(file_number, base_dir)
+            t0, frame, (cx, cy), chamber_radius = process_video(base_dir, cam_file.decode('utf-8'))
         except FileNotFoundError as e:
-            print(f"No video file found for shot {file_number}; skipping...")
+            print(f"No video file found for shot {shot_num}; skipping...")
             continue
-        
-        # Magnetron power data
-        all_files = os.listdir(base_dir)
-        shot_files = [f for f in all_files if file_number in f]
-        power_files = [f for f in shot_files if "xray" not in f.lower() and "Bdot" not in f]
-        
-        # Get magnetron power data using the standalone function
-        P_data, tarr_I, I_data, V_data, Pref_data = get_magnetron_power_data(power_files, base_dir)
 
-        # Microwave start time
-        match = re.search(r'uw(\d+)t', filepath)
-        uw_start = int(match.group(1)) * 1e-3
-        if debug:
-            print(f"uw_start: {uw_start}")
-
-        
         # Create individual figure with two subplots (video + power)
-        fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{file_number}")
+        fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{shot_num}")
 
         ax1.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
@@ -257,8 +244,8 @@ def xray_wt_cam(file_numbers, base_dir, plot_Bdot=False, debug=False):
         ax1.axis('off')
 
         # Plot power data if available
-        if P_data is not None and tarr_I is not None:
-            ax3.plot(tarr_I*1e3, P_data*1e-4, 'b-', linewidth=2)
+        if P_data is not None and tarr_P is not None:
+            ax3.plot(tarr_P*1e3, P_data*1e-4, 'b-', linewidth=2)
             ax3.set_xlabel('Time (ms)')
             ax3.set_ylabel('Power (kW)')
             ax3.grid(True)
@@ -277,24 +264,27 @@ def xray_wt_cam(file_numbers, base_dir, plot_Bdot=False, debug=False):
         
         
         # X-ray data
-        if file_number in analysis_dict:
-            pulse_tarr, pulse_amp = analysis_dict[file_number]
+        if shot_num in analysis_dict:
+            pulse_tarr, pulse_amp = analysis_dict[shot_num]
         else:
-            pulse_tarr, pulse_amp = process_shot_xray(file_number, base_dir, debug=debug)
-            
+            threshold = [5, 50]
+            min_ts = 0.8e-6
+            d = 0.1
+            pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=debug)
+
             # Save new results
-            analysis_dict[file_number] = (pulse_tarr, pulse_amp)
+            analysis_dict[shot_num] = (pulse_tarr, pulse_amp)
             try:
                 np.save(analysis_file, analysis_dict)
-                print(f"Added new analysis result for shot {file_number}")
+                print(f"Added new analysis result for shot {shot_num}")
             except Exception as e:
                 print(f"Error saving analysis results: {e}")
         
         # Store ALL pulse data for plot in the end
         shot_data = {
-            'file_number': file_number,
+            'shot_num': shot_num,
             't0': t0,
-            'uw_start': uw_start,
+            'uw_start': 30,
             'pulse_tarr': pulse_tarr,
             'pulse_amp': pulse_amp,
         }
@@ -302,58 +292,58 @@ def xray_wt_cam(file_numbers, base_dir, plot_Bdot=False, debug=False):
         all_scatter_data.append(shot_data)
 
     
-        if plot_Bdot:
-            try:
-                stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
-            except FileNotFoundError as e:
-                print(f"No Bdot data found for shot {file_number}; skipping...")
-                continue
+        # if plot_Bdot:
+        #     try:
+        #         stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3 = process_shot_bdot(file_number, base_dir, debug=debug)
+        #     except FileNotFoundError as e:
+        #         print(f"No Bdot data found for shot {file_number}; skipping...")
+        #         continue
             
-            # Collect STFT matrices for averaging
-            if stft_matrix1 is not None:
-                all_stft_matrix1.append(stft_matrix1)
-            if stft_matrix2 is not None:
-                all_stft_matrix2.append(stft_matrix2)
-            if stft_matrix3 is not None:
-                all_stft_matrix3.append(stft_matrix3)
+        #     # Collect STFT matrices for averaging
+        #     if stft_matrix1 is not None:
+        #         all_stft_matrix1.append(stft_matrix1)
+        #     if stft_matrix2 is not None:
+        #         all_stft_matrix2.append(stft_matrix2)
+        #     if stft_matrix3 is not None:
+        #         all_stft_matrix3.append(stft_matrix3)
 
-            # Average the STFT matrices with optional time axis limitation
-            avg_stft_matrix1 = None
-            avg_stft_matrix2 = None
-            avg_stft_matrix3 = None
+        #     # Average the STFT matrices with optional time axis limitation
+        #     avg_stft_matrix1 = None
+        #     avg_stft_matrix2 = None
+        #     avg_stft_matrix3 = None
             
-            # Option to limit time axis to first half (set to True to enable)
-            limit_time_axis = False
+        #     # Option to limit time axis to first half (set to True to enable)
+        #     limit_time_axis = False
             
-            if len(all_stft_matrix1) > 0:
-                matrices = np.array(all_stft_matrix1)
-                if limit_time_axis:
-                    index = matrices.shape[1] // 2
-                    matrices = matrices[:, :index, :]
-                avg_stft_matrix1 = np.mean(matrices, axis=0)
-                print(f"Averaged {len(all_stft_matrix1)} By_P21 STFT matrices")
+        #     if len(all_stft_matrix1) > 0:
+        #         matrices = np.array(all_stft_matrix1)
+        #         if limit_time_axis:
+        #             index = matrices.shape[1] // 2
+        #             matrices = matrices[:, :index, :]
+        #         avg_stft_matrix1 = np.mean(matrices, axis=0)
+        #         print(f"Averaged {len(all_stft_matrix1)} By_P21 STFT matrices")
             
-            if len(all_stft_matrix2) > 0:
-                matrices = np.array(all_stft_matrix2)
-                if limit_time_axis:
-                    index = matrices.shape[1] // 2
-                    matrices = matrices[:, :index, :]
-                avg_stft_matrix2 = np.mean(matrices, axis=0)
-                print(f"Averaged {len(all_stft_matrix2)} Bx_P20 STFT matrices")
+        #     if len(all_stft_matrix2) > 0:
+        #         matrices = np.array(all_stft_matrix2)
+        #         if limit_time_axis:
+        #             index = matrices.shape[1] // 2
+        #             matrices = matrices[:, :index, :]
+        #         avg_stft_matrix2 = np.mean(matrices, axis=0)
+        #         print(f"Averaged {len(all_stft_matrix2)} Bx_P20 STFT matrices")
             
-            if len(all_stft_matrix3) > 0:
-                matrices = np.array(all_stft_matrix3)
-                if limit_time_axis:
-                    index = matrices.shape[1] // 2
-                    matrices = matrices[:, :index, :]
-                avg_stft_matrix3 = np.mean(matrices, axis=0)
-                print(f"Averaged {len(all_stft_matrix3)} By_P20 STFT matrices")
+        #     if len(all_stft_matrix3) > 0:
+        #         matrices = np.array(all_stft_matrix3)
+        #         if limit_time_axis:
+        #             index = matrices.shape[1] // 2
+        #             matrices = matrices[:, :index, :]
+        #         avg_stft_matrix3 = np.mean(matrices, axis=0)
+        #         print(f"Averaged {len(all_stft_matrix3)} By_P20 STFT matrices")
             
-            if limit_time_axis:
-                stft_tarr = stft_tarr[:index]
-                freq_arr = freq_arr[:index]
+        #     if limit_time_axis:
+        #         stft_tarr = stft_tarr[:index]
+        #         freq_arr = freq_arr[:index]
 
-            plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr)
+        #     plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3, stft_tarr, freq_arr)
     
     
     plot_combined_scatter(all_scatter_data, amplitude_ranges=None) # [(0, 0.5), (0.5, 1.0)])
@@ -394,7 +384,7 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
         if len(counts) == 0:
             return [], [], []
             
-        r_arr = get_pos_freefall(bin_centers*1e-3 + shot_data['uw_start'], shot_data['t0'])
+        r_arr = get_pos_freefall(bin_centers + shot_data['uw_start'], shot_data['t0'])
         return bin_centers, (r_arr * 100), counts  # Convert to cm
     
     def create_scatter_plot(ax, bin_centers, r_positions, counts, vmax, add_colorbar=False):
@@ -617,21 +607,7 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
 
 if __name__ == "__main__":
 
-    ifn = r"F:\AUG2025\P24\00_He1kG430G_5800A_K-25_2025-08-12.hdf5"
-    with h5py.File(ifn, 'r') as f:
-        result = read_hdf5_all_scopes_channels(f, 1, include_tarr=True)
-        P_tarr, P_data = get_magnetron_power_data(f, result)
-        tarr_x, xray_data = get_xray_data(result)
+    base_dir = r"F:\AUG2025\P24"
+    fn = "00_He1kG430G_5800A_K-25_2025-08-12.hdf5"
 
-        plt.figure()
-        plt.plot(tarr_x*1e3, -xray_data, linewidth=2)
-        plt.plot(P_tarr*1e3, P_data*1e-4, linewidth=2)
-        plt.xlabel('Time (ms)')
-        plt.ylabel('Power (kW)')
-        plt.grid(True)
-        plt.show(block=False)
-
-    threshold = [5, 50]
-    min_ts = 0.8e-6
-    d = 0.1
-    pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=True)
+    xray_wt_cam(base_dir, fn, plot_Bdot=False, debug=False)
