@@ -34,6 +34,10 @@ from object_tracking.track_object import track_object, detect_chamber, get_vel_f
 plt.rcParams.update({'font.size': 18})
 plt.rcParams.update({'xtick.labelsize': 18, 'ytick.labelsize': 18})
 
+# Simple prefixed logger for clearer terminal output
+def _log(tag, msg):
+    print(f"[{tag}] {msg}")
+
 #===========================================================================================================
 
 def get_magnetron_power_data(f, result, scope_name='magscope'):
@@ -41,7 +45,7 @@ def get_magnetron_power_data(f, result, scope_name='magscope'):
     Calculate magnetron power from HDF5 file data.
     """
     if scope_name not in result:
-        print(f"Scope '{scope_name}' not found.")
+        _log('POWER', f"Scope '{scope_name}' not found.")
         return None, None, None, None, None
 
     tarr = result[scope_name].get('time_array')
@@ -59,7 +63,6 @@ def get_magnetron_power_data(f, result, scope_name='magscope'):
                 m = re.search(r'(\d+\.?\d*)\s*a/v', desc.lower())
                 if m:
                     scale_factor = float(m.group(1))
-                    print(f"Applying current scaling factor: {scale_factor} A/V")
                     I_data = I_data * scale_factor
 
         if 'voltage' in desc:
@@ -70,9 +73,9 @@ def get_magnetron_power_data(f, result, scope_name='magscope'):
     P_data = None
     if I_data is not None and V_data is not None:
         P_data = ndimage.gaussian_filter1d(I_data * (-V_data) * 0.6, sigma=100)
-        print(f"Magnetron power calculated")
+        _log('POWER', "Magnetron power calculated")
     else:
-        print("Cannot calculate power: missing current or voltage data")
+        _log('POWER', "Cannot calculate power: missing current or voltage data")
 
     return tarr, P_data
 
@@ -81,7 +84,7 @@ def get_xray_data(result, scope_name = 'xrayscope'):
     xray_data = result[scope_name]['channels']['C2']
     return tarr_x, xray_data
 
-def get_bdot_data(result, scope_name='bdotscope'):
+def get_bdot_data(f, result, scope_name='bdotscope'):
 
     tarr = result[scope_name].get('time_array')
     chan_data = result[scope_name].get('channels', {})
@@ -94,6 +97,31 @@ def get_bdot_data(result, scope_name='bdotscope'):
     #         p_number = int(m.group(1))
 
     return tarr, chan_data
+
+
+def read_bdot_signals_from_hdf5(hdf5_filename, debug=False):
+    """Minimal reader for Bdot signals to support processing.
+    Returns (tarr_B, bdot_data, channel_info) or (None, {}, {}) on failure.
+    """
+    try:
+        with h5py.File(hdf5_filename, 'r') as f:
+            if 'bdotscope' not in f:
+                return None, {}, {}
+            scope = f['bdotscope']
+            tarr_B = scope.get('time_array')[()]
+            bdot_data = {}
+            if 'channels' in scope:
+                for ch in scope['channels']:
+                    bdot_data[ch] = scope['channels'][ch][()]
+            try:
+                channel_info = read_scope_channel_descriptions(f, 'bdotscope')
+            except Exception:
+                channel_info = {}
+            return tarr_B, bdot_data, channel_info
+    except Exception as e:
+        if debug:
+            _log('BDOT', f"Error reading {hdf5_filename}: {e}")
+        return None, {}, {}
 
 def calculate_bdot_stft(tarr_B, bdot_data, channel_info, freq_bins=1000, overlap_fraction=0.05, freq_min=200e6, freq_max=2000e6):
     '''
@@ -130,74 +158,96 @@ def process_video(base_dir, cam_file):
     '''
     
     filepath = os.path.join(base_dir, cam_file)
+    if not os.path.exists(filepath):
+        raise FileNotFoundError("Video file does not exist.")
     avi_path = os.path.join(base_dir, f"{os.path.splitext(cam_file)[0]}.avi")
 
-    # Initialize or load the tracking dictionary
-    tracking_dict = {}
-    tracking_file = os.path.join(base_dir, f"tracking_{cam_file[:2]}.npy")
-
+    # Initialize or load the tracking result dictionary
+    tracking_file = os.path.join(base_dir, f"tracking_result.npy")
     if os.path.exists(tracking_file):
-        try:
-            tracking_dict = np.load(tracking_file, allow_pickle=True).item()
-            print(f"Loaded {len(tracking_dict)} existing tracking results")
-        except Exception as e:
-            print(f"Error loading tracking results: {e}")
-            tracking_dict = {}
+        tracking_dict = np.load(tracking_file, allow_pickle=True).item()
+    else:
+        tracking_dict = {}
 
     # Check if we already have results for this file
     if filepath in tracking_dict:
-        print(f"Loading existing tracking results for {filepath}")
+        _log('VIDEO', f"Loading existing tracking results for {filepath}")
         cf, ct = tracking_dict[filepath]
+        if cf is None or ct is None:
+            _log('VIDEO', "No object was tracked in previous analysis.")
+            return None
     else:
-        print(f"No existing tracking results found. Processing video...")
+        _log('VIDEO', "No existing tracking results found. Processing video...")
         tarr, frarr, dt = read_cine(filepath)
 
+        # convert cine to avi if not already done
         if not os.path.exists(avi_path):
-            print(f"Converting {filepath} to {avi_path}")
+            _log('VIDEO', f"Converting {filepath} to {avi_path}")
             convert_cine_to_avi(frarr, avi_path)
 
-        print(f"Tracking object in {avi_path}")
+        _log('VIDEO', f"Tracking object in {avi_path}")
         parr, frarr, cf = track_object(avi_path)
-        ct = tarr[cf]
-        
-        # Add new result to the dictionary and save
-        tracking_dict[filepath] = (cf, ct)
-        try:
-            np.save(tracking_file, tracking_dict)
-            print(f"Added new tracking result and saved to {tracking_file}")
-        except Exception as e:
-            print(f"Error saving tracking results: {e}")
 
-    # Plot frame with detected object at center of chamber
-    cap = cv2.VideoCapture(avi_path)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, cf)
-    ret, frame = cap.read()
-    if not ret:
-        raise ValueError(f"Could not read frame")
+        if cf is None:
+            _log('VIDEO', "No object tracked in video.")
+            ct = None
+            # Save result with None frame
+            try:
+                tracking_dict[filepath] = (cf, ct)
+                np.save(tracking_file, tracking_dict)
+            except Exception as e:
+                _log('VIDEO', f"Error saving tracking results: {e}")
+            return ct
+        else:
+            ct = tarr[cf]
+            try:
+                tracking_dict[filepath] = (cf, ct)         # Add new result to the dictionary and save
+                np.save(tracking_file, tracking_dict)
+            except Exception as e:
+                _log('VIDEO', f"Error saving tracking results: {e}")
 
-    # Detect chamber
+    # For plotting
+    if cf is not None:
+        cap = cv2.VideoCapture(avi_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, cf)
+        ret, frame = cap.read()
+        if not ret:
+            raise ValueError(f"Could not read frame")
+        cap.release()
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_title(cam_file)
+
+    ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     (cx, cy), chamber_radius = detect_chamber(frame)
+    chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
+    ax.add_patch(chamber_circle)
+    _log('VIDEO', f"ball reaches chamber center at t={ct * 1e3:.3f}ms from plasma trigger")
+    ax.axis('off')
+    plt.draw()
+    plt.pause(0.1)
 
-    cap.release()
-    return ct, frame, (cx, cy), chamber_radius
+    return ct
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================
 
-def xray_wt_cam(base_dir, fn, plot_Bdot=False, debug=False):
+def xray_wt_cam(base_dir, fn):
     # Define path
     ifn = os.path.join(base_dir, fn)
     analysis_file = os.path.join(base_dir, 'analysis_results.npy')
+    
+    # Extract two-digit prefix from filename (e.g., "02" from "02_He1kG430G_5800A_K-25_2025-08-12.hdf5")
+    file_prefix = fn[:2]
     
     # Initialize or load the analysis dictionary
     analysis_dict = {}
     if os.path.exists(analysis_file):
         try:
             analysis_dict = np.load(analysis_file, allow_pickle=True).item()
-            print(f"Loaded {len(analysis_dict)} existing analysis results")
         except Exception as e:
-            print(f"Error loading analysis results: {e}")
+            _log('ANALYSIS', f"Error loading analysis results: {e}")
             analysis_dict = {}
     
     # Storage for combined scatter plot data
@@ -215,73 +265,60 @@ def xray_wt_cam(base_dir, fn, plot_Bdot=False, debug=False):
         shot_numbers = f['Control/FastCam']['shot number'][()]
 
     for shot_num in shot_numbers:
-        print(f"\nProcessing shot {shot_num}")        
+        _log('SHOT', f"Processing shot {shot_num}")
 
         with h5py.File(ifn, 'r') as f:
-            print(f"Reading data from {ifn}")
+            _log('FILE', f"Reading data from {ifn}")
             cine_narr = f['Control/FastCam/cine file name'][()]
             cam_file = cine_narr[shot_num-1]
             if shot_num != int(cam_file[-8:-5]):
-                print(f"Warning: shot number {shot_num} does not match {cam_file}")
+                _log('FILE', f"Warning: shot number {shot_num} does not match {cam_file}")
 
             result = read_hdf5_all_scopes_channels(f, shot_num, include_tarr=True)
             tarr_P, P_data = get_magnetron_power_data(f, result)
             tarr_x, xray_data = get_xray_data(result)
 
         try:
-            t0, frame, (cx, cy), chamber_radius = process_video(base_dir, cam_file.decode('utf-8'))
+            t0 = process_video(base_dir, cam_file.decode('utf-8'))
         except FileNotFoundError as e:
-            print(f"No video file found for shot {shot_num}; skipping...")
+            _log('VIDEO', f"No video file found for shot {shot_num}; skipping...")
             continue
-
-        # Create individual figure with two subplots (video + power)
-        fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(15, 5), num=f"shot_{shot_num}")
-
-        ax1.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
-        ax1.add_patch(chamber_circle)
-        print(f"ball reaches chamber center at t={t0 * 1e3:.3f}ms from plasma trigger")
-        ax1.axis('off')
 
         # Plot power data if available
         if P_data is not None and tarr_P is not None:
-            ax3.plot(tarr_P*1e3, P_data*1e-4, 'b-', linewidth=2)
-            ax3.set_xlabel('Time (ms)')
-            ax3.set_ylabel('Power (kW)')
-            ax3.grid(True)
-        else:
-            ax3.text(0.5, 0.5, 'Power data not available', 
-                     horizontalalignment='center', verticalalignment='center',
-                     transform=ax3.transAxes)
-            ax3.set_title('Magnetron Power (Data Not Available)')
-            ax3.set_xlabel('Time (ms)')
-            ax3.set_ylabel('Power (kW)')
-        
-        # Adjust layout and display for individual figure
-        plt.tight_layout()
-        plt.draw()
-        plt.pause(0.1)
-        
+            fig, ax = plt.subplots(figsize=(15, 5), num=f"shot_{shot_num}")
+            ax.plot(tarr_P*1e3, P_data*1e-4, 'b-', linewidth=2)
+            ax.set_xlabel('Time (ms)')
+            ax.set_ylabel('Power (kW)')
+            ax.grid(True)
+            plt.tight_layout()
+            plt.draw()
+            plt.pause(0.1)
         
         # X-ray data
-        if shot_num in analysis_dict:
-            pulse_tarr, pulse_amp = analysis_dict[shot_num]
+        # Create composite key: file_prefix + shot_number (e.g., "02_001", "02_002")
+        analysis_key = f"{file_prefix}_{shot_num:03d}"
+        
+        if analysis_key in analysis_dict:
+            pulse_tarr, pulse_amp = analysis_dict[analysis_key]
+            _log('ANALYSIS', f"Using cached analysis for {analysis_key}")
         else:
-            threshold = [5, 50]
+            threshold = [5, 70]
             min_ts = 0.8e-6
             d = 0.1
-            pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=debug)
+            pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold)
 
-            # Save new results
-            analysis_dict[shot_num] = (pulse_tarr, pulse_amp)
+            # Save new results with composite key
+            analysis_dict[analysis_key] = (pulse_tarr, pulse_amp)
             try:
                 np.save(analysis_file, analysis_dict)
-                print(f"Added new analysis result for shot {shot_num}")
+                _log('ANALYSIS', f"Added new analysis result for {analysis_key}")
             except Exception as e:
-                print(f"Error saving analysis results: {e}")
+                _log('ANALYSIS', f"Error saving analysis results: {e}")
         
         # Store ALL pulse data for plot in the end
         shot_data = {
+            'filename': ifn,
             'shot_num': shot_num,
             't0': t0,
             'uw_start': 30,
@@ -365,6 +402,8 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
     """
     
     def process_shot_data(shot_data, min_thresh=None, max_thresh=None):
+        if shot_data['t0'] is None:
+            return [], [], []
         """Extract and process data from a single shot with optional amplitude filtering."""
         pulse_tarr, pulse_amp = shot_data['pulse_tarr'], shot_data['pulse_amp']
         
@@ -400,7 +439,7 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
     
     # Handle single plot case
     if amplitude_ranges is None:
-        print("\nCreating single combined X-ray counts plot with all data...")
+        _log('PLOT', "Creating single combined X-ray counts plot with all data...")
         fig, ax = plt.subplots(1, 1, figsize=(8, 6))
         
         # Collect all data
@@ -429,7 +468,7 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
         amplitude_ranges = [(0, 0.25), (0.25, 0.5), (0.5, 1.0)]
     
     num_ranges = len(amplitude_ranges)
-    print(f"\nCreating combined X-ray counts plot with {num_ranges} amplitude ranges...")
+    _log('PLOT', f"Creating combined X-ray counts plot with {num_ranges} amplitude ranges...")
     
     # Setup figure
     fig_width = max(12, num_ranges * 5)
@@ -463,7 +502,7 @@ def plot_combined_scatter(all_scatter_data, amplitude_ranges=None):
         if all_counts:
             global_max_counts = max(global_max_counts, np.max(all_counts))
     
-    print(f"Global maximum counts across all panels: {global_max_counts}")
+    _log('PLOT', f"Global maximum counts across all panels: {global_max_counts}")
     
     # Create plots
     scatter_list = []
@@ -608,6 +647,6 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
 if __name__ == "__main__":
 
     base_dir = r"F:\AUG2025\P24"
-    fn = "00_He1kG430G_5800A_K-25_2025-08-12.hdf5"
+    fn = "03_He1kG430G_5800A_K-25_2025-08-12.hdf5"
 
-    xray_wt_cam(base_dir, fn, plot_Bdot=False, debug=False)
+    xray_wt_cam(base_dir, fn)
