@@ -283,8 +283,12 @@ def show_tracking_results(tr_ifn):
         
         for filepath, (cf, ct) in tracking_dict.items():
             print(f"File: {os.path.basename(filepath)}")
-            print(f"  Frame: {cf}")
-            print(f"  Time: {ct:.6f}s")
+            if cf is None or ct is None:
+                print("  Frame: None")
+                print("  Time: None")
+            else:
+                print(f"  Frame: {cf}")
+                print(f"  Time: {ct:.6f}s")
             print()
     else:
         print(f"No tracking results file found at {tr_ifn}")
