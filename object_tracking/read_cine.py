@@ -197,5 +197,5 @@ def batch_convert_cine_to_avi(base_path):
             print(f"Failed to convert {cine_file}: {str(e)}")
 
 if __name__ == "__main__":
-    base_path = r"F:\AUG2025\P24"
+    base_path = r"F:\AUG2025\P23"
     batch_convert_cine_to_avi(base_path)
