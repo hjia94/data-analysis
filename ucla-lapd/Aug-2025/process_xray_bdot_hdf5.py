@@ -315,6 +315,9 @@ def xray_wt_cam(base_dir, fn):
 
 		try:
 			t0 = process_video(base_dir, cam_file.decode('utf-8'))
+		except ValueError as e:
+			_log('VIDEO', f"Error processing video for shot {shot_num}: {e}")
+			continue
 		except FileNotFoundError as e:
 			_log('VIDEO', f"No video file found for shot {shot_num}; skipping...")
 			continue
@@ -352,134 +355,7 @@ def xray_wt_cam(base_dir, fn):
 		
 
 	plt.show(block=True)
-	
 
-def plot_result(base_dir, uw_start=30):
-    """
-    Interactive animation of counts vs position over time.
-    - X-axis: position r_arr (cm)
-    - Y-axis: X-ray counts
-    - Frames: time slices defined by bin_centers (ms)
-    """
-    from matplotlib.widgets import Slider
-
-    # Load cached results
-    analysis_file = os.path.join(base_dir, 'analysis_results.npy')
-    tracking_file = os.path.join(base_dir, 'tracking_result.npy')
-
-    analysis_dict = np.load(analysis_file, allow_pickle=True).item()
-    tracking_dict = np.load(tracking_file, allow_pickle=True).item()
-
-    # Flatten all points: arrays of time (ms), radius (cm), counts (raw)
-    all_t_ms = []
-    all_r_cm = []
-    all_c = []
-
-    for key, item in tracking_dict.items():
-        if item[1] is None:
-            # missing ct for this video
-            continue
-        prefixes = os.path.basename(key)[:2]
-        shot_numbers = int(os.path.basename(key).split('_shot')[1][:3])
-        t0 = item[1]  # seconds
-
-        analysis_key = f"{prefixes}_{shot_numbers:03d}"
-        pulse_tarr, pulse_amp = analysis_dict.get(analysis_key, ([], []))
-        if len(pulse_tarr) == 0:
-            continue
-
-        # bin_centers in ms; counts are per-bin photon counts
-        bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=1)
-        # Convert to seconds for kinematics, then to cm
-        time_seconds = (bin_centers + uw_start) * 1e-3
-        r_arr_cm = get_pos_freefall(time_seconds, t0) * 100.0
-
-        all_t_ms.extend(bin_centers.tolist())
-        all_r_cm.extend(r_arr_cm.tolist())
-        all_c.extend(counts.tolist())
-
-    if len(all_t_ms) == 0:
-        _log('PLOT', 'No data available to plot')
-        return
-
-    all_t_ms = np.asarray(all_t_ms, dtype=float)
-    all_r_cm = np.asarray(all_r_cm, dtype=float)
-    all_c = np.asarray(all_c, dtype=float)
-
-    # Stable axes across animation
-    pos_min, pos_max = float(np.min(all_r_cm)), float(np.max(all_r_cm))
-    pad = max(1.0, 0.05 * (pos_max - pos_min))
-    y_max = float(np.max(all_c)) if all_c.size else 1.0
-
-    tmin = float(np.min(all_t_ms))
-    tmax = float(np.max(all_t_ms))
-    # Discrete 1 ms ticks for the slider
-    frame_ticks = np.arange(np.floor(tmin), np.ceil(tmax) + 1.0, 1.0)
-
-    fig, ax = plt.subplots(figsize=(12, 8))
-    plt.subplots_adjust(bottom=0.25)
-
-    ax_slider = plt.axes([0.2, 0.1, 0.6, 0.03])
-    slider = Slider(ax_slider, 'Time (ms)',
-                    tmin, tmax,
-                    valinit=frame_ticks[0], valstep=frame_ticks)
-
-    def draw_frame(t_ms):
-        ax.clear()
-        ax.set_xlabel('Position (cm)')
-        ax.set_ylabel('X-ray Counts')
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(pos_min - pad, pos_max + pad)
-        ax.set_ylim(0, y_max * 1.1)
-
-        # Select all points within the 1 ms bin centered at t_ms
-        mask = (all_t_ms >= (t_ms - 0.5)) & (all_t_ms < (t_ms + 0.5))
-        r_vals = all_r_cm[mask]
-        c_vals = all_c[mask]
-
-        if r_vals.size > 0:
-            # Plot lines between points in radius order for readability
-            idx = np.argsort(r_vals)
-            ax.plot(r_vals[idx], c_vals[idx], 'o-', linewidth=2, markersize=6, alpha=0.85, color='tab:blue')
-            ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms   (n={r_vals.size})')
-        else:
-            ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms   (n=0)')
-
-        fig.canvas.draw_idle()
-
-    def on_slide(val):
-        draw_frame(slider.val)
-
-    slider.on_changed(on_slide)
-
-    # Initial frame
-    draw_frame(frame_ticks[0])
-
-    # Play/Pause controller
-    class Player:
-        def __init__(self):
-            self.play = False
-            self.idx = 0
-        def toggle(self, event=None):
-            self.play = not self.play
-            if self.play:
-                # jump to nearest tick
-                self.idx = int(np.argmin(np.abs(frame_ticks - slider.val)))
-                self.loop()
-        def loop(self):
-            if not self.play:
-                return
-            slider.set_val(frame_ticks[self.idx])
-            self.idx = (self.idx + 1) % len(frame_ticks)
-            fig.canvas.start_event_loop(0.1)
-            self.loop()
-
-    player = Player()
-    ax_btn = plt.axes([0.85, 0.1, 0.1, 0.05])
-    btn = plt.Button(ax_btn, 'Play/Pause')
-    btn.on_clicked(player.toggle)
-
-    plt.show(block=True)
 # def plot_result(base_dir, uw_start=30):
 
 #     # Load analysis_dict
@@ -523,7 +399,36 @@ def plot_result(base_dir, uw_start=30):
 
 
 
+def batch_process_xray(base_dir):
+	"""
+	Batch process all HDF5 files in base_dir using xray_wt_cam,
+	skipping files whose prefix already exists in analysis_results.npy.
+	"""
+	analysis_file = os.path.join(base_dir, 'analysis_results.npy')
+	# Load or initialize analysis_dict
+	if os.path.exists(analysis_file):
+		try:
+			analysis_dict = np.load(analysis_file, allow_pickle=True).item()
+		except Exception as e:
+			_log('ANALYSIS', f"Error loading analysis results: {e}")
+			analysis_dict = {}
+	else:
+		analysis_dict = {}
 
+	# Find all .hdf5 files in base_dir
+	hdf5_files = [f for f in os.listdir(base_dir) if f.endswith('.hdf5')]
+
+	for fn in hdf5_files:
+		prefix = fn[:2]
+		for key in analysis_dict.keys():
+			if isinstance(key, str) and prefix in key:
+				print(f"Skipping already processed {fn} ")
+				break
+			else:
+				print(f"Processing {fn} ...")
+				xray_wt_cam(base_dir, fn)
+				# After processing one file, break to re-evaluate the analysis_dict
+				break
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -532,9 +437,19 @@ def plot_result(base_dir, uw_start=30):
 if __name__ == "__main__":
 
 	base_dir = r"F:\AUG2025\P24"
-
-	plot_result(base_dir, uw_start=30)
-
-	if False:
-		fn = "11_He1kG430G_5800A_K-30_2025-08-12.hdf5"
-		xray_wt_cam(base_dir, fn)
+	xray_wt_cam(base_dir, '02_He1kG430G_5800A_K-25_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '22_He1kG430G_5800A_K-15_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '23_He1kG430G_5800A_K-15_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '24_He1kG430G_5800A_K-10_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '25_He1kG430G_5800A_K-10_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '26_He1kG430G_5800A_K-10_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '27_He1kG430G_5800A_K-5_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '28_He1kG430G_5800A_K-5_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '29_He1kG430G_5800A_K0_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '30_He1kG430G_5800A_K0_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '31_He1kG430G_5800A_K0_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '32_He1kG430G_5800A_K10_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '33_He1kG430G_5750A_K10_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '34_He1kG430G_5750A_K10_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '35_He1kG430G_5750A_K15_2025-08-12.hdf5')
+	xray_wt_cam(base_dir, '36_He1kG430G_5750A_K15_2025-08-12.hdf5')
