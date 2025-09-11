@@ -282,7 +282,7 @@ def show_tracking_results(tr_ifn):
         print(f"Found {len(tracking_dict)} entries in tracking results\n")
         
         for filepath, (cf, ct) in tracking_dict.items():
-            print(f"File: {os.path.basename(filepath)}")
+            print(filepath)
             if cf is None or ct is None:
                 print("  Frame: None")
                 print("  Time: None")
@@ -290,5 +290,17 @@ def show_tracking_results(tr_ifn):
                 print(f"  Frame: {cf}")
                 print(f"  Time: {ct:.6f}s")
             print()
+    else:
+        print(f"No tracking results file found at {tr_ifn}")
+
+def delete_tracking_entry(tr_ifn, filepath):
+    if os.path.exists(tr_ifn):
+        tracking_dict = np.load(tr_ifn, allow_pickle=True).item()
+        if filepath in tracking_dict:
+            del tracking_dict[filepath]
+            np.save(tr_ifn, tracking_dict)
+            print(f"Deleted entry for {os.path.basename(filepath)}")
+        else:
+            print(f"No entry found for {os.path.basename(filepath)}")
     else:
         print(f"No tracking results file found at {tr_ifn}")
