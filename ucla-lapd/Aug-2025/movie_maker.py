@@ -23,12 +23,14 @@ from data_analysis_utils import counts_per_bin  # noqa: E402
 from object_tracking.track_object import get_pos_freefall  # noqa: E402
 
 
-def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, pos_min, pos_max, xpad):
+def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, pos_min, pos_max):
     ax.clear()
     ax.set_xlabel('Position (cm)')
     ax.set_ylabel('X-ray Counts')
     ax.grid(True, alpha=0.3)
-    ax.set_xlim(pos_min - xpad, pos_max + xpad)
+    ymax = float(np.max(all_c))
+    ax.set_xlim(0,50)
+    ax.set_ylim(0, ymax * 1.2)
 
     # Select points in [t_ms-0.5, t_ms+0.5)
     mask = (all_t_ms >= (t_ms - 0.5)) & (all_t_ms < (t_ms + 0.5))
@@ -44,13 +46,9 @@ def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, pos_min, pos_max, xpad)
                 dr = 0.02 * max(1.0, pos_max - pos_min)
         else:
             dr = 0.02 * max(1.0, pos_max - pos_min)
+
         bar_w = max(0.8 * dr, 0.2)
-
         ax.bar(r_vals, c_vals, width=bar_w, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
-
-        # Dynamic Y range per frame
-        ymax = float(np.max(c_vals))
-        ax.set_ylim(0, max(1.0, ymax * 1.2))
         ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms   (n={r_vals.size})')
     else:
         ax.set_ylim(0, 1.0)
@@ -60,7 +58,7 @@ def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, pos_min, pos_max, xpad)
 
 
 class Player:
-    def __init__(self, slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, pos_min, pos_max, xpad):
+    def __init__(self, slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, pos_min, pos_max):
         self.play = False
         self.idx = 0
         self.slider = slider
@@ -72,7 +70,6 @@ class Player:
         self.all_c = all_c
         self.pos_min = pos_min
         self.pos_max = pos_max
-        self.xpad = xpad
 
     def toggle(self, event=None):
         self.play = not self.play
@@ -85,7 +82,7 @@ class Player:
             return
         t_ms = self.frame_ticks[self.idx]
         self.slider.set_val(t_ms)
-        draw_frame(self.ax, self.fig, self.all_t_ms, self.all_r_cm, self.all_c, t_ms, self.pos_min, self.pos_max, self.xpad)
+        draw_frame(self.ax, self.fig, self.all_t_ms, self.all_r_cm, self.all_c, t_ms, self.pos_min, self.pos_max)
         self.idx = (self.idx + 1) % len(self.frame_ticks)
         self.fig.canvas.start_event_loop(0.1)
         self.loop()
@@ -125,7 +122,7 @@ def plot_result(base_dir, uw_start=30):
 
         # bin_centers in ms; counts are per-bin photon counts
         bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=1)
-        # Convert to seconds for kinematics, then to cm
+
         time_seconds = (bin_centers + uw_start) * 1e-3
         r_arr_cm = get_pos_freefall(time_seconds, t0) * 100.0
 
@@ -143,7 +140,6 @@ def plot_result(base_dir, uw_start=30):
 
     # Fixed X-axis across frames; dynamic Y-axis per frame
     pos_min, pos_max = float(np.min(all_r_cm)), float(np.max(all_r_cm))
-    xpad = max(1.0, 0.05 * (pos_max - pos_min))
 
     tmin = float(np.min(all_t_ms))
     tmax = float(np.max(all_t_ms))
@@ -151,6 +147,9 @@ def plot_result(base_dir, uw_start=30):
 
     fig, ax = plt.subplots(figsize=(12, 8))
     plt.subplots_adjust(bottom=0.25)
+        # Dynamic Y range per frame
+    ax.set_xlim(0, 50)
+
 
     ax_slider = plt.axes([0.2, 0.1, 0.6, 0.03])
     slider = Slider(ax_slider, 'Time (ms)',
@@ -158,14 +157,14 @@ def plot_result(base_dir, uw_start=30):
                     valinit=frame_ticks[0], valstep=frame_ticks)
 
     def on_slide(val):
-        draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, slider.val, pos_min, pos_max, xpad)
+        draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, slider.val, pos_min, pos_max)
 
     slider.on_changed(on_slide)
 
     # Initial frame
-    draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, frame_ticks[0], pos_min, pos_max, xpad)
+    draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, frame_ticks[0], pos_min, pos_max)
 
-    player = Player(slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, pos_min, pos_max, xpad)
+    player = Player(slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, pos_min, pos_max)
     ax_btn = plt.axes([0.85, 0.1, 0.1, 0.05])
     btn = Button(ax_btn, 'Play/Pause')
     btn.on_clicked(player.toggle)
