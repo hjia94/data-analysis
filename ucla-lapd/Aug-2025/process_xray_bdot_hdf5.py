@@ -261,17 +261,17 @@ def process_video(base_dir, cam_file):
 			raise ValueError(f"Could not read frame")
 		cap.release()
 
-	fig, ax = plt.subplots(figsize=(8, 8))
-	ax.set_title(cam_file)
+	# fig, ax = plt.subplots(figsize=(8, 8))
+	# ax.set_title(cam_file)
 
-	ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-	(cx, cy), chamber_radius = detect_chamber(frame)
-	chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
-	ax.add_patch(chamber_circle)
-	_log('VIDEO', f"ball reaches chamber center at t={ct * 1e3:.3f}ms from plasma trigger")
-	ax.axis('off')
-	plt.draw()
-	plt.pause(0.1)
+	# ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+	# (cx, cy), chamber_radius = detect_chamber(frame)
+	# chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
+	# ax.add_patch(chamber_circle)
+	# _log('VIDEO', f"ball reaches chamber center at t={ct * 1e3:.3f}ms from plasma trigger")
+	# ax.axis('off')
+	# plt.draw()
+	# plt.pause(0.1)
 
 	return ct
 
@@ -310,7 +310,7 @@ def xray_wt_cam(base_dir, fn):
 				_log('FILE', f"Warning: shot number {shot_num} does not match {cam_file}")
 
 			result = read_hdf5_all_scopes_channels(f, shot_num, include_tarr=True)
-			tarr_P, P_data = get_magnetron_power_data(f, result)
+			# tarr_P, P_data = get_magnetron_power_data(f, result)
 			tarr_x, xray_data = get_xray_data(result)
 
 		try:
@@ -322,16 +322,16 @@ def xray_wt_cam(base_dir, fn):
 			_log('VIDEO', f"No video file found for shot {shot_num}; skipping...")
 			continue
 
-		# Plot power data if available
-		if P_data is not None and tarr_P is not None:
-			fig, ax = plt.subplots(figsize=(15, 5), num=f"shot_{shot_num}")
-			ax.plot(tarr_P*1e3, P_data*1e-4, 'b-', linewidth=2)
-			ax.set_xlabel('Time (ms)')
-			ax.set_ylabel('Power (kW)')
-			ax.grid(True)
-			plt.tight_layout()
-			plt.draw()
-			plt.pause(0.1)
+		# # Plot power data if available
+		# if P_data is not None and tarr_P is not None:
+		# 	fig, ax = plt.subplots(figsize=(15, 5), num=f"shot_{shot_num}")
+		# 	ax.plot(tarr_P*1e3, P_data*1e-4, 'b-', linewidth=2)
+		# 	ax.set_xlabel('Time (ms)')
+		# 	ax.set_ylabel('Power (kW)')
+		# 	ax.grid(True)
+		# 	plt.tight_layout()
+		# 	plt.draw()
+		# 	plt.pause(0.1)
 		
 
 		# Create composite key: file_prefix + shot_number (e.g., "02_001", "02_002")
@@ -436,20 +436,7 @@ def batch_process_xray(base_dir):
 
 if __name__ == "__main__":
 
-	base_dir = r"F:\AUG2025\P24"
-	xray_wt_cam(base_dir, '02_He1kG430G_5800A_K-25_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '22_He1kG430G_5800A_K-15_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '23_He1kG430G_5800A_K-15_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '24_He1kG430G_5800A_K-10_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '25_He1kG430G_5800A_K-10_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '26_He1kG430G_5800A_K-10_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '27_He1kG430G_5800A_K-5_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '28_He1kG430G_5800A_K-5_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '29_He1kG430G_5800A_K0_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '30_He1kG430G_5800A_K0_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '31_He1kG430G_5800A_K0_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '32_He1kG430G_5800A_K10_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '33_He1kG430G_5750A_K10_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '34_He1kG430G_5750A_K10_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '35_He1kG430G_5750A_K15_2025-08-12.hdf5')
-	xray_wt_cam(base_dir, '36_He1kG430G_5750A_K15_2025-08-12.hdf5')
+	base_dir = r"F:\AUG2025\P23"
+	xray_wt_cam(base_dir, '48_He1kG430G_5450A_P23_K0_2025-08-14.hdf5')
+	xray_wt_cam(base_dir, '49_He1kG430G_5450A_P23_K-10_2025-08-14.hdf5')
+	xray_wt_cam(base_dir, '50_He1kG430G_5450A_P23_K-10_2025-08-14')
