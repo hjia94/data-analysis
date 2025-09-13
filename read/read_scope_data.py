@@ -307,7 +307,7 @@ def read_hdf5_scope_data(f, scope_name, channel_name, shot_number):
 	gain = header.hdr.vertical_gain
 	offset = header.hdr.vertical_offset
 	voltage_data = raw_data.astype(np.float64) * gain - offset
-	return voltage_data
+	return voltage_data, header.dt, header.t0
 
 #======================================================================================
 
@@ -345,6 +345,8 @@ def read_hdf5_all_scopes_channels(f, shot_number, include_tarr=True):
 	for scope_name, scope_group in f.items():
 		if scope_name in skip_groups:
 			continue
+		else:
+			result[scope_name] = {}
 		shot_group_name = f'shot_{shot_number}'
 		if shot_group_name not in scope_group:
 			print(f"Scope '{scope_name}' is not recorded for shot '{shot_number}'")
@@ -354,20 +356,25 @@ def read_hdf5_all_scopes_channels(f, shot_number, include_tarr=True):
 		if attrs.get('skipped', False):
 			print(f"Shot {shot_number} for scope '{scope_name}' was skipped: {attrs.get('skip_reason', 'Unknown reason')}")
 			continue
-		if include_tarr:
-			try:
-				tarr = read_hdf5_scope_tarr(f, scope_name)
-				result[scope_name] = {'time_array': tarr}
-			except Exception as e:
-				print(f"Could not read time array for scope '{scope_name}': {e}")
-				tarr = None
+
 		channels = {}
 		for key, ds in shot_group.items():
 			if not (isinstance(ds, h5py.Dataset) and key.endswith('_data')):
 				continue
 			channel_name = key[:-5]
-			channels[channel_name] = read_hdf5_scope_data(f, scope_name, channel_name, shot_number)
+			data, dt, t0 = read_hdf5_scope_data(f, scope_name, channel_name, shot_number)
+			channels[channel_name] = data
 		result[scope_name]['channels'] = channels
+
+		if include_tarr:
+			try:
+				tarr = read_hdf5_scope_tarr(f, scope_name)
+				if len(tarr) != len(data):
+					tarr = np.arange(len(data)) * dt + t0
+				result[scope_name]['time_array'] = tarr
+			except Exception as e:
+				print(f"Could not read time array for scope '{scope_name}': {e}")
+				tarr = None
 
 	return result
 
