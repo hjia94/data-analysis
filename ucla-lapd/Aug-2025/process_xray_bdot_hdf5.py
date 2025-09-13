@@ -15,6 +15,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from matplotlib import colors
+import matplotlib.colors as colors  # Ensure we have colors for LogNorm
 from scipy import ndimage
 import tkinter as tk
 import cv2
@@ -96,98 +97,112 @@ def get_bdot_data(f, result, scope_name='bdotscope'):
 	#     if m:
 	#         p_number = int(m.group(1))
 
-	return tarr, chan_data
+	return tarr, chan_data, descriptions
 
 
-def read_bdot_signals_from_hdf5(hdf5_filename, debug=False):
-	"""Minimal reader for Bdot signals to support processing.
-	Returns (tarr_B, bdot_data, channel_info) or (None, {}, {}) on failure.
-	"""
-	try:
-		with h5py.File(hdf5_filename, 'r') as f:
-			if 'bdotscope' not in f:
-				return None, {}, {}
-			scope = f['bdotscope']
-			tarr_B = scope.get('time_array')[()]
-			bdot_data = {}
-			if 'channels' in scope:
-				for ch in scope['channels']:
-					bdot_data[ch] = scope['channels'][ch][()]
-			try:
-				channel_info = read_scope_channel_descriptions(f, 'bdotscope')
-			except Exception:
-				channel_info = {}
-			return tarr_B, bdot_data, channel_info
-	except Exception as e:
-		if debug:
-			_log('BDOT', f"Error reading {hdf5_filename}: {e}")
-		return None, {}, {}
-
-def calculate_bdot_stft(tarr_B, bdot_data, channel_info, freq_bins=1000, overlap_fraction=0.05, freq_min=200e6, freq_max=2000e6):
+def calculate_bdot_stft(tarr, bdot_data, freq_bins=1000, overlap_fraction=0.05, freq_min=200e6, freq_max=2000e6):
 	'''
 	Calculates STFT for each Bdot signal in bdot_data.
-	Returns: stft_time, freq, stft_matrix1, stft_matrix2, stft_matrix3, stft_matrices
+	
+	Parameters:
+	- tarr: Time array for Bdot signals from get_bdot_data
+	- bdot_data: Dictionary of Bdot data channels from get_bdot_data
+	- freq_bins: Number of frequency bins for STFT
+	- overlap_fraction: Fraction of overlap for STFT windows
+	- freq_min: Minimum frequency to include in STFT
+	- freq_max: Maximum frequency to include in STFT
+	
+	Returns: 
+	- stft_time: Time array for STFT
+	- freq: Frequency array for STFT
+	- stft_matrices: Dictionary of all STFT matrices by channel name
 	'''
 	stft_matrices = {}
 	stft_time = None
 	freq = None
+	
+	# Process each channel in bdot_data
 	for channel, data in bdot_data.items():
 		if data is not None:
-			freq, stft_matrix, stft_time = calculate_stft(tarr_B, data, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
+			freq, stft_matrix, stft_time = calculate_stft(tarr, data, freq_bins, overlap_fraction, 'hanning', freq_min, freq_max)
 			stft_matrices[channel] = stft_matrix
+			_log('STFT', f"Calculated STFT for channel {channel}")
 		else:
 			stft_matrices[channel] = None
-	channels = sorted([ch for ch in channel_info.keys() if ch.startswith('C')])
-	stft_matrix1 = stft_matrices.get(channels[0]) if len(channels) > 0 else None
-	stft_matrix2 = stft_matrices.get(channels[1]) if len(channels) > 1 else None
-	stft_matrix3 = stft_matrices.get(channels[2]) if len(channels) > 2 else None
-	return stft_time, freq, stft_matrix1, stft_matrix2, stft_matrix3, stft_matrices
+			_log('STFT', f"Skipped STFT for channel {channel} (no data)")
+	
 
-def process_shot_bdot(file_number, base_dir, debug=False):
+	return stft_time, freq,  stft_matrices
+
+def process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq_max=1000e6, plot=True):
 	"""
-	Process Bdot signals for a specific shot number.
-	Returns the STFT time array, frequency array, and STFT matrices for three channels.
+	Process Bdot data from an HDF5 file by averaging STFT across all shots for each channel.
 	
-	Args:
-		file_number: The shot number to process
-		base_dir: Base directory containing the HDF5 files
-		debug: Whether to print debug information
-		
+	Parameters:
+	- ifn: Path to the HDF5 file
+	- freq_bins: Number of frequency bins for STFT
+	- overlap_fraction: Fraction of overlap for STFT windows
+	- freq_min: Minimum frequency to include in STFT (Hz)
+	- freq_max: Maximum frequency to include in STFT (Hz)
+	- plot: Whether to create and display plots
+	
 	Returns:
-		stft_tarr: Time array for the STFT
-		freq_arr: Frequency array for the STFT
-		stft_matrix1, stft_matrix2, stft_matrix3: STFT matrices for three channels
+	- Dictionary of averaged STFT matrices by channel
+	- Dictionary of channel descriptions
+	- Time array for STFT
+	- Frequency array for STFT
 	"""
-	# Construct the HDF5 filename
-	hdf5_filename = os.path.join(base_dir, f'{file_number}.hdf5')
+	_log('BDOT', f"Processing Bdot data from {os.path.basename(ifn)}")
 	
-	if not os.path.exists(hdf5_filename):
-		print(f"Error: HDF5 file not found: {hdf5_filename}")
-		return None, None, None, None, None
+	# Open the HDF5 file
+	with h5py.File(ifn, 'r') as f:
+		# Get the shot numbers
+		shot_numbers = f['Control/FastCam']['shot number'][()]
+		_log('BDOT', f"Found {len(shot_numbers)} shots")
+		
+		# Initialize dictionaries to store STFT matrices and descriptions
+		all_stft_matrices = {}  # Format: {channel: [stft_matrix1, stft_matrix2, ...]}
+		stft_tarr_final = None
+		freq_arr_final = None
+		
+		# Process each shot
+		for shot_num in shot_numbers:
+			_log('BDOT', f"Processing shot {shot_num}")
+			
+			# Get the Bdot data for this shot
+			result = read_hdf5_all_scopes_channels(f, shot_num)
+			tarr_B, bdot_data, descriptions = get_bdot_data(f, result)
+			
+			if tarr_B is None or len(bdot_data) == 0:
+				_log('BDOT', f"No Bdot data for shot {shot_num}")
+				continue
+			
+			# Calculate STFT for each channel
+			stft_tarr, freq_arr, stft_matrices = calculate_bdot_stft(tarr_B, bdot_data, freq_bins, overlap_fraction, freq_min, freq_max)
+			
+			# Store the results
+			for channel, matrix in stft_matrices.items():
+				if channel not in all_stft_matrices:
+					all_stft_matrices[channel] = []
+				if matrix is not None:
+					all_stft_matrices[channel].append(matrix)
+			
+			# Store the time and frequency arrays (assumed to be the same for all shots)
+			if stft_tarr is not None and freq_arr is not None:
+				stft_tarr_final = stft_tarr
+				freq_arr_final = freq_arr
 	
-	# Read the Bdot signals
-	tarr_B, bdot_data, channel_info = read_bdot_signals_from_hdf5(hdf5_filename, debug=debug)
+	# Calculate average STFT for each channel
+	avg_stft_matrices = {}
+	for channel, matrices in all_stft_matrices.items():
+		if matrices:  # If there are any valid matrices for this channel
+			avg_stft_matrices[channel] = np.mean(np.array(matrices), axis=0)
+			_log('BDOT', f"Averaged {len(matrices)} STFT matrices for channel {channel}")
 	
-	if tarr_B is None or len(bdot_data) == 0:
-		print(f"Error: Failed to read Bdot signals from {hdf5_filename}")
-		return None, None, None, None, None
-	
-	# Calculate the STFT for each channel
-	stft_tarr, freq_arr, stft_matrices = calculate_bdot_stft(tarr_B, bdot_data, channel_info)
-	
-	# Extract the STFT matrices for the three channels (assuming they exist)
-	channels = list(stft_matrices.keys())
-	if len(channels) >= 3:
-		stft_matrix1 = stft_matrices[channels[0]]
-		stft_matrix2 = stft_matrices[channels[1]]
-		stft_matrix3 = stft_matrices[channels[2]]
-	else:
-		# Handle the case where we don't have three channels
-		stft_matrix1 = stft_matrices.get(channels[0], None) if channels else None
-		stft_matrix2 = stft_matrices.get(channels[1], None) if len(channels) > 1 else None
-		stft_matrix3 = stft_matrices.get(channels[2], None) if len(channels) > 2 else None
-	
-	return stft_tarr, freq_arr, stft_matrix1, stft_matrix2, stft_matrix3
+
+	if plot and avg_stft_matrices:
+		plot_averaged_bdot_stft(avg_stft_matrices, descriptions, stft_tarr_final, freq_arr_final)
+
 
 def process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False):
 	"""Process a single shot of xray data and return data for averaging.
@@ -198,7 +213,7 @@ def process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False):
 
 	return detector.pulse_times, detector.pulse_amplitudes
 
-def process_video(base_dir, cam_file):
+def process_video(base_dir, cam_file, tracking_dict={}, tracking_file=None, plotting=False):
 	'''
 	Process the video file for a given shot number and return the time at which the ball reaches the chamber center
 	'''
@@ -207,13 +222,6 @@ def process_video(base_dir, cam_file):
 	if not os.path.exists(filepath):
 		raise FileNotFoundError("Video file does not exist.")
 	avi_path = os.path.join(base_dir, f"{os.path.splitext(cam_file)[0]}.avi")
-
-	# Initialize or load the tracking result dictionary
-	tracking_file = os.path.join(base_dir, f"tracking_result.npy")
-	if os.path.exists(tracking_file):
-		tracking_dict = np.load(tracking_file, allow_pickle=True).item()
-	else:
-		tracking_dict = {}
 
 	# Check if we already have results for this file
 	if filepath in tracking_dict:
@@ -240,7 +248,8 @@ def process_video(base_dir, cam_file):
 			# Save result with None frame
 			try:
 				tracking_dict[filepath] = (cf, ct)
-				np.save(tracking_file, tracking_dict)
+				if tracking_file is not None:
+					np.save(tracking_file, tracking_dict)
 			except Exception as e:
 				_log('VIDEO', f"Error saving tracking results: {e}")
 			return ct
@@ -252,8 +261,7 @@ def process_video(base_dir, cam_file):
 			except Exception as e:
 				_log('VIDEO', f"Error saving tracking results: {e}")
 
-	# For plotting
-	if cf is not None:
+	if plotting and cf is not None:
 		cap = cv2.VideoCapture(avi_path)
 		cap.set(cv2.CAP_PROP_POS_FRAMES, cf)
 		ret, frame = cap.read()
@@ -261,19 +269,72 @@ def process_video(base_dir, cam_file):
 			raise ValueError(f"Could not read frame")
 		cap.release()
 
-	# fig, ax = plt.subplots(figsize=(8, 8))
-	# ax.set_title(cam_file)
+		fig, ax = plt.subplots(figsize=(8, 8))
+		ax.set_title(cam_file)
 
-	# ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-	# (cx, cy), chamber_radius = detect_chamber(frame)
-	# chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
-	# ax.add_patch(chamber_circle)
-	# _log('VIDEO', f"ball reaches chamber center at t={ct * 1e3:.3f}ms from plasma trigger")
-	# ax.axis('off')
-	# plt.draw()
-	# plt.pause(0.1)
+		ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+		(cx, cy), chamber_radius = detect_chamber(frame)
+		chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
+		ax.add_patch(chamber_circle)
+		_log('VIDEO', f"ball reaches chamber center at t={ct * 1e3:.3f}ms from plasma trigger")
+		ax.axis('off')
+		plt.draw()
+		plt.pause(0.1)
 
 	return ct
+
+def plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr):
+	"""
+	Plot averaged Bdot STFT data for each channel.
+	
+	Parameters:
+	- stft_matrices: Dictionary of averaged STFT matrices by channel
+	- channel_description: String description for the channel
+	- stft_tarr: Time array for STFT (seconds)
+	- freq_arr: Frequency array for STFT (Hz)
+	"""
+	# Get the number of channels
+	num_channels = len(stft_matrices)
+	if num_channels == 0:
+		_log('PLOT', "No STFT matrices to plot")
+		return None
+	
+	# Create figure with subplots
+	fig, axes = plt.subplots(num_channels, 1, figsize=(8,8), 
+							num="Averaged_Bdot_STFT", sharex=True)
+	
+	# Handle the case of a single channel (axes is not an array)
+	if num_channels == 1:
+		axes = [axes]
+	
+	# Sort the channels for consistent display
+	channels = sorted(stft_matrices.keys())
+	
+	# Plot each STFT matrix
+	for i, channel in enumerate(channels):
+		matrix = stft_matrices[channel]
+		
+		# Create the plot - ensure matrix has positive values for LogNorm
+		positive_matrix = matrix.copy()
+		min_positive = positive_matrix[positive_matrix > 0].min() if np.any(positive_matrix > 0) else 1e-10
+		positive_matrix[positive_matrix <= 0] = min_positive
+		
+		im = axes[i].imshow(positive_matrix.T,
+						  aspect='auto',
+						  origin='lower',
+						  extent=[stft_tarr[0]*1e3, stft_tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
+						  interpolation='None',
+						  cmap='jet',
+						  norm=colors.LogNorm(vmin=min_positive, 
+										  vmax=positive_matrix.max()))
+		
+		axes[i].set_ylabel('Frequency (MHz)')
+		axes[i].set_title(description[channel])
+		fig.colorbar(im, ax=axes[i], label='Magnitude')
+	
+	# Set common x-axis label
+	axes[-1].set_xlabel('Time (ms)')
+	plt.show(block=True)
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -282,121 +343,68 @@ def process_video(base_dir, cam_file):
 def xray_wt_cam(base_dir, fn):
 	# Define path
 	ifn = os.path.join(base_dir, fn)
-	analysis_file = os.path.join(base_dir, 'analysis_results.npy')
 	
 	# Extract two-digit prefix from filename (e.g., "02" from "02_He1kG430G_5800A_K-25_2025-08-12.hdf5")
 	file_prefix = fn[:2]
-	
+
 	# Initialize or load the analysis dictionary
-	analysis_dict = {}
+	analysis_file = os.path.join(base_dir, 'analysis_results.npy')
 	if os.path.exists(analysis_file):
-		try:
-			analysis_dict = np.load(analysis_file, allow_pickle=True).item()
-		except Exception as e:
-			_log('ANALYSIS', f"Error loading analysis results: {e}")
-			analysis_dict = {}
-	
+		analysis_dict = np.load(analysis_file, allow_pickle=True).item()
+	else:
+		analysis_dict = {}
+		
+	# Initialize or load the tracking result dictionary
+	tracking_file = os.path.join(base_dir, f"tracking_result.npy")
+	if os.path.exists(tracking_file):
+		tracking_dict = np.load(tracking_file, allow_pickle=True).item()
+	else:
+		tracking_dict = {}
+
 	with h5py.File(ifn, 'r') as f:
+		_log('FILE', f"Opened file {ifn} for processing.")
 		shot_numbers = f['Control/FastCam']['shot number'][()]
 
 	for shot_num in shot_numbers:
 		_log('SHOT', f"Processing shot {shot_num}")
+		analysis_key = f"{file_prefix}_{shot_num:03d}"
 
 		with h5py.File(ifn, 'r') as f:
-			_log('FILE', f"Reading data from {ifn}")
 			cine_narr = f['Control/FastCam/cine file name'][()]
-			cam_file = cine_narr[shot_num-1]
+			cam_file = cine_narr[shot_num-1].decode('utf-8')
 			if shot_num != int(cam_file[-8:-5]):
 				_log('FILE', f"Warning: shot number {shot_num} does not match {cam_file}")
+			mfn = os.path.join(base_dir, cam_file)
 
-			result = read_hdf5_all_scopes_channels(f, shot_num, include_tarr=True)
-			# tarr_P, P_data = get_magnetron_power_data(f, result)
-			tarr_x, xray_data = get_xray_data(result)
-
-		try:
-			t0 = process_video(base_dir, cam_file.decode('utf-8'))
-		except ValueError as e:
-			_log('VIDEO', f"Error processing video for shot {shot_num}: {e}")
-			continue
-		except FileNotFoundError as e:
-			_log('VIDEO', f"No video file found for shot {shot_num}; skipping...")
-			continue
-
-		# # Plot power data if available
-		# if P_data is not None and tarr_P is not None:
-		# 	fig, ax = plt.subplots(figsize=(15, 5), num=f"shot_{shot_num}")
-		# 	ax.plot(tarr_P*1e3, P_data*1e-4, 'b-', linewidth=2)
-		# 	ax.set_xlabel('Time (ms)')
-		# 	ax.set_ylabel('Power (kW)')
-		# 	ax.grid(True)
-		# 	plt.tight_layout()
-		# 	plt.draw()
-		# 	plt.pause(0.1)
-		
-
-		# Create composite key: file_prefix + shot_number (e.g., "02_001", "02_002")
-		analysis_key = f"{file_prefix}_{shot_num:03d}"
-		if analysis_key in analysis_dict:
-			pulse_tarr, pulse_amp = analysis_dict[analysis_key]
-			_log('ANALYSIS', f"Using cached analysis for {analysis_key}")
-		else:
-			threshold = [5, 70]
-			min_ts = 0.8e-6
-			d = 0.1
-			pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold)
-
-			# Save new results with composite key
-			analysis_dict[analysis_key] = (pulse_tarr, pulse_amp)
+		if mfn not in tracking_dict.keys():
+			_log('TRACKING', f"Analyzing video {cam_file} for tracking...")
 			try:
-				np.save(analysis_file, analysis_dict)
-				_log('ANALYSIS', f"Added new analysis result for {analysis_key}")
-			except Exception as e:
-				_log('ANALYSIS', f"Error saving analysis results: {e}")
-		
+				t0 = process_video(base_dir, cam_file, tracking_dict=tracking_dict, tracking_file=tracking_file)
+			except ValueError as e:
+				_log('VIDEO', f"Error processing video for shot {shot_num}: {e}")
+				continue
+			except FileNotFoundError as e:
+				_log('VIDEO', f"No video file found for shot {shot_num}; skipping...")
+				continue
 
-	plt.show(block=True)
+		if analysis_key in analysis_dict:
+			_log('ANALYSIS', f"Analysis result exists for {analysis_key}")
+		else:
+			with h5py.File(ifn, 'r') as f:
+				result = read_hdf5_all_scopes_channels(f, shot_num, include_tarr=True)
+				# tarr_P, P_data = get_magnetron_power_data(f, result)
+				tarr_x, xray_data = get_xray_data(result)
+				threshold = [5, 70]
+				min_ts = 0.8e-6
+				d = 0.1
+				pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold)
 
-# def plot_result(base_dir, uw_start=30):
-
-#     # Load analysis_dict
-#     analysis_file = os.path.join(base_dir, 'analysis_results.npy')
-#     tracking_file = os.path.join(base_dir, 'tracking_result.npy')
-
-#     analysis_dict = np.load(analysis_file, allow_pickle=True).item()
-#     tracking_dict = np.load(tracking_file, allow_pickle=True).item()
-
-
-#     _log('PLOT', "Creating single combined X-ray counts plot with all data...")
-#     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-
-#     all_bin_centers, all_r_positions, all_counts = [], [], []
-#     for key, item in tracking_dict.items():
-#         if item[1] is None:
-#             _log('PLOT', f"Skipping {key} due to missing tracking data.")
-#             continue
-#         prefixes = os.path.basename(key)[:2]
-#         shot_numbers = int(os.path.basename(key).split('_shot')[1][:3])
-#         t0 = item[1]
-
-#         analysis_key = f"{prefixes}_{shot_numbers:03d}"
-#         pulse_tarr, pulse_amp = analysis_dict.get(analysis_key, ([], []))
-#         if len(pulse_tarr) == 0:
-#             _log('PLOT', f"Skipping {analysis_key} due to missing analysis data.")
-#             continue
-#         bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=1)
-#         time_seconds = (bin_centers + uw_start) * 1e-3
-#         r_arr = get_pos_freefall(time_seconds, t0) * 100 # convert to cm
-
-#         ax.scatter(bin_centers,r_arr, c=counts, s=50, alpha=0.7, cmap='viridis')
-#         print(f"Plotted {prefixes} shot {shot_numbers}")
-
-#     ax.set_xlabel('Time (ms)')
-#     ax.set_ylabel('Position (cm)')
-#     ax.grid(True)
-#     plt.tight_layout()
-#     plt.draw()
-#     plt.show(block=True)
-
+				analysis_dict[analysis_key] = (pulse_tarr, pulse_amp)
+				try:
+					np.save(analysis_file, analysis_dict)
+					_log('ANALYSIS', f"Added new analysis result for {analysis_key}")
+				except Exception as e:
+					_log('ANALYSIS', f"Error saving analysis results: {e}")
 
 
 def batch_process_xray(base_dir):
@@ -404,31 +412,14 @@ def batch_process_xray(base_dir):
 	Batch process all HDF5 files in base_dir using xray_wt_cam,
 	skipping files whose prefix already exists in analysis_results.npy.
 	"""
-	analysis_file = os.path.join(base_dir, 'analysis_results.npy')
-	# Load or initialize analysis_dict
-	if os.path.exists(analysis_file):
-		try:
-			analysis_dict = np.load(analysis_file, allow_pickle=True).item()
-		except Exception as e:
-			_log('ANALYSIS', f"Error loading analysis results: {e}")
-			analysis_dict = {}
-	else:
-		analysis_dict = {}
 
 	# Find all .hdf5 files in base_dir
 	hdf5_files = [f for f in os.listdir(base_dir) if f.endswith('.hdf5')]
 
 	for fn in hdf5_files:
-		prefix = fn[:2]
-		for key in analysis_dict.keys():
-			if isinstance(key, str) and prefix in key:
-				print(f"Skipping already processed {fn} ")
-				break
-			else:
-				print(f"Processing {fn} ...")
-				xray_wt_cam(base_dir, fn)
-				# After processing one file, break to re-evaluate the analysis_dict
-				break
+		print(f"Processing {fn} ...")
+		xray_wt_cam(base_dir, fn)
+
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
@@ -437,6 +428,7 @@ def batch_process_xray(base_dir):
 if __name__ == "__main__":
 
 	base_dir = r"F:\AUG2025\P23"
-	xray_wt_cam(base_dir, '48_He1kG430G_5450A_P23_K0_2025-08-14.hdf5')
-	xray_wt_cam(base_dir, '49_He1kG430G_5450A_P23_K-10_2025-08-14.hdf5')
-	xray_wt_cam(base_dir, '50_He1kG430G_5450A_P23_K-10_2025-08-14')
+	batch_process_xray(base_dir)
+
+	# ifn = r"F:\AUG2025\P24\27_He1kG430G_5800A_K-5_2025-08-12.hdf5"
+	# process_bdot(ifn)
