@@ -11,10 +11,15 @@ Interactive animation of X-ray counts vs position using bar charts.
 import os
 import sys
 
+
 # Third-party
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
+from matplotlib.animation import FuncAnimation
+
+# Set default font size for all labels
+plt.rcParams.update({'font.size': 24})
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__ if '__file__' in globals() else os.getcwd()), '../..'))
 sys.path = [repo_root, f"{repo_root}/read", f"{repo_root}/object_tracking"] + sys.path
@@ -23,42 +28,32 @@ from data_analysis_utils import counts_per_bin  # noqa: E402
 from object_tracking.track_object import get_pos_freefall  # noqa: E402
 
 
-def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, pos_min, pos_max):
+def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5):
     ax.clear()
     ax.set_xlabel('Position (cm)')
     ax.set_ylabel('X-ray Counts')
     ax.grid(True, alpha=0.3)
     ymax = float(np.max(all_c))
-    ax.set_xlim(0,50)
+    ax.set_xlim(-50,50)
     ax.set_ylim(0, ymax * 1.2)
 
-    # Select points in [t_ms-0.5, t_ms+0.5)
-    mask = (all_t_ms >= (t_ms - 0.5)) & (all_t_ms < (t_ms + 0.5))
+    # Select points in [t_ms-half_bin_width, t_ms+half_bin_width)
+    mask = (all_t_ms >= (t_ms - half_bin_width)) & (all_t_ms < (t_ms + half_bin_width))
     r_vals = all_r_cm[mask]
     c_vals = all_c[mask]
 
     if r_vals.size > 0:
-        # Determine a sensible bar width from local spacing
-        if r_vals.size > 1:
-            rs = np.sort(r_vals)
-            dr = np.median(np.diff(rs))
-            if not np.isfinite(dr) or dr <= 0:
-                dr = 0.02 * max(1.0, pos_max - pos_min)
-        else:
-            dr = 0.02 * max(1.0, pos_max - pos_min)
-
-        bar_w = max(0.8 * dr, 0.2)
-        ax.bar(r_vals, c_vals, width=bar_w, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
-        ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms   (n={r_vals.size})')
+        ax.bar(r_vals, c_vals, width=0.5, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
+        ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
     else:
         ax.set_ylim(0, 1.0)
-        ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms   (n=0)')
+        ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
 
     fig.canvas.draw_idle()
 
 
 class Player:
-    def __init__(self, slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, pos_min, pos_max):
+    def __init__(self, slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c):
         self.play = False
         self.idx = 0
         self.slider = slider
@@ -68,8 +63,6 @@ class Player:
         self.all_t_ms = all_t_ms
         self.all_r_cm = all_r_cm
         self.all_c = all_c
-        self.pos_min = pos_min
-        self.pos_max = pos_max
 
     def toggle(self, event=None):
         self.play = not self.play
@@ -82,18 +75,25 @@ class Player:
             return
         t_ms = self.frame_ticks[self.idx]
         self.slider.set_val(t_ms)
-        draw_frame(self.ax, self.fig, self.all_t_ms, self.all_r_cm, self.all_c, t_ms, self.pos_min, self.pos_max)
+        # Use correct half bin width based on frame_step_ms
+        frame_step_ms = self.frame_ticks[1] - self.frame_ticks[0] if len(self.frame_ticks) > 1 else 1.0
+        half_width = frame_step_ms / 2 if frame_step_ms < 1.0 else 0.5
+        draw_frame(self.ax, self.fig, self.all_t_ms, self.all_r_cm, self.all_c, t_ms, half_width)
         self.idx = (self.idx + 1) % len(self.frame_ticks)
         self.fig.canvas.start_event_loop(0.1)
         self.loop()
 
 
-def plot_result(base_dir, uw_start=30):
+def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output_filename="animation.mp4", fps=10):
     """
     Interactive animation of counts vs position over time.
     - X-axis: position r_arr (cm)
     - Y-axis: X-ray counts
     - Frames: time slices defined by bin_centers (ms)
+    - frame_step_ms: time step between frames (default: 1.0 ms)
+    - save_mp4: Whether to save the animation as an MP4 file (requires ffmpeg)
+    - output_filename: The filename for the saved animation (if save_mp4 is True)
+    - fps: Frames per second for the saved animation (if save_mp4 is True)
     """
     # Load cached results
     analysis_file = os.path.join(base_dir, 'analysis_results.npy')
@@ -121,10 +121,10 @@ def plot_result(base_dir, uw_start=30):
             continue
 
         # bin_centers in ms; counts are per-bin photon counts
-        bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=1)
+        bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=frame_step_ms)
 
         time_seconds = (bin_centers + uw_start) * 1e-3
-        r_arr_cm = get_pos_freefall(time_seconds, t0) * 100.0
+        r_arr_cm = get_pos_freefall(time_seconds, t0, height=1) * 100.0
 
         all_t_ms.extend(bin_centers.tolist())
         all_r_cm.extend(r_arr_cm.tolist())
@@ -138,40 +138,89 @@ def plot_result(base_dir, uw_start=30):
     all_r_cm = np.asarray(all_r_cm, dtype=float)
     all_c = np.asarray(all_c, dtype=float)
 
-    # Fixed X-axis across frames; dynamic Y-axis per frame
-    pos_min, pos_max = float(np.min(all_r_cm)), float(np.max(all_r_cm))
 
     tmin = float(np.min(all_t_ms))
     tmax = float(np.max(all_t_ms))
-    frame_ticks = np.arange(np.floor(tmin), np.ceil(tmax) + 1.0, 1.0)  # integer ms
+    frame_ticks = np.arange(np.floor(tmin), np.ceil(tmax) + frame_step_ms, frame_step_ms)
+    half_width = frame_step_ms / 2 if frame_step_ms < 1.0 else 0.5
+    
+    if save_mp4:
+        # Create figure for saving animation
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.set_xlim(-50, 50)
+        ax.set_ylim(0, float(np.max(all_c)) * 1.2)
+        ax.set_xlabel('Position (cm)')
+        ax.set_ylabel('X-ray Counts')
+        ax.grid(True, alpha=0.3)
+        
+        # Create a function for FuncAnimation
+        def update(frame_idx):
+            t_ms = frame_ticks[frame_idx]
+            ax.clear()
+            ax.set_xlabel('Position (cm)')
+            ax.set_ylabel('X-ray Counts')
+            ax.grid(True, alpha=0.3)
+            ymax = float(np.max(all_c))
+            ax.set_xlim(-50, 50)
+            ax.set_ylim(0, ymax * 1.2)
+            
+            # Select points in [t_ms-half_width, t_ms+half_width)
+            mask = (all_t_ms >= (t_ms - half_width)) & (all_t_ms < (t_ms + half_width))
+            r_vals = all_r_cm[mask]
+            c_vals = all_c[mask]
+            
+            if r_vals.size > 0:
+                ax.bar(r_vals, c_vals, width=0.5, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
+                ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
+            else:
+                ax.set_ylim(0, 1.0)
+                ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
+            
+            return ax,
+        
+        # Create the animation
+        anim = FuncAnimation(fig, update, frames=len(frame_ticks), blit=False)
+        
+        # Save the animation
+        output_path = os.path.join(base_dir, output_filename)
+        print(f"Saving animation to {output_path}...")
+        anim.save(output_path, writer='ffmpeg', fps=fps)
+        print(f"Animation saved successfully to {output_path}")
+        plt.close(fig)
+        
+        # Return the saved file path
+        return output_path
+    else:
+        # Interactive version with slider and play button
+        fig, ax = plt.subplots(figsize=(12, 8))
+        plt.subplots_adjust(bottom=0.25)
 
-    fig, ax = plt.subplots(figsize=(12, 8))
-    plt.subplots_adjust(bottom=0.25)
-        # Dynamic Y range per frame
-    ax.set_xlim(0, 50)
+        ax_slider = plt.axes([0.2, 0.1, 0.6, 0.03])
+        slider = Slider(ax_slider, 'Time (ms)',
+                        tmin, tmax,
+                        valinit=frame_ticks[0], valstep=frame_ticks)
 
+        def on_slide(val):
+            draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, slider.val, half_width)
 
-    ax_slider = plt.axes([0.2, 0.1, 0.6, 0.03])
-    slider = Slider(ax_slider, 'Time (ms)',
-                    tmin, tmax,
-                    valinit=frame_ticks[0], valstep=frame_ticks)
+        slider.on_changed(on_slide)
 
-    def on_slide(val):
-        draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, slider.val, pos_min, pos_max)
+        # Initial frame
+        draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, frame_ticks[0], half_width)
 
-    slider.on_changed(on_slide)
+        player = Player(slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c)
+        ax_btn = plt.axes([0.85, 0.1, 0.1, 0.05])
+        btn = Button(ax_btn, 'Play/Pause')
+        btn.on_clicked(player.toggle)
 
-    # Initial frame
-    draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, frame_ticks[0], pos_min, pos_max)
-
-    player = Player(slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, pos_min, pos_max)
-    ax_btn = plt.axes([0.85, 0.1, 0.1, 0.05])
-    btn = Button(ax_btn, 'Play/Pause')
-    btn.on_clicked(player.toggle)
-
-    plt.show(block=True)
+        plt.show(block=True)
 
 
 if __name__ == '__main__':
     base_dir = r"F:\AUG2025\P24"
-    plot_result(base_dir, uw_start=30)
+    
+    # Example 1: Interactive plot
+    plot_result(base_dir, uw_start=30, frame_step_ms=0.5)
+    
+    # Example 2: Save as MP4 (uncomment to use)
+    # plot_result(base_dir, uw_start=30, frame_step_ms=0.5, save_mp4=True, output_filename="xray_counts_animation.mp4", fps=15)
