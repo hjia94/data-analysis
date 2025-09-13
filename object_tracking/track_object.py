@@ -220,15 +220,15 @@ def get_vel_freefall(h=1):
     '''Get velocity (m) of object freefalling from height h in meter'''
     return np.sqrt(2*9.8*h)
 
-def get_pos_freefall(t, t0):
+def get_pos_freefall(t, t0, height=1):
     '''
     Get position of object in freefall relative to chamber center
     At time t0, the ball reaches chamber center (y = 0) having fallen 1 meter
     t is in seconds, t0 is time when ball reaches chamber center
     return is in meters relative to chamber center (positive = above, negative = below)
     '''
-    # Time to fall 1 meter from rest
-    fall_time = np.sqrt(2.0 / g)
+    # Time to fall x meter from rest
+    fall_time = np.sqrt(2*height / g)
     t_start = t0 - fall_time
     
     # Time since falling started (negative means hasn't started yet)
