@@ -217,26 +217,95 @@ def track_object(avi_path):
 
 #===============================================================================================================================================
 def get_vel_freefall(h=1):
-    '''Get velocity (m) of object freefalling from height h in meter'''
-    return np.sqrt(2*9.8*h)
+    '''Return magnitude of velocity (m/s) after free falling from rest through height h (m).
 
-def get_pos_freefall(t, t0, height=1):
+    Uses v = sqrt(2 * g * h). Direction (sign) is handled by caller.
     '''
-    Get position of object in freefall relative to chamber center
-    At time t0, the ball reaches chamber center (y = 0) having fallen 1 meter
-    t is in seconds, t0 is time when ball reaches chamber center
-    return is in meters relative to chamber center (positive = above, negative = below)
+    return np.sqrt(2 * g * h)
+
+def get_pos_freefall(t, t0, height=0.5, chamber_radius=None, enforce_bounds=False):
+    '''Return vertical position relative to chamber center with physically correct kinematics.
+
+    Coordinate system:
+        - Upward is positive.
+        - y = 0 when the ball passes the chamber center at time t0.
+        - y > 0 above center; y < 0 below center.
+
+    Parameter height:
+        Distance (m) the ball has ALREADY fallen before reaching the center.
+        Therefore the release-from-rest position was at y = +height at time
+        t_release = t0 - fall_time, where fall_time = sqrt(2*height/g).
+
+    Derivation:
+        Released from rest -> y_rel(τ) = height - 0.5*g*τ^2, τ in [0, fall_time].
+        At τ = fall_time: y = 0 and v = -g*fall_time = -sqrt(2*g*height).
+        Let dt = t - t0 (center-crossing frame). For motion phase (t >= t_release):
+            y(dt) = -0.5 * g * dt * (dt + 2*fall_time).
+        This gives y(t0)=0 and dy/dt(t0) = -g*fall_time.
+
+    Piecewise model implemented:
+        if t < t_release: y = height (still at rest prior to drop)
+        else:            y = -0.5 * g * dt * (dt + 2*fall_time)
+
+    Optional bounds:
+        If chamber_radius is provided and enforce_bounds is True, y is clipped to
+        [-chamber_radius, chamber_radius]. No bounce dynamics are modeled.
+
+    Args:
+        t (float | array-like): Evaluation time(s) [s].
+        t0 (float): Time of center crossing [s].
+        height (float): Distance already fallen before center [m] (>=0).
+        chamber_radius (float | None): Physical half-height of chamber [m] for validation.
+        enforce_bounds (bool): Clip output to physical bounds if chamber_radius given.
+
+    Returns:
+        float or np.ndarray: Position(s) y relative to center.
     '''
-    # Time to fall x meter from rest
-    fall_time = np.sqrt(2*height / g)
-    t_start = t0 - fall_time
-    
-    # Time since falling started (negative means hasn't started yet)
-    dt = np.asarray(t) - t_start
-    
-    # Position: -(0.5*g*dt² - 1), but only for dt >= 0 (after falling started)
-    # Negative sign corrects coordinate system: positive = above center, negative = below
-    return -np.where(dt >= 0, 0.5 * g * dt**2 - 1.0, -1.0)
+    # Basic validation (minimal per project guideline)
+    if height < 0:
+        raise ValueError("height must be non-negative")
+    if chamber_radius is not None and height > chamber_radius:
+        raise ValueError("height exceeds chamber_radius; inconsistent initial condition")
+
+    t_arr = np.asarray(t, dtype=float)
+    if height == 0:
+        # Degenerate case: ball at center at t0 with zero prior fall.
+        y = np.zeros_like(t_arr)
+        if np.isscalar(t):
+            return float(y)
+        return y
+
+    v0 = get_vel_freefall(height)  # sqrt(2*g*height)
+    fall_time = v0 / g             # sqrt(2*height/g)
+    dt = t_arr - t0
+    # Motion-phase formula
+    y_motion = -0.5 * g * dt * (dt + 2 * fall_time)
+    # Prior to release: constant height
+    y = np.where(dt < -fall_time, height, y_motion)
+
+    if chamber_radius is not None and enforce_bounds:
+        y = np.clip(y, -chamber_radius, chamber_radius)
+
+    if np.isscalar(t):
+        return float(y)
+    return y
+
+def get_vel_freefall_time(t, t0, height=0.5):
+    '''Velocity (m/s, upward positive) as a function of time for the same model.
+
+    For t < t_release: v = 0
+    For t >= t_release: v = -g * (dt + fall_time)
+    where dt = t - t0 and fall_time = sqrt(2*height/g).
+    '''
+    t_arr = np.asarray(t, dtype=float)
+    v0 = get_vel_freefall(height)
+    fall_time = v0 / g
+    dt = t_arr - t0
+    v = -g * (dt + fall_time)
+    v = np.where(dt < -fall_time, 0.0, v)
+    if np.isscalar(t):
+        return float(v)
+    return v
 
 #===============================================================================================================================================
 def update_tracking_result(tr_ifn, filepath, cf_new, ct_new):
