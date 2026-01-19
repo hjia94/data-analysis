@@ -34,8 +34,8 @@ def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5):
     ax.set_ylabel('X-ray Counts')
     ax.grid(True, alpha=0.3)
     ymax = float(np.max(all_c))
-    ax.set_xlim(-50,50)
-    ax.set_ylim(0, ymax * 1.2)
+    ax.set_xlim(0,50)
+    ax.set_ylim(0, ymax * 1.01)
 
     # Select points in [t_ms-half_bin_width, t_ms+half_bin_width)
     mask = (all_t_ms >= (t_ms - half_bin_width)) & (all_t_ms < (t_ms + half_bin_width))
@@ -46,7 +46,7 @@ def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5):
         ax.bar(r_vals, c_vals, width=0.5, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
         ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
     else:
-        ax.set_ylim(0, 1.0)
+        ax.set_ylim(0, ymax * 1.01)
         ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
 
     fig.canvas.draw_idle()
@@ -147,8 +147,8 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output
     if save_mp4:
         # Create figure for saving animation
         fig, ax = plt.subplots(figsize=(12, 8))
-        ax.set_xlim(-50, 50)
-        ax.set_ylim(0, float(np.max(all_c)) * 1.2)
+        ax.set_xlim(0, 50)
+        ax.set_ylim(0, float(np.max(all_c)) * 1.01)
         ax.set_xlabel('Position (cm)')
         ax.set_ylabel('X-ray Counts')
         ax.grid(True, alpha=0.3)
@@ -160,9 +160,8 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output
             ax.set_xlabel('Position (cm)')
             ax.set_ylabel('X-ray Counts')
             ax.grid(True, alpha=0.3)
-            ymax = float(np.max(all_c))
-            ax.set_xlim(-50, 50)
-            ax.set_ylim(0, ymax * 1.2)
+            ax.set_xlim(0, 50)
+            ax.set_ylim(0, float(np.max(all_c)) * 1.01)
             
             # Select points in [t_ms-half_width, t_ms+half_width)
             mask = (all_t_ms >= (t_ms - half_width)) & (all_t_ms < (t_ms + half_width))
@@ -173,7 +172,7 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output
                 ax.bar(r_vals, c_vals, width=0.5, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
                 ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
             else:
-                ax.set_ylim(0, 1.0)
+                ax.set_ylim(0, float(np.max(all_c)) * 1.01)
                 ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
             
             return ax,
@@ -217,7 +216,7 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output
 
 
 if __name__ == '__main__':
-    base_dir = r"F:\AUG2025\P24"
+    base_dir = r"F:\AUG2025\P23"
     
     # Example 1: Interactive plot
     plot_result(base_dir, uw_start=30, frame_step_ms=0.5)
