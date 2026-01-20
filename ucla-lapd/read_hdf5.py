@@ -349,32 +349,8 @@ def read_bmotion_control(hdf5_filename, motion_group_name=None):
 		print(f"Shots per position: {nshot}")
 		print(f"Number of unique positions: {npos}")
 		
-		# Analyze acquisition pattern using motion_list
-		# Detect transitions (e.g., plane to line scan)
-		print(f"\n--- Motion List Analysis ---")
-		print(f"Motion list shape: {motion_list.shape}")
-		
-		# Find first transition: where motion_list revisits an earlier position
-		# This marks the start of the next acquisition phase (e.g., line scan after plane)
-		if motion_list.ndim >= 2 and motion_list.shape[0] > 1:
-			first_transition_idx = None
-			for i in range(1, npos):
-				# Check if current position was already visited in first phase
-				for j in range(i):
-					if np.allclose(motion_list[i], motion_list[j]):
-						first_transition_idx = i
-						break
-				if first_transition_idx is not None:
-					break
-			
-			if first_transition_idx is not None:
-				plane_npos = first_transition_idx
-				plane_end_shot = plane_npos * nshot
-				line_start_shot = plane_end_shot + 1
-				print(f"Plane scan: {plane_npos} positions, ends at shot {plane_end_shot}")
-				print(f"Line scan: starts at shot {line_start_shot} (motion index {first_transition_idx})")
-		
-		return motion_list, npos, nshot
+
+		return motion_list, pos_array, npos, nshot
 
 #===============================================================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
