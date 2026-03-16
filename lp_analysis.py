@@ -15,12 +15,17 @@ Copied from old repo LP_analysis
 Update Aug. 2024:
 -- Removed area; all function now takes current/area as input instead of current
 -- TODO: Check result has correct unit after removing area
+
+Update Mar. 2026:
+-- Add function that parse IV sweep data which consists multiple sweeps in one time trace
+-- Functions generalized from the specific case based on Jan2024_Isat.py
+-- Teste with Mar2026 data ok
 """
 
 import math
 import numpy as np
 import warnings
-from scipy.signal import savgol_filter, medfilt
+from scipy.signal import savgol_filter, medfilt, find_peaks, peak_widths
 from scipy.optimize import curve_fit
 from scipy import integrate, interpolate, ndimage, constants, optimize
 from scipy.ndimage import gaussian_filter1d
@@ -449,6 +454,83 @@ def EEPF(I, V, smooth=True, plot=False):
 
 	return Vnew[:Vp_ndx_1], f[:Vp_ndx_1], ne, Vp
 
+
+#===========================================================================================================
+def find_sweep_indices(V, padding=10):
+    """
+    Extracts start and stop indices for pulsed voltage sweeps of any size, 
+    duration, baseline, or polarity.
+    """
+    # 0. FORCE 1D ARRAY: This strips out any hidden dimensions (like (N, 1) -> (N,))
+    V = np.asarray(V).flatten()
+    
+    # 1. Dynamically find the resting baseline.
+    baseline = np.median(V)
+    
+    # 2. "Rectify" the signal. By taking the absolute difference from the baseline,
+    # all sweeps become positive spikes starting from 0.
+    rectified_V = np.abs(V - baseline)
+    
+    # 3. Dynamically set a noise floor.
+    # FORCE FLOAT: Wrapping this in float() guarantees SciPy reads it as a single scalar number,
+    # preventing the "interval border must match x" ValueError.
+    noise_floor = float(np.max(rectified_V) * 0.10)
+    
+    # 4. Find the tips of the triangles
+    peaks, _ = find_peaks(rectified_V, prominence=noise_floor, distance=10)
+    
+    if len(peaks) == 0:
+        print("No prominent sweeps found in this data.")
+        return [], []
+    
+    # 5. Find the base of each peak (98% of the way down from the tip)
+    widths, width_heights, left_ips, right_ips = peak_widths(rectified_V, peaks, rel_height=0.98)
+    
+    # 6. Extract the start (left) and stop (right) indices.
+    start_t_ls = np.maximum(0, np.floor(left_ips) - padding).astype(int).tolist()
+    stop_t_ls = np.minimum(len(V) - 1, np.ceil(right_ips) + padding).astype(int).tolist()
+    
+    return start_t_ls, stop_t_ls
+
+def reshape_IV(Vsweep_arr, Isweep_arr, start_t_ls, stop_t_ls, trim_percent=1.0):
+    """
+    Slices raw arrays into individual sweeps, standardizes their length, 
+    and trims a percentage off the edges to remove switching noise.
+    """
+    # 1. Calculate the lengths of all detected sweeps
+    lengths = [stop - start for start, stop in zip(start_t_ls, stop_t_ls)]
+    
+    # 2. Find the raw minimum length
+    min_len = min(lengths)
+    
+    # 3. Calculate how many points equal the requested percentage
+    trim_points = int(min_len * (trim_percent / 100.0))
+    final_len = min_len - (2 * trim_points)
+    
+    print(f"Standardizing raw sweep length: {min_len} points.")
+    print(f"Trimming {trim_percent}% ({trim_points} points) from both the start and end.")
+    print(f"Final sweep length stacked: {final_len} points.")
+
+    # Initialize an empty list to store the chunks
+    I_chunks = []
+    V_chunks = []
+
+    # 4. Loop through the starts, applying the trim and the uniform final length
+    for start in start_t_ls:
+        # Shift the start index forward by the trim amount
+        actual_start = start + trim_points
+        
+        # Ensure the chunk is exactly the final_len to avoid dimension mismatch
+        actual_stop = actual_start + final_len
+
+        I_chunks.append(Isweep_arr[:, :, actual_start:actual_stop])
+        V_chunks.append(Vsweep_arr[:, actual_start:actual_stop])
+
+    # Stack the list of chunks into a new array
+    Isweep_reshaped = np.stack(I_chunks, axis=2)
+    Vsweep_reshaped = np.stack(V_chunks, axis=1)
+
+    return Vsweep_reshaped, -Isweep_reshaped
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
