@@ -12,7 +12,9 @@ def show_info(f):
 	f.overview.print()
 
 def read_probe_motion(f):
-
+	'''
+	read probe motion for dataruns using 6K
+	'''
 	pr_ls = list(f.controls['6K Compumotor'].configs)
 	
 	# Check number of probes
@@ -80,6 +82,99 @@ def read_probe_motion(f):
 		zpos = np.linspace(z0 - (nz-1)*dz/2, z0 + (nz-1)*dz/2, nz).astype(float)
 
 	return pos_array, xpos, ypos, zpos, npos, nshot
+
+def read_bmotion_probe_motion(f):
+    """
+    Reads probe motion from the new bmotion control system in BaPSF HDF5 files.
+    Rounds all spatial coordinates to 2 decimal places.
+    Works seamlessly for 1 probe, 2 probes, or more.
+    """
+    bmotion_path = 'Raw data + config/bmotion'
+    if bmotion_path not in f:
+        print("bmotion group not found in file.")
+        return None
+        
+    bmotion_group = f[bmotion_path]
+    
+    # Read the core datasets
+    positions = np.array(bmotion_group['bmotion_positions'])
+    axis_names = np.array(bmotion_group['bmotion_axis_names'])
+    
+    # Extract unique probe names (motion_group_names)
+    probe_names = np.array([
+        name.decode('utf-8') if isinstance(name, bytes) else name 
+        for name in positions['motion_group_name']
+    ])
+    unique_probes = np.unique(probe_names)
+    
+    # Check number of probes
+    if len(unique_probes) == 0:
+        print('No probe found.')
+    elif len(unique_probes) == 1:
+        print('One probe found.')
+    elif len(unique_probes) == 2:
+        print('2 probes found.')
+    else:
+        print('More than 2 probes found. Check code before proceeding.')
+
+    pos_array = {}
+    
+    for pr_name in unique_probes:
+        print(f"\n--- Processing Probe: {pr_name} ---")
+        
+        # Isolate the data specific to this probe
+        mask = (probe_names == pr_name)
+        pr_positions = positions[mask]
+        pr_axes = axis_names[mask]
+        
+        # Find number of unique positions using motionlist_index
+        motion_indices = pr_positions['motionlist_index']
+        unique_elements, counts = np.unique(motion_indices, return_counts=True)
+        npos = len(unique_elements)
+        print('Number of positions:', npos)
+        
+        # Find number of shots per position (using the most frequent repetition count)
+        nshot = np.argmax(np.bincount(counts))
+        print('Number of shots per position:', nshot)
+        
+        # Reconstruct the xyz structured array to match f.read_controls()['xyz'] behavior
+        xyz_data = np.zeros(len(pr_positions), dtype=[('shotnum', int), ('x', float), ('y', float), ('z', float)])
+        # Grab the shot numbers directly from the raw data
+        xyz_data['shotnum'] = pr_positions['Shot number']
+		
+        # Map a0, a1, a2, etc., to x, y, z by checking the axis names
+        first_axis_name = pr_axes[0]
+        for axis_key in ['a0', 'a1', 'a2', 'a3', 'a4', 'a5']:
+            axis_label = first_axis_name[axis_key]
+            if isinstance(axis_label, bytes): 
+                axis_label = axis_label.decode('utf-8').lower()
+            
+            if axis_label in ['x', 'y', 'z']:
+                xyz_data[axis_label] = np.round(pr_positions[axis_key], 2)
+                
+        pos_array[pr_name] = xyz_data
+        
+        # Determine sequence: Does this probe move first?
+        # We do this by comparing its first shot to the global first shot in the bmotion run
+        start_shot = pr_positions['Shot number'][0]
+        global_start = positions['Shot number'][0]
+        
+        if start_shot == global_start:
+            print('This probe moves first in the data run sequence')
+        else:
+            print('This probe moves after previous probe finish taking data')
+            
+        # ====Set up xpos/ypos/zpos arrays====
+        # Because we already rounded xyz_data above, these unique 1D arrays 
+        # will also be perfectly rounded and free of floating-point duplicates!
+        xpos = np.sort(np.unique(xyz_data['x']))
+        ypos = np.sort(np.unique(xyz_data['y']))
+        zpos = np.sort(np.unique(xyz_data['z']))
+
+    # Note: If there are multiple probes, xpos, ypos, zpos, npos, and nshot 
+    # returned here reflect the LAST probe processed. 
+    # pos_array returns a dictionary containing data for ALL probes.
+    return pos_array, xpos, ypos, zpos, npos, nshot
 
 def read_digitizer_config(f):
 	
