@@ -352,12 +352,36 @@ def read_bmotion_control(hdf5_filename, motion_group_name=None):
 
 		return motion_list, pos_array, npos, nshot
 
+
+#===============================================================================================================================================
+#=============Helper function for mapping HDF5 structure to text===========================================================
+#===============================================================================================================================================
+def map_hdf5_to_text(file_path, output_txt_path):
+    """Writes the entire internal structure of an HDF5 file to a text file."""
+    
+    with h5py.File(file_path, 'r') as f, open(output_txt_path, 'w') as out_file:
+        out_file.write(f"--- Structure of {file_path} ---\n\n")
+        
+        # This function will be called for every single item in the file
+        def print_item(name, obj):
+            indent = "  " * name.count('/')
+            if isinstance(obj, h5py.Group):
+                out_file.write(f"{indent}Group: {name}/\n")
+            elif isinstance(obj, h5py.Dataset):
+                out_file.write(f"{indent}Dataset: {name} | Shape: {obj.shape} | Type: {obj.dtype}\n")
+                
+        # visititems recursively walks through the entire HDF5 file
+        f.visititems(print_item)
+        print(f"File structure successfully saved to {output_txt_path}")
+
+
 #===============================================================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===============================================================================================================================================
 
 if __name__ == '__main__':
 
-	ifn = r"C:\data\LAPD\JAN2024_diverging_B\02_2cmXYline_M1P24_M3P27_2024-01-26_15.16.39.hdf5"
-	f = lapd.File(ifn)
-	f.overview.print()
+	path= r"D:\data\LAPD\Mar26-data"
+	fn = "11-lp-sweep-xyplane-bias.hdf5"
+	ifn = path + '\\' + fn
+	map_hdf5_to_text(ifn, path + '\\' + 'hdf5_structure_plane.txt')
