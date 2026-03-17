@@ -20,6 +20,7 @@ Update Mar. 2026:
 -- Add function that parse IV sweep data which consists multiple sweeps in one time trace
 -- Functions generalized from the specific case based on Jan2024_Isat.py
 -- Teste with Mar2026 data ok
+-- Move IV curve analysis function into separate file due to its lengthyness
 """
 
 import math
@@ -50,150 +51,6 @@ def analyze_Esat(Iesat, area, Te): # Esat in mA, Te in eV
 	'''
 	return 1.49e9 * Iesat /(area * np.sqrt(Te))
 
-def exponential_func(x, a, b):
-	return a * np.exp(b * x)
-
-def analyze_IV(voltage, current, plot = False):
-	"""
-	Analyze the IV curve.
-	Input:
-		voltage: the probe sweep voltage in V
-		current: the measured current from the probe in A
-		plot: return three plots of the fitting
-		value: prints Vp, Te, ne
-	Output:
-		Vp, Te, ne
-	"""
-	if plot:
-		plt.figure()
-		plt.plot(voltage,current, label='Original')
-
-	# Take XX% of the current and fit a linear line
-	dif1 = [(np.max(current) - np.min(current))*0.01 + np.min(current), (np.max(current) - np.min(current))*0 + np.min(current)]
-	vals = np.argwhere(np.logical_and(current < dif1[0], current > dif1[1]))
-
-	cropped_voltage = []
-	cropped_current = []
-	for i in range(0, len(vals)):
-		idx = vals[i][0]
-		cropped_voltage.append(voltage[idx])
-		cropped_current.append(current[idx])
-
-	c = np.polyfit(cropped_voltage, cropped_current, 1)
-	y = c[0] * voltage + c[1]
-
-	if plot:
-		plt.plot(voltage,y, label='Isat Fit')
-
-	current -= y
-	if plot:
-		plt.plot(voltage, current, label='Subtracted')
-
-	# Define the portion of the signal to fit
-	portion_start = int(len(current) * 0.1)  # Start at 20% of the signal
-	portion_end = int(len(current) * 0.5)    # End at 80% of the signal
-	Inew_cropped = current[portion_start:portion_end]
-	Vnew_cropped = voltage[portion_start:portion_end]
-
-	# Define initial guesses for exponential fitting
-	initial_guesses = [
-		[1, 0.1],
-		[1, 0.01],
-		[1, 0.001]
-	]
-
-	best_fit_params = None
-	lowest_error = float('inf')
-
-	# Perform exponential fitting for each initial guess
-	for guess in initial_guesses:
-		try:
-			popt, _ = curve_fit(exponential_func, Vnew_cropped, Inew_cropped, p0=guess)
-			fitted_curve = exponential_func(Vnew_cropped, *popt)
-			error = np.sum((Inew_cropped - fitted_curve) ** 2)
-			if error < lowest_error:
-				lowest_error = error
-				best_fit_params = popt
-		except RuntimeError:
-			continue
-
-	if best_fit_params is None:
-		raise Exception('No fitting function could be applied successfully.')
-
-	if plot:
-		plt.plot(voltage, exponential_func(voltage, *best_fit_params), label='Exponential Fit')
-		plt.legend()
-		plt.ylim(top = np.max(current) * 1.1, bottom = np.min(current) * 1.1)
-		plt.xlabel('Voltage (V)')
-		plt.ylabel('Current (A)')
-		plt.show()
-	
-	# print(f"Exponential fit parameters: a={best_fit_params[0]}, b={best_fit_params[1]}")
-
-	# Example output: Te calculation for exponential fit
-	Te = 1 / best_fit_params[1]
-	# print(f"Te = {Te:.2f} eV")
-	# if Te > 10:
-		# raise Exception('Te is very high')
-
-
-	# Defines which region is the transition
-	dif3 = (np.max(current) - np.min(current))* 6/10 + np.min(current) # Upper limit
-	dif4 = (np.max(current) - np.min(current))*4/10 + np.min(current) # Lower limit
-
-	lower_bound = np.argwhere(current > dif4)
-	start_idx = lower_bound[0][0]
-	upper_bound = np.argwhere(current < dif3)
-	stop_idx = upper_bound[len(upper_bound)-1][0]
-
-	trans_voltage = []
-	trans_current = []
-	for i in range(start_idx, stop_idx):
-		trans_voltage.append(voltage[i])
-		trans_current.append(current[i])
-	c = np.polyfit(trans_voltage, trans_current, 1)
-	y = c[0] * voltage + c[1]
-
-
-	# Finds linear fitting to Esat
-	dif5 = np.min(current) + (np.max(current) - np.min(current)) * 0.8
-	esat_pos = np.argwhere(current > dif5)
-
-	esat_volt = []
-	esat_curr = []
-
-	for i in esat_pos[:,0]:
-		esat_volt.append(voltage[i])
-		esat_curr.append(current[i])
-	d = np.polyfit(esat_volt, esat_curr, 1)
-	z = d[0] * voltage + d[1]
-
-	if plot:
-		plt.figure()
-		plt.plot(voltage, current)
-		plt.plot(voltage,y)
-		plt.plot(esat_volt,esat_curr)
-		plt.plot(voltage, z)
-
-	# Find the crossing point of transition and Esat linear fit to produce ne and Vp
-	Vp = abs((d[1]-c[1]) / (d[0] - c[0])) #plasma potential in V
-	I = d[0] * Vp + d[1]                  #electron current in A
-
-
-	if Te > 0:
-		vth = math.sqrt(constants.e*Te / me) # electron thermal velocity in cm/s
-		ne = I/(vth * constants.e)
-	else:
-		ne = 0
-		raise Exception('Te is negative')
-
-	# print ('Esat=%.2g'%(I), 'A/cm^2')
-	# print ('ne=%.2g'%(ne*1e-6), 'cm^3')
-	# print ('Plasma potential=%.2f'%(Vp), 'V \n')
-
-	return (Vp, Te, ne)
-
-
 #----------------------------------------------------------------------------------------------------
 def find_Vp(ss_V, ss_dIdV, magic_num=10):
 	'''
@@ -223,7 +80,6 @@ def find_Vp(ss_V, ss_dIdV, magic_num=10):
 	return max_ind, Vp, Vnew
 
 #----------------------------------------------------------------------------------------------------
-
 def EEDF(dIdV, phi, area):
 	# Electron energy distribution function for 1D geometry => proportional to first derivative of IV curve
 	# See Scott Robertson's paper for detail calculation
@@ -239,9 +95,7 @@ def EEDF(dIdV, phi, area):
 	Te = integrate.trapz(g, phi) / integrate.trapz(f, phi)
 
 	return f, ne, Te
-
 #----------------------------------------------------------------------------------------------------
-
 def derivative(I, V, sigma=30, smth=True):
 	'''
 	sigma: smoothing factor for gaussian filter
@@ -255,9 +109,7 @@ def derivative(I, V, sigma=30, smth=True):
 		return ss_dIdV, max_inds
 	else:
 		return dIdV, max_inds
-
 #----------------------------------------------------------------------------------------------------
-
 def distribution(V, dIdV,max_ind, length=100, verbose=False):
 
 	warnings.simplefilter("error")
@@ -312,7 +164,6 @@ def distribution(V, dIdV,max_ind, length=100, verbose=False):
 	f = me/(qe**2) * func(Vfake, *popt)
 
 	return dIdV_sub, Vnew_sub, Vp, Vfake, f, yne, popt
-
 #---------------------------------------------------------------
 def Vrfune(vin):
 	"""  f(vin) = P(vin) * exp(k0*vin) + k1
@@ -342,7 +193,6 @@ def Vrfune(vin):
 
 	return lo + mid + hi
 #----------------------------------------------------------------------------------------------------
-
 def particle_number(popt, lower_bound, upper_boud):
 
 	def integrand1(x):
@@ -351,8 +201,6 @@ def particle_number(popt, lower_bound, upper_boud):
 	yne, err = integrate.quad(integrand1, lower_bound, upper_boud) #, weight='alg', wvar=(-1/2,0))
 
 	return math.sqrt(2/me) * yne
-
-
 
 
 #===========================================================================================================
@@ -454,7 +302,7 @@ def EEPF(I, V, smooth=True, plot=False):
 
 	return Vnew[:Vp_ndx_1], f[:Vp_ndx_1], ne, Vp
 
-
+#===========================================================================================================
 #===========================================================================================================
 def find_sweep_indices(V, padding=10):
     """
