@@ -32,14 +32,9 @@ def exponential_func(V, a, b):
 
 def analyze_IV(voltage, current, plot=False):
     """
-    Analyze the IV curve.
-    Input:
-        voltage: probe sweep voltage (V)
-        current: pre-smoothed current density (A/cm²)
-    Returns:
-        Tuple containing (Vp, Te, ne)
+    Rolled back boundary logic. Flags Te > 20 eV as Te = 0, 
+    but uses a dummy Te = 0.1 eV to calculate and return ne.
     """
-    # Sort data to ensure strict left-to-right processing
     sort_idx = np.argsort(voltage)
     V = voltage[sort_idx]
     I_raw = current[sort_idx]
@@ -59,14 +54,12 @@ def analyze_IV(voltage, current, plot=False):
     else:
         isat_idx = int(len(V) * 0.20)
         
-    # Linear fit for Isat baseline
     p_isat = np.polyfit(V[:isat_idx], I_raw[:isat_idx], 1)
     I_baseline = p_isat[0] * V + p_isat[1]
-    
     I_sub = I_raw - I_baseline
     
     # ==========================================
-    # 2. Find Transition Bounds (Threshold + Padding)
+    # 2. Find Transition Bounds (Original Logic)
     # ==========================================
     sigma_guide = max(15, int(len(V) * 0.03)) 
     I_guide = gaussian_filter1d(I_sub, sigma=sigma_guide)
@@ -77,9 +70,9 @@ def analyze_IV(voltage, current, plot=False):
     upper_crossings = np.argwhere(I_guide >= upper_limit)
     if len(upper_crossings) == 0:
         raise Exception('Signal never reaches the 20% limit.')
+    
     upper_idx = upper_crossings[0][0]
     
-    # Walk backward until hitting the 0.5% threshold
     lower_threshold = 0.005 * amplitude 
     lower_idx = upper_idx
     for idx in range(upper_idx, -1, -1):
@@ -87,7 +80,6 @@ def analyze_IV(voltage, current, plot=False):
             lower_idx = idx
             break
             
-    # Apply explicit padding to capture the start of the exponential tail
     padding = max(2, int(len(V) * 0.01)) 
     lower_idx = max(0, lower_idx - padding)
     
@@ -98,34 +90,32 @@ def analyze_IV(voltage, current, plot=False):
         raise Exception('Not enough points in the transition region.')
 
     # ==========================================
-    # 3. Smart Initial Guesses via Log-Linear Fit
+    # 3. Initial Guesses
     # ==========================================
-    valid_log = I_fit > (0.01 * amplitude) 
+    valid_log = I_fit > 0 
     
     if np.sum(valid_log) > 3:
-        p = np.polyfit(V_fit[valid_log], np.log(I_fit[valid_log]), 1)
-        b_guess = p[0]
-        a_guess = np.exp(p[1])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            p = np.polyfit(V_fit[valid_log], np.log(I_fit[valid_log]), 1)
+            b_guess = p[0]
+            a_guess = np.exp(p[1])
     else:
         b_guess = 0.5
-        a_guess = I_fit[-1] * np.exp(-0.5 * V_fit[-1]) if len(I_fit) > 0 else 0.01
-        
-    if b_guess <= 0: 
-        b_guess = 0.1 
-        
+        a_guess = 0.01
+
     # ==========================================
     # 4. Fit the Exponential
     # ==========================================
     try:
         popt, _ = curve_fit(exponential_func, V_fit, I_fit, 
                             p0=[a_guess, b_guess], 
-                            bounds=([0, 0], [np.inf, np.inf]), 
                             maxfev=5000)
     except Exception as e:
         raise Exception(f'Exponential fit failed: {e}')
         
     Te = 1.0 / popt[1]
 
+    # === DIAGNOSTIC PLOT 1: EXPONENTIAL FIT ===
     if plot:
         plt.figure(figsize=(10, 7))
         plt.plot(V, I_raw, label='Input (User Smoothed)', color='tab:blue', linewidth=2)
@@ -146,31 +136,58 @@ def analyze_IV(voltage, current, plot=False):
         plt.show()
 
     # ==========================================
+    # 4b. DATA QUALITY OVERRIDE
+    # ==========================================
+    Te_calc = Te
+    if Te > 20 or Te <= 0:
+        Te = 0.0        # Flag returned Te as 0
+        Te_calc = 0.1   # Use dummy value for ne calculation
+
+    # ==========================================
     # 5. Plasma Potential (Vp) and Density (ne)
     # ==========================================
     dif3 = np.max(I_sub) * 0.6 
     dif4 = np.max(I_sub) * 0.4 
 
     lower_bound = np.argwhere(I_sub > dif4)
+    if len(lower_bound) == 0:
+        raise Exception('Signal too weak for Vp extraction.')
     start_idx = lower_bound[0][0]
+    
     upper_bound = np.argwhere(I_sub < dif3)
-    stop_idx = upper_bound[len(upper_bound)-1][0]
+    stop_idx = upper_bound[-1][0] if len(upper_bound) > 0 else len(I_sub)-1
+    
+    if start_idx >= stop_idx:
+        stop_idx = min(len(V)-1, start_idx + 5)
 
     trans_voltage = V[start_idx:stop_idx]
     trans_current = I_sub[start_idx:stop_idx]
     
+    if len(trans_voltage) < 2:
+        raise Exception('Not enough points for Vp transition fit.')
+        
     c_trans = np.polyfit(trans_voltage, trans_current, 1)
     
     dif5 = np.max(I_sub) * 0.8
     esat_pos = np.argwhere(I_sub > dif5)
+    
+    if len(esat_pos) < 2:
+        raise Exception('Not enough points for Esat fit.')
+        
     esat_volt = V[esat_pos[:, 0]]
     esat_curr = I_sub[esat_pos[:, 0]]
     
     d_esat = np.polyfit(esat_volt, esat_curr, 1)
 
-    Vp = abs((d_esat[1] - c_trans[1]) / (d_esat[0] - c_trans[0])) 
-    I_Vp = d_esat[0] * Vp + d_esat[1]                  
+    denom = d_esat[0] - c_trans[0]
+    if abs(denom) < 1e-10:
+        Vp = np.nan
+        I_Vp = np.nan
+    else:
+        Vp = abs((d_esat[1] - c_trans[1]) / denom) 
+        I_Vp = d_esat[0] * Vp + d_esat[1]                  
 
+    # === DIAGNOSTIC PLOT 2: VP INTERSECTION ===
     if plot:
         plt.figure(figsize=(10, 7))
         plt.plot(V, I_sub, label='Isat Subtracted Signal', color='tab:green', linewidth=2)
@@ -184,8 +201,9 @@ def analyze_IV(voltage, current, plot=False):
         plt.plot(trans_voltage, trans_current, 'o', color='tab:red', label='Transition Data Points', markersize=5)
         plt.plot(esat_volt, esat_curr, 'o', color='tab:purple', label='Esat Data Points', markersize=5)
         
-        plt.axvline(Vp, color='k', linestyle=':', linewidth=2, label=f'Vp = {Vp:.2f} V')
-        plt.plot(Vp, I_Vp, 'X', color='black', markersize=10)
+        if not np.isnan(Vp):
+            plt.axvline(Vp, color='k', linestyle=':', linewidth=2, label=f'Vp = {Vp:.2f} V')
+            plt.plot(Vp, I_Vp, 'X', color='black', markersize=10)
         
         plt.ylim(np.min(I_sub) - 0.1 * np.max(I_sub), np.max(I_sub) * 1.1)
         plt.xlabel('Voltage (V)')
@@ -195,28 +213,32 @@ def analyze_IV(voltage, current, plot=False):
         plt.grid(True, alpha=0.3)
         plt.show()
 
-    if Te > 0:
-        vth_SI = math.sqrt(constants.e * Te / me) 
+    # Calculate ne using our Te_calc variable (which is 0.1 if Te was flagged)
+    if Te_calc > 0:
+        vth_SI = math.sqrt(constants.e * Te_calc / me) 
         vth_cm = vth_SI * 100                     
         ne = I_Vp / (vth_cm * constants.e)           
     else:
-        ne = 0
-        raise Exception('Te is negative')
+        ne = np.nan
 
     return (Vp, Te, ne)
 
-def analyze_IV_safe(voltage, current, file_name="Unknown", plot=False):
+def analyze_IV_safe(voltage, current, file_name="", verbose=False):
     """
-    Wrapper to safely run IV analysis and catch noisy/failed files.
+    Wrapper function to safely execute analyze_IV. 
+    Catches any fitting errors or data quality exceptions, logs them, 
+    and returns NaNs to prevent the batch loop from crashing.
     """
     try:
-        # Try to run your existing good function
-        Vp, Te, ne = analyze_IV(voltage, current, plot=plot)
+        # Try to run the main analysis function
+        Vp, Te, ne = analyze_IV(voltage, current)
         return Vp, Te, ne
         
     except Exception as e:
-        # If it crashes (e.g., "Not enough points", "Exponential fit failed")
-        print(f"[{file_name}] Analysis failed: {e}")
+        # If ANY exception is raised (including our new Te >= 100 check),
+        # it gets caught here. We print the ID and the specific error message.
+        if verbose:
+            print(f"[{file_name}] Analysis failed: {e}")
         
-        # Return np.nan so your 2D plane plotting ignores this pixel
-        return (np.nan, np.nan, np.nan)
+        # Return NaNs so the main loop can store them and safely move on
+        return np.nan, np.nan, np.nan
