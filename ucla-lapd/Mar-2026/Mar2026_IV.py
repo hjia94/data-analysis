@@ -6,6 +6,7 @@ sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\ucla-lapd")
 import time
 import datetime
 import os
+import copy
 import numpy as np
 import h5py
 from bapsflib import lapd
@@ -202,6 +203,65 @@ def process_and_save(voltage_data, current_data, save_path):
     
     return Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err
 
+
+def load_data(data_dir, run_num):
+    save_path = os.path.join(data_dir, f"{run_num}-sweep-data.npz")
+    data = np.load(save_path)
+    t_ls = data['data_timestamp']
+
+    ps_path = os.path.join(data_dir, f"{run_num}-plasma-data.npz")
+    ps_data = np.load(ps_path)
+    Vp_arr = ps_data['Vp_arr']
+    Te_arr = ps_data['Te_arr']
+    ne_arr = ps_data['ne_arr']
+    Vp_err = ps_data['Vp_err']
+    Te_err = ps_data['Te_err']
+    ne_err = ps_data['ne_err']
+
+    return Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls
+
+def plot_result(Vp_arr, Te_arr, ne_arr, xpos, ypos, t_ls):
+    extent = min(xpos), max(xpos), min(ypos), max(ypos)
+
+    sweep_idx = 24
+    grid_shape = (61, 61) 
+    # Extract the data for the requested sweep and reshape to 2D
+    Vp_2d = Vp_arr[:, sweep_idx].reshape(grid_shape)
+    Te_2d = Te_arr[:, sweep_idx].reshape(grid_shape)
+    ne_2d = ne_arr[:, sweep_idx].reshape(grid_shape)
+
+    # Create a base colormap and tell it to render NaNs as white
+    cmap = copy.copy(plt.cm.rainbow)
+    cmap.set_bad(color='white')
+    interp = 'gaussian'
+
+    # Set up a 1x3 panel figure
+    fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+    t_wt_bias = t_ls[sweep_idx]*1e3 + 14 - 15.5
+    fig.suptitle(f'2D Spatial Plasma Profile (t = {t_wt_bias:.2f} ms)', fontsize=32, fontweight='bold')
+
+    # --- 1. Plasma Potential (Vp) ---
+    im0 = axs[0].imshow(Vp_2d, origin='lower', cmap=cmap, extent=extent, interpolation=interp, vmin=0, vmax=30)
+    axs[0].set_title('Plasma Potential ($V_p$) [V]')
+    axs[0].set_xlabel('X Position')
+    axs[0].set_ylabel('Y Position')
+    fig.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04)
+
+    # --- 2. Electron Temperature (Te) ---
+    im1 = axs[1].imshow(Te_2d, origin='lower', cmap=cmap, extent=extent, interpolation=interp, vmin=0, vmax=3)
+    axs[1].set_title('Electron Temp ($T_e$) [eV]')
+    axs[1].set_xlabel('X Position')
+    # Y-label hidden for the middle plot to save space
+    fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
+
+    # --- 3. Electron Density (ne) ---
+    im2 = axs[2].imshow(ne_2d, origin='lower', cmap=cmap, extent=extent, interpolation=interp, vmin=5e11, vmax=5e12)
+    axs[2].set_title('Electron Density ($n_e$) [cm$^{-3}$]')
+    axs[2].set_xlabel('X Position')
+    fig.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    plt.show()
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================
