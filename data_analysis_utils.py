@@ -102,6 +102,13 @@ def low_pass_filter(data, cutoff_freq):
         
         return signal.filtfilt(b, a, data)
 
+def butter_bandpass(lowcut, highcut, fs, order=5):
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = signal.butter(order, [low, high], btype='band')
+    return b, a
+
 def rolling_baseline(data, window_size=1000, quantile=0.1):
     """
     Estimate the baseline using a rolling window and a lower quantile.
