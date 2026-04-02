@@ -32,8 +32,11 @@ Processing Pipeline:
 Author: Data analysis pipeline for LAPD Mar2026 campaign
 """
 
+import nt
 import os
+import re
 import sys
+from jellyfish import nysiis
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal, ndimage, interpolate
@@ -109,6 +112,9 @@ def save_mach_data(ifn, save_path):
         pos_array = pos_dict[key]
         
         tarr, Vx_arr, Vy_arr = get_mach_data(f, adc, npos, nshot)
+        print('Applying Gaussian smoothing to raw data')
+        Vx_arr = ndimage.gaussian_filter1d(Vx_arr, sigma=50, axis=-1)
+        Vy_arr = ndimage.gaussian_filter1d(Vy_arr, sigma=50, axis=-1)
     
     # Save all data to NPZ file for later use
     np.savez(save_path, Vx_arr=Vx_arr, Vy_arr=Vy_arr, tarr=tarr, 
@@ -157,28 +163,26 @@ def load_mach_data(save_path):
     
     return Vx_arr, Vy_arr, tarr, xpos, ypos, pos_array, npos, nshot
 
-def process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, fs=1.0e6, lowcut=8000.0, highcut=30000.0, filter_order=4, median_window=5001, downsample_factor=10):
+def process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, fs=1.0e6, lowcut=500.0, highcut=12000.0, filter_order=4, median_window=5001, rms_window=500, downsample_factor=10):
     """
     Extracts amplitude envelopes of oscillations from Vx and Vy signal arrays 
-    using highly optimized baseline subtraction and Hilbert transforms.
+    using optimized baseline subtraction and Moving RMS envelopes.
     
     Assumes Vx_arr and Vy_arr have the shape (npos, n_shots, n_timepoints)
     """
     
-    n_timepoints = len(tarr)
+    n_shots = Vx_arr.shape[1]
+    n_timepoints = Vx_arr.shape[2]
     
     # ==========================================
     # 1. Pipeline Setup & Pre-calculations
     # ==========================================
-    # Bandpass filter design
+    # Stable Bandpass filter design (SOS)
     nyq = 0.5 * fs
-    b, a = signal.butter(filter_order, [lowcut/nyq, highcut/nyq], btype='band')
+    sos = signal.butter(filter_order, [lowcut/nyq, highcut/nyq], btype='band', output='sos')
     
-    # Fast FFT length for optimal Hilbert Transform speed
-    fast_len = next_fast_len(n_timepoints)
-    
-    # Baseline Decimation Setup (Fixed to 50 for max speed, independent of imshow downsampling)
-    baseline_dec_factor = 100
+    # Baseline Decimation Setup (Fixed to 50 for max speed)
+    baseline_dec_factor = 50 
     x_orig = np.arange(n_timepoints)
     x_dec = np.arange(0, n_timepoints, baseline_dec_factor)
     
@@ -187,7 +191,7 @@ def process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, fs=1.0e6, lowcut=8000.0, 
     if small_window % 2 == 0: 
         small_window += 1 # Ensure odd integer
         
-    # Output Downsampling Setup (for final heatmap rendering)
+    # Output Downsampling Setup
     downsampled_timepoints = n_timepoints // downsample_factor
     valid_time_length = downsampled_timepoints * downsample_factor
     
@@ -207,22 +211,26 @@ def process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, fs=1.0e6, lowcut=8000.0, 
         baseline = interpolate.interp1d(x_dec, baseline_dec, axis=-1, fill_value="extrapolate")(x_orig)
         flattened_shots = shots - baseline
         
-        # STEP B: Bandpass Filter
-        filtered_shots = signal.filtfilt(b, a, flattened_shots, axis=-1)
+        # STEP B: Stable Bandpass Filter (Prevents numerical explosion)
+        filtered_shots = signal.sosfiltfilt(sos, flattened_shots, axis=-1)
         
-        # STEP C: Fast Hilbert Transform
-        # Calculate with optimized padding, then slice back to original shape
-        analytic_signal = signal.hilbert(filtered_shots, N=fast_len, axis=-1)
-        amplitude_envelopes = np.abs(analytic_signal[..., :n_timepoints])
+        # STEP C: Moving RMS Envelope Calculation
+        squared_shots = filtered_shots ** 2
         
-        # STEP D: Average the Phase-Agnostic Envelopes across shots
-        mean_envelope = np.mean(amplitude_envelopes, axis=0)
+        # uniform_filter1d acts as a blazing fast moving average
+        mean_squares = ndimage.uniform_filter1d(squared_shots, size=rms_window, axis=-1)
         
-        # STEP E: Downsample for visualization/output
-        reshaped_envelope = mean_envelope[:valid_time_length].reshape(-1, downsample_factor)
-        downsampled_envelope = np.mean(reshaped_envelope, axis=1)
+        # Take the square root and multiply by sqrt(2) so it matches peak amplitude
+        rms_envelopes = np.sqrt(mean_squares) * np.sqrt(2)
         
-        return downsampled_envelope
+        # STEP D: Downsample EACH shot independently
+        reshaped_envelopes = rms_envelopes[:, :valid_time_length].reshape(n_shots, -1, downsample_factor)
+        downsampled_envelopes = np.mean(reshaped_envelopes, axis=-1)
+        
+        # STEP E: Average across the 4 shots as the very last step
+        final_averaged_envelope = np.mean(downsampled_envelopes, axis=0)
+        
+        return final_averaged_envelope
 
     # ==========================================
     # 3. Main Loop
@@ -249,6 +257,7 @@ def process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, fs=1.0e6, lowcut=8000.0, 
             'highcut': highcut,
             'filter_order': filter_order,
             'median_window': median_window,
+            'rms_window': rms_window,
             'downsample_factor': downsample_factor
         }
     }
@@ -322,54 +331,65 @@ def load_mach_envelope_data(save_path):
     }
 
 
-def plot_mach_heatmap(heatmap_Vx, heatmap_Vy, tarr_downsampled, npos, 
-                      title_suffix=''):
-    """
-    Generate heatmap visualization of Mach probe oscillation envelopes.
-    
-    Creates two side-by-side heatmaps showing oscillation amplitude evolution
-    for both Vx and Vy components across all spatial positions and time.
-    
-    Parameters
-    ----------
-    heatmap_Vx : np.ndarray
-        X-component heatmap matrix, shape (npos, downsampled_timepoints)
-    heatmap_Vy : np.ndarray
-        Y-component heatmap matrix, shape (npos, downsampled_timepoints)
-    tarr_downsampled : np.ndarray
-        Downsampled time array [s]
-    npos : int
-        Number of probe positions
-    title_suffix : str
-        Optional suffix to add to the title (e.g., run number)
-    """
-    fig, axs = plt.subplots(1, 2, figsize=(16, 6))
-    
-    max_time = tarr_downsampled[-1]
-    
-    # Plot Vx component
-    im_vx = axs[0].imshow(heatmap_Vx, aspect='auto', cmap='magma', origin='lower',
-                          extent=[0, max_time, 0, npos])
-    axs[0].set_xlabel('Time (s)', fontsize=12)
-    axs[0].set_ylabel('Position Index', fontsize=12)
-    axs[0].set_title(f'Mach Probe Vx Component {title_suffix}', fontsize=14, fontweight='bold')
-    cbar_vx = plt.colorbar(im_vx, ax=axs[0])
-    cbar_vx.set_label('Envelope Amplitude', fontsize=11)
-    
-    # Plot Vy component
-    im_vy = axs[1].imshow(heatmap_Vy, aspect='auto', cmap='magma', origin='lower',
-                          extent=[0, max_time, 0, npos])
-    axs[1].set_xlabel('Time (s)', fontsize=12)
-    axs[1].set_ylabel('Position Index', fontsize=12)
-    axs[1].set_title(f'Mach Probe Vy Component {title_suffix}', fontsize=14, fontweight='bold')
-    cbar_vy = plt.colorbar(im_vy, ax=axs[1])
-    cbar_vy.set_label('Envelope Amplitude', fontsize=11)
-    
-    fig.suptitle(f'Oscillation Onset and Amplitude Across {npos} Positions', 
-                 fontsize=16, fontweight='bold', y=1.02)
-    
-    plt.tight_layout()
+def plot_mach_heatmap(result, num_parts=10):
+
+    xpos = result['xpos']
+    ypos = result['ypos']
+    tarr = result['tarr_downsampled']
+    nx = len(xpos)
+    ny = len(ypos)
+    nt = len(tarr)
+    heat_map_Vx = result['heatmap_Vx'].reshape(ny, nx, nt)
+    heat_map_Vy = result['heatmap_Vy'].reshape(ny, nx, nt)
+
+    # Calculate time bin size
+    part_len = nt // num_parts
+
+    # Define spatial extent
+    extent = (xpos.min(), xpos.max(), ypos.min(), ypos.max())
+
+    # one shared color range for both fields
+    vmin = 0
+    vmax = 0.02
+
+    # 2 rows (Vx, Vy), num_parts columns (long skinny)
+    fig, axs = plt.subplots(2, num_parts, figsize=(1.5*num_parts, 6), squeeze=False)
+
+    for part in range(num_parts):
+        start_idx = part * part_len
+        end_idx = (part + 1) * part_len if part < num_parts - 1 else nt
+        t_center = tarr[start_idx:end_idx].mean()
+        vx_avg = heat_map_Vx[:, :, start_idx:end_idx].mean(axis=2)
+        vy_avg = heat_map_Vy[:, :, start_idx:end_idx].mean(axis=2)
+
+        ax_vx = axs[0, part]
+        ax_vy = axs[1, part]
+
+        im = ax_vx.imshow(vx_avg, origin='lower', cmap='magma',
+                        extent=extent, interpolation='gaussian',
+                        vmin=vmin, vmax=vmax)
+        ax_vx.set_title(f"{t_center*1e3:.2f} ms", fontsize=8)
+
+        ax_vy.imshow(vy_avg, origin='lower', cmap='magma',
+                    extent=extent, interpolation='gaussian',
+                    vmin=vmin, vmax=vmax)
+
+
+    # shared row labels
+    fig.text(0.01, 0.72, "Vx", va="center", ha="left", fontsize=12, weight="bold")
+    fig.text(0.01, 0.28, "Vy", va="center", ha="left", fontsize=12, weight="bold")
+
+    fig.subplots_adjust(left=0.06, right=0.98, top=0.92, bottom=0.15,
+                        wspace=0.12, hspace=0.12)
+
+    # horizontal shared colorbar at bottom
+    cbar_ax = fig.add_axes([0.15, 0.06, 0.70, 0.02])
+    fig.colorbar(im, cax=cbar_ax, orientation='horizontal',
+                label='Voltage amplitude (V)')
+
     plt.show()
+
+
 
 
 # ===============================================================================
@@ -390,12 +410,10 @@ if __name__ == '__main__':
     # =========================================================================
     # Option 1: Process from HDF5 and save envelopes
     # =========================================================================
-    save_mach_envelope_data(ifn, envelope_save_path)
+    # save_mach_envelope_data(ifn, envelope_save_path)
     
     # =========================================================================
     # Option 2: Load previously processed envelopes and visualize
     # =========================================================================
-    # result = load_mach_envelope_data(envelope_save_path)
-    # plot_mach_heatmap(result['heatmap_Vx'], result['heatmap_Vy'], 
-    #                   result['tarr_downsampled'], result['npos'],
-    #                   title_suffix=f"(Run {run_num})")
+    result = load_mach_envelope_data(envelope_save_path)
+    plot_mach_heatmap(result, num_parts=10)
