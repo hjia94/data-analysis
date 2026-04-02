@@ -38,6 +38,7 @@ import re
 import sys
 from jellyfish import nysiis
 import numpy as np
+import copy
 import matplotlib.pyplot as plt
 from scipy import signal, ndimage, interpolate
 from scipy.fft import next_fast_len
@@ -131,6 +132,9 @@ def save_mach_data(ifn, save_path):
         print('Applying Gaussian smoothing to raw data')
         for i in tqdm(range(npos), desc="Smoothing (Gaussian)"):
             Vxp_arr[i] = ndimage.gaussian_filter1d(Vxp_arr[i], sigma=50, axis=-1)
+            Vxm_arr[i] = ndimage.gaussian_filter1d(Vxm_arr[i], sigma=50, axis=-1)
+            Vyp_arr[i] = ndimage.gaussian_filter1d(Vyp_arr[i], sigma=50, axis=-1)
+            Vym_arr[i] = ndimage.gaussian_filter1d(Vym_arr[i], sigma=50, axis=-1)
             Vxm_arr[i] = ndimage.gaussian_filter1d(Vxm_arr[i], sigma=50, axis=-1)
             Vyp_arr[i] = ndimage.gaussian_filter1d(Vyp_arr[i], sigma=50, axis=-1)
             Vym_arr[i] = ndimage.gaussian_filter1d(Vym_arr[i], sigma=50, axis=-1)
@@ -368,8 +372,8 @@ def plot_mach_heatmap(result, num_parts=10):
     """
     Generate heatmap visualization of all 4 Mach probe channels.
     
-    Creates a 4 × num_parts grid showing spatial maps for each channel (Vx+, Vx-, Vy+, Vy-)
-    averaged over time bins.
+    Creates a num_parts column grid showing spatial maps of the summed signal
+    (Vx+ + Vx- + Vy+ + Vy-) averaged over time bins, with contour overlays.
     
     Parameters
     ----------
@@ -391,6 +395,9 @@ def plot_mach_heatmap(result, num_parts=10):
     heat_Vyp = result['heatmap_Vyp'].reshape(ny, nx, nt)
     heat_Vym = result['heatmap_Vym'].reshape(ny, nx, nt)
 
+    # Sum all 4 channels
+    heat_sum = heat_Vxp + heat_Vxm + heat_Vyp + heat_Vym
+
     # Calculate time bin size
     part_len = nt // num_parts
 
@@ -399,53 +406,167 @@ def plot_mach_heatmap(result, num_parts=10):
 
     # Calculate global min/max for consistent colormapping
     vmin = 0
-    vmax = max(heat_Vxp.max(), heat_Vxm.max(), heat_Vyp.max(), heat_Vym.max())
+    vmax = heat_sum.max()
 
-    # 4 rows (Vx+, Vx-, Vy+, Vy-), num_parts columns
-    fig, axs = plt.subplots(4, num_parts, figsize=(1.5*num_parts, 10), squeeze=False)
+    # 1 row, num_parts columns
+    fig, axs = plt.subplots(1, num_parts, figsize=(1.5*num_parts, 4), squeeze=False)
 
-    channel_data = [
-        (heat_Vxp, 'Vx+'),
-        (heat_Vxm, 'Vx-'),
-        (heat_Vyp, 'Vy+'),
-        (heat_Vym, 'Vy-')
-    ]
-
-    for ch_idx, (heat_map, ch_label) in enumerate(channel_data):
-        for part in range(num_parts):
-            start_idx = part * part_len
-            end_idx = (part + 1) * part_len if part < num_parts - 1 else nt
-            t_center = tarr[start_idx:end_idx].mean()
-            ch_avg = heat_map[:, :, start_idx:end_idx].mean(axis=2)
-
-            ax = axs[ch_idx, part]
-            im = ax.imshow(ch_avg, origin='lower', cmap='magma',
-                          extent=extent, interpolation='gaussian',
-                          vmin=vmin, vmax=vmax)
-            
-            # Title only on first row
-            if ch_idx == 0:
-                ax.set_title(f"{t_center*1e3:.2f} ms", fontsize=8)
-            
-            # Y-label on first column
-            if part == 0:
-                ax.set_ylabel(ch_label, fontsize=11, weight='bold')
-
-    # X labels only on bottom row
     for part in range(num_parts):
-        axs[3, part].set_xlabel('X [cm]', fontsize=8)
+        start_idx = part * part_len
+        end_idx = (part + 1) * part_len if part < num_parts - 1 else nt
+        t_center = tarr[start_idx:end_idx].mean()
+        ch_avg = heat_sum[:, :, start_idx:end_idx].mean(axis=2)
 
-    fig.subplots_adjust(left=0.08, right=0.98, top=0.95, bottom=0.12,
-                        wspace=0.10, hspace=0.15)
+        ax = axs[0, part]
+        im = ax.imshow(ch_avg, origin='lower', cmap='magma',
+                      extent=extent, interpolation='gaussian',
+                      vmin=vmin, vmax=vmax)
+        
+        # Add contours
+        X, Y = np.meshgrid(xpos, ypos)
+        ax.contour(X, Y, ch_avg, levels=8, colors='white', alpha=0.4, linewidths=0.5)
+        
+        ax.set_title(f"{t_center*1e3:.2f} ms", fontsize=8)
+        ax.set_xlabel('X [cm]', fontsize=8)
+        if part == 0:
+            ax.set_ylabel('Y [cm]', fontsize=8)
 
-    # horizontal shared colorbar at bottom
-    cbar_ax = fig.add_axes([0.15, 0.05, 0.70, 0.015])
-    fig.colorbar(im, cax=cbar_ax, orientation='horizontal',
-                label='Voltage amplitude (V)')
+    fig.subplots_adjust(left=0.08, right=0.92, top=0.90, bottom=0.15,
+                        wspace=0.25, hspace=0.15)
 
-    fig.suptitle(f'Mach Probe: All 4 Channels Averaged Over {num_parts} Time Bins',
-                fontsize=14, fontweight='bold')
+    # Colorbar
+    cbar_ax = fig.add_axes([0.95, 0.15, 0.02, 0.75])
+    fig.colorbar(im, cax=cbar_ax, label='Summed Voltage Amplitude (V)')
 
+    fig.suptitle('Mach Probe: Sum of Vxp + Vxm + Vyp + Vym', fontsize=14, fontweight='bold')
+
+    plt.show()
+
+
+def plot_combined_ne_mach(mach_result, iv_ne_arr, iv_t_ls, iv_xpos=None, iv_ypos=None, num_parts=10):
+    """
+    Plot electron density from IV probe as imshow with Mach probe heatmap as contours.
+    Divides both datasets into num_parts time bins and averages within each bin.
+    
+    Both datasets must have the same spatial grid (same xpos, ypos).
+    
+    Parameters
+    ----------
+    mach_result : dict
+        Dictionary from load_mach_envelope_data containing heatmaps and metadata
+    iv_ne_arr : np.ndarray
+        Electron density array from IV analysis (n_locs, n_sweeps)
+    iv_t_ls : np.ndarray
+        Time array for IV sweeps [s]
+    iv_xpos : np.ndarray, optional
+        X positions for IV probe. If None, uses mach_result['xpos']
+    iv_ypos : np.ndarray, optional
+        Y positions for IV probe. If None, uses mach_result['ypos']
+    num_parts : int
+        Number of time bins (default: 10)
+    """
+    # Get mach data
+    mach_tarr = mach_result['tarr_downsampled']
+    mach_xpos = mach_result['xpos']
+    mach_ypos = mach_result['ypos']
+    mach_nt = len(mach_tarr)
+    
+    # Sum all 4 mach channels
+    mach_heatmap_sum = (mach_result['heatmap_Vxp'] + mach_result['heatmap_Vxm'] + 
+                        mach_result['heatmap_Vyp'] + mach_result['heatmap_Vym'])
+    
+    nx = len(mach_xpos)
+    ny = len(mach_ypos)
+    mach_heatmap_3d = mach_heatmap_sum.reshape(ny, nx, mach_nt)
+    
+    # Normalize mach heatmap to [0, 1] for consistent contour levels
+    mach_heatmap_3d_normalized = mach_heatmap_3d
+    
+    # Spatial extent (use mach positions if IV positions not provided)
+    xpos_plot = iv_xpos if iv_xpos is not None else mach_xpos
+    ypos_plot = iv_ypos if iv_ypos is not None else mach_ypos
+    extent = (xpos_plot.min(), xpos_plot.max(), ypos_plot.min(), ypos_plot.max())
+    
+    grid_shape = (ny, nx)
+    
+    # Define time bins (use IV time range)
+    iv_t_start = iv_t_ls.min()
+    iv_t_end = iv_t_ls.max()
+    time_edges = np.linspace(iv_t_start, iv_t_end, num_parts + 1)
+    
+    # Determine subplot layout (5 columns)
+    ncols = 5
+    nrows = (num_parts + ncols - 1) // ncols
+    
+    # Create figure
+    fig, axs = plt.subplots(nrows, ncols, figsize=(18, 4*nrows), squeeze=False)
+    axs = axs.flatten()
+    
+    im_obj = None  # To store image object for colorbar
+    
+    # Plot each time bin
+    for part in range(num_parts):
+        t_start = time_edges[part]
+        t_end = time_edges[part + 1]
+        t_center = (t_start + t_end) / 2
+        
+        # Find IV sweeps within this time window
+        mask = (iv_t_ls >= t_start) & (iv_t_ls < t_end)
+        if part == num_parts - 1:  # Include last edge in final bin
+            mask = (iv_t_ls >= t_start) & (iv_t_ls <= t_end)
+        
+        # Average ne over sweeps in this window
+        ne_in_window = iv_ne_arr[:, mask]
+        if ne_in_window.shape[1] > 0:
+            ne_avg = np.nanmean(ne_in_window, axis=1)
+        else:
+            ne_avg = np.full(iv_ne_arr.shape[0], np.nan)
+        
+        ne_2d = ne_avg.reshape(grid_shape)
+        
+        # Find closest Mach time to center of bin
+        mach_time_idx = np.argmin(np.abs(mach_tarr - t_center))
+        mach_2d = mach_heatmap_3d_normalized[:, :, mach_time_idx]
+        
+        # Plot
+        ax = axs[part]
+        
+        # Imshow for mach heatmap
+        im_obj = ax.imshow(mach_2d, origin='lower', cmap='hot', extent=extent, 
+                           interpolation='gaussian', vmin=0, vmax=0.1)
+        
+        # Contours for electron density (4 levels with distinct colors for each level)
+        contour = ax.contour(ne_2d, extent=extent, colors=['cyan', 'blue', 'orange', 'red'], linewidths=1.2,
+                             levels=[1e12, 2e12, 3e12, 4e12])
+        
+        # Title with time only
+        ax.set_title(f'{t_center*1e3:.1f} ms', fontsize=9)
+        # ax.set_xticks([])
+        # ax.set_yticks([])
+    
+    # Hide unused subplots
+    for idx in range(num_parts, len(axs)):
+        axs[idx].axis('off')
+    
+    # Add contour level legend at top of figure with colored values
+    contour_levels = [1e12, 2e12, 3e12, 4e12]
+    contour_colors = ['cyan', 'blue', 'orange', 'red']
+    fig.text(0.5, 1, 'Electron Density Levels [cm$^{-3}$]:', 
+             ha='center', va='top', fontsize=10, fontweight='bold')
+    
+    # Position colored level values across the top
+    x_positions = [0.20, 0.38, 0.56, 0.74]
+    for x_pos, level, color in zip(x_positions, contour_levels, contour_colors):
+        fig.text(x_pos, 0.95, f'{level:.0e}', color=color, fontsize=11, fontweight='bold')
+    
+    # Single colorbar at bottom
+    fig.subplots_adjust(left=0.05, right=0.95, top=0.92, bottom=0.12,
+                        wspace=0.15, hspace=0.4)
+    cbar_ax = fig.add_axes([0.15, 0.05, 0.70, 0.02])
+    fig.colorbar(im_obj, cax=cbar_ax, orientation='horizontal',
+                label='Mach Amplitude [V]')
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.show()
 
 
@@ -467,12 +588,20 @@ if __name__ == '__main__':
     envelope_save_path = os.path.join(data_dir, f"{run_num}-mach-envelope-data.npz")
     
     # =========================================================================
-    # Option 1: Process from HDF5 and save envelopes
+    # Load Mach probe data (run 09)
     # =========================================================================
-    # save_mach_envelope_data(ifn, envelope_save_path)
+    print("Loading Mach probe envelope data...")
+    mach_result = load_mach_envelope_data(envelope_save_path)
     
     # =========================================================================
-    # Option 2: Load previously processed envelopes and visualize
+    # Load IV/Plasma data (run 11)
     # =========================================================================
-    result = load_mach_envelope_data(envelope_save_path)
-    plot_mach_heatmap(result, num_parts=10)
+    print("Loading IV/Plasma data...")
+    from Mar2026_IV import load_data
+    Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls = load_data(data_dir, '11')
+    
+    # =========================================================================
+    # Plot combined: electron density with Mach probe contours
+    # =========================================================================
+    print("Generating combined plot...")
+    plot_combined_ne_mach(mach_result, ne_arr, t_ls, num_parts=10)
