@@ -57,8 +57,10 @@ def get_mach_data(f, adc, npos, nshot):
     
     The Mach probe measures perpendicular ion saturation current in two directions.
     Data is read from:
-    - Board 1, Channel 1: Vx component
+    - Board 1, Channel 1: Vx+ component
+    - Board 1, Channel 2: Vx- component
     - Board 4, Channel 6: Vy component
+    - Board 4, Channel 7: Vy- component
     
     Parameters
     ----------
@@ -76,18 +78,32 @@ def get_mach_data(f, adc, npos, nshot):
     tuple
         - tarr : np.ndarray
             Time array [s], shape (n_time_samples,)
-        - Vx_arr : np.ndarray
-            X-component Mach probe voltage array, shape (npos, nshot, n_time_samples)
-        - Vy_arr : np.ndarray
-            Y-component Mach probe voltage array, shape (npos, nshot, n_time_samples)
+        - Vxp_arr : np.ndarray
+            X+ component voltage array, shape (npos, nshot, n_time_samples)
+        - Vxm_arr : np.ndarray
+            X- component voltage array, shape (npos, nshot, n_time_samples)
+        - Vyp_arr : np.ndarray
+            Y+ component voltage array, shape (npos, nshot, n_time_samples)
+        - Vym_arr : np.ndarray
+            Y- component voltage array, shape (npos, nshot, n_time_samples)
     """
+    # Board 1, Channel 1: Vx+ component
     data, tarr = rh.read_data(f, 1, 1, index_arr=slice(npos * nshot), adc=adc)
-    Vx_arr = data['signal'].reshape((npos, nshot, -1))
+    Vxp_arr = data['signal'].reshape((npos, nshot, -1))
     
+    # Board 1, Channel 2: Vx- component
+    data, tarr = rh.read_data(f, 1, 2, index_arr=slice(npos * nshot), adc=adc)
+    Vxm_arr = data['signal'].reshape((npos, nshot, -1))
+    
+    # Board 4, Channel 6: Vy component
     data, tarr = rh.read_data(f, 4, 6, index_arr=slice(npos * nshot), adc=adc)
-    Vy_arr = data['signal'].reshape((npos, nshot, -1))
+    Vyp_arr = data['signal'].reshape((npos, nshot, -1))
     
-    return tarr, Vx_arr, Vy_arr
+    # Board 4, Channel 7: Vy- component
+    data, tarr = rh.read_data(f, 4, 7, index_arr=slice(npos * nshot), adc=adc)
+    Vym_arr = data['signal'].reshape((npos, nshot, -1))
+    
+    return tarr, Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr
 
 
 def save_mach_data(ifn, save_path):
@@ -111,14 +127,17 @@ def save_mach_data(ifn, save_path):
         key = list(pos_dict.keys())[0]
         pos_array = pos_dict[key]
         
-        tarr, Vx_arr, Vy_arr = get_mach_data(f, adc, npos, nshot)
+        tarr, Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr = get_mach_data(f, adc, npos, nshot)
         print('Applying Gaussian smoothing to raw data')
-        Vx_arr = ndimage.gaussian_filter1d(Vx_arr, sigma=50, axis=-1)
-        Vy_arr = ndimage.gaussian_filter1d(Vy_arr, sigma=50, axis=-1)
+        for i in tqdm(range(npos), desc="Smoothing (Gaussian)"):
+            Vxp_arr[i] = ndimage.gaussian_filter1d(Vxp_arr[i], sigma=50, axis=-1)
+            Vxm_arr[i] = ndimage.gaussian_filter1d(Vxm_arr[i], sigma=50, axis=-1)
+            Vyp_arr[i] = ndimage.gaussian_filter1d(Vyp_arr[i], sigma=50, axis=-1)
+            Vym_arr[i] = ndimage.gaussian_filter1d(Vym_arr[i], sigma=50, axis=-1)
     
     # Save all data to NPZ file for later use
-    np.savez(save_path, Vx_arr=Vx_arr, Vy_arr=Vy_arr, tarr=tarr, 
-             xpos=xpos, ypos=ypos, zpos=zpos, npos=npos, nshot=nshot, pos_array=pos_array)
+    np.savez(save_path, Vxp_arr=Vxp_arr, Vxm_arr=Vxm_arr, Vyp_arr=Vyp_arr, Vym_arr=Vym_arr,
+             tarr=tarr, xpos=xpos, ypos=ypos, zpos=zpos, npos=npos, nshot=nshot, pos_array=pos_array)
     print(f"Mach probe raw data saved to: {save_path}")
 
 
@@ -152,8 +171,10 @@ def load_mach_data(save_path):
             Number of shots per position
     """
     data = np.load(save_path)
-    Vx_arr = data['Vx_arr']
-    Vy_arr = data['Vy_arr']
+    Vxp_arr = data['Vxp_arr']
+    Vxm_arr = data['Vxm_arr']
+    Vyp_arr = data['Vyp_arr']
+    Vym_arr = data['Vym_arr']
     tarr = data['tarr']
     xpos = data['xpos']
     ypos = data['ypos']
@@ -161,18 +182,20 @@ def load_mach_data(save_path):
     npos = int(data['npos'])
     nshot = int(data['nshot'])
     
-    return Vx_arr, Vy_arr, tarr, xpos, ypos, pos_array, npos, nshot
+    return Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr, tarr, xpos, ypos, pos_array, npos, nshot
 
-def process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, fs=1.0e6, lowcut=500.0, highcut=12000.0, filter_order=4, median_window=5001, rms_window=500, downsample_factor=10):
+def process_mach_envelopes(Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr, tarr, npos, fs=1.0e6, lowcut=500.0, highcut=12000.0, filter_order=4, median_window=5001, rms_window=500, downsample_factor=10):
     """
-    Extracts amplitude envelopes of oscillations from Vx and Vy signal arrays 
-    using optimized baseline subtraction and Moving RMS envelopes.
+    Extracts amplitude envelopes of oscillations from all 4 Mach probe channels.
     
-    Assumes Vx_arr and Vy_arr have the shape (npos, n_shots, n_timepoints)
+    Uses optimized baseline subtraction and Moving RMS envelopes.
+    Assumes all input arrays have the shape (npos, n_shots, n_timepoints)
+    
+    Returns envelopes for all 4 channels: Vx+, Vx-, Vy+, Vy-
     """
     
-    n_shots = Vx_arr.shape[1]
-    n_timepoints = Vx_arr.shape[2]
+    n_shots = Vxp_arr.shape[1]
+    n_timepoints = Vxp_arr.shape[2]
     
     # ==========================================
     # 1. Pipeline Setup & Pre-calculations
@@ -195,9 +218,11 @@ def process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, fs=1.0e6, lowcut=500.0, h
     downsampled_timepoints = n_timepoints // downsample_factor
     valid_time_length = downsampled_timepoints * downsample_factor
     
-    # Initialize output heatmaps
-    heatmap_Vx = np.zeros((npos, downsampled_timepoints))
-    heatmap_Vy = np.zeros((npos, downsampled_timepoints))
+    # Initialize output heatmaps for all 4 channels
+    heatmap_Vxp = np.zeros((npos, downsampled_timepoints))
+    heatmap_Vxm = np.zeros((npos, downsampled_timepoints))
+    heatmap_Vyp = np.zeros((npos, downsampled_timepoints))
+    heatmap_Vym = np.zeros((npos, downsampled_timepoints))
     
     # ==========================================
     # 2. Core Processing Function
@@ -237,8 +262,10 @@ def process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, fs=1.0e6, lowcut=500.0, h
     # ==========================================
     print(f"Processing {npos} positions...")
     for i in tqdm(range(npos), desc="Extracting Envelopes"):
-        heatmap_Vx[i, :] = process_component(Vx_arr[i, :, :])
-        heatmap_Vy[i, :] = process_component(Vy_arr[i, :, :])
+        heatmap_Vxp[i, :] = process_component(Vxp_arr[i, :, :])
+        heatmap_Vxm[i, :] = process_component(Vxm_arr[i, :, :])
+        heatmap_Vyp[i, :] = process_component(Vyp_arr[i, :, :])
+        heatmap_Vym[i, :] = process_component(Vym_arr[i, :, :])
         
     # ==========================================
     # 4. Process Time Array & Return
@@ -248,8 +275,10 @@ def process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, fs=1.0e6, lowcut=500.0, h
     tarr_downsampled = np.mean(tarr_reshaped, axis=1)
 
     return {
-        'heatmap_Vx': heatmap_Vx,
-        'heatmap_Vy': heatmap_Vy,
+        'heatmap_Vxp': heatmap_Vxp,
+        'heatmap_Vxm': heatmap_Vxm,
+        'heatmap_Vyp': heatmap_Vyp,
+        'heatmap_Vym': heatmap_Vym,
         'tarr_downsampled': tarr_downsampled,
         'parameters': {
             'fs': fs,
@@ -281,11 +310,11 @@ def save_mach_envelope_data(ifn, save_path, **process_kwargs):
     if not os.path.exists(raw_path):
         save_mach_data(ifn, raw_path)
     
-    Vx_arr, Vy_arr, tarr, xpos, ypos, pos_array, npos, nshot = load_mach_data(raw_path)
+    Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr, tarr, xpos, ypos, pos_array, npos, nshot = load_mach_data(raw_path)
     
     # Process envelopes
     try:
-        result = process_mach_envelopes(Vx_arr, Vy_arr, tarr, npos, **process_kwargs)
+        result = process_mach_envelopes(Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr, tarr, npos, **process_kwargs)
     except KeyboardInterrupt:
         print("Processing interrupted by user ctrl+c.")
         return
@@ -295,8 +324,10 @@ def save_mach_envelope_data(ifn, save_path, **process_kwargs):
     
     # Save processed data
     np.savez(save_path,
-             heatmap_Vx=result['heatmap_Vx'],
-             heatmap_Vy=result['heatmap_Vy'],
+             heatmap_Vxp=result['heatmap_Vxp'],
+             heatmap_Vxm=result['heatmap_Vxm'],
+             heatmap_Vyp=result['heatmap_Vyp'],
+             heatmap_Vym=result['heatmap_Vym'],
              tarr_downsampled=result['tarr_downsampled'],
              xpos=xpos, ypos=ypos, npos=npos,
              fs=result['parameters']['fs'],
@@ -322,8 +353,10 @@ def load_mach_envelope_data(save_path):
     """
     data = np.load(save_path)
     return {
-        'heatmap_Vx': data['heatmap_Vx'],
-        'heatmap_Vy': data['heatmap_Vy'],
+        'heatmap_Vxp': data['heatmap_Vxp'],
+        'heatmap_Vxm': data['heatmap_Vxm'],
+        'heatmap_Vyp': data['heatmap_Vyp'],
+        'heatmap_Vym': data['heatmap_Vym'],
         'tarr_downsampled': data['tarr_downsampled'],
         'xpos': data['xpos'],
         'ypos': data['ypos'],
@@ -332,15 +365,31 @@ def load_mach_envelope_data(save_path):
 
 
 def plot_mach_heatmap(result, num_parts=10):
-
+    """
+    Generate heatmap visualization of all 4 Mach probe channels.
+    
+    Creates a 4 × num_parts grid showing spatial maps for each channel (Vx+, Vx-, Vy+, Vy-)
+    averaged over time bins.
+    
+    Parameters
+    ----------
+    result : dict
+        Dictionary from load_mach_envelope_data containing heatmaps and metadata
+    num_parts : int
+        Number of time bins (default: 10)
+    """
     xpos = result['xpos']
     ypos = result['ypos']
     tarr = result['tarr_downsampled']
     nx = len(xpos)
     ny = len(ypos)
     nt = len(tarr)
-    heat_map_Vx = result['heatmap_Vx'].reshape(ny, nx, nt)
-    heat_map_Vy = result['heatmap_Vy'].reshape(ny, nx, nt)
+    
+    # Reshape all 4 channels to 3D
+    heat_Vxp = result['heatmap_Vxp'].reshape(ny, nx, nt)
+    heat_Vxm = result['heatmap_Vxm'].reshape(ny, nx, nt)
+    heat_Vyp = result['heatmap_Vyp'].reshape(ny, nx, nt)
+    heat_Vym = result['heatmap_Vym'].reshape(ny, nx, nt)
 
     # Calculate time bin size
     part_len = nt // num_parts
@@ -348,44 +397,54 @@ def plot_mach_heatmap(result, num_parts=10):
     # Define spatial extent
     extent = (xpos.min(), xpos.max(), ypos.min(), ypos.max())
 
-    # one shared color range for both fields
+    # Calculate global min/max for consistent colormapping
     vmin = 0
-    vmax = 0.02
+    vmax = max(heat_Vxp.max(), heat_Vxm.max(), heat_Vyp.max(), heat_Vym.max())
 
-    # 2 rows (Vx, Vy), num_parts columns (long skinny)
-    fig, axs = plt.subplots(2, num_parts, figsize=(1.5*num_parts, 6), squeeze=False)
+    # 4 rows (Vx+, Vx-, Vy+, Vy-), num_parts columns
+    fig, axs = plt.subplots(4, num_parts, figsize=(1.5*num_parts, 10), squeeze=False)
 
+    channel_data = [
+        (heat_Vxp, 'Vx+'),
+        (heat_Vxm, 'Vx-'),
+        (heat_Vyp, 'Vy+'),
+        (heat_Vym, 'Vy-')
+    ]
+
+    for ch_idx, (heat_map, ch_label) in enumerate(channel_data):
+        for part in range(num_parts):
+            start_idx = part * part_len
+            end_idx = (part + 1) * part_len if part < num_parts - 1 else nt
+            t_center = tarr[start_idx:end_idx].mean()
+            ch_avg = heat_map[:, :, start_idx:end_idx].mean(axis=2)
+
+            ax = axs[ch_idx, part]
+            im = ax.imshow(ch_avg, origin='lower', cmap='magma',
+                          extent=extent, interpolation='gaussian',
+                          vmin=vmin, vmax=vmax)
+            
+            # Title only on first row
+            if ch_idx == 0:
+                ax.set_title(f"{t_center*1e3:.2f} ms", fontsize=8)
+            
+            # Y-label on first column
+            if part == 0:
+                ax.set_ylabel(ch_label, fontsize=11, weight='bold')
+
+    # X labels only on bottom row
     for part in range(num_parts):
-        start_idx = part * part_len
-        end_idx = (part + 1) * part_len if part < num_parts - 1 else nt
-        t_center = tarr[start_idx:end_idx].mean()
-        vx_avg = heat_map_Vx[:, :, start_idx:end_idx].mean(axis=2)
-        vy_avg = heat_map_Vy[:, :, start_idx:end_idx].mean(axis=2)
+        axs[3, part].set_xlabel('X [cm]', fontsize=8)
 
-        ax_vx = axs[0, part]
-        ax_vy = axs[1, part]
-
-        im = ax_vx.imshow(vx_avg, origin='lower', cmap='magma',
-                        extent=extent, interpolation='gaussian',
-                        vmin=vmin, vmax=vmax)
-        ax_vx.set_title(f"{t_center*1e3:.2f} ms", fontsize=8)
-
-        ax_vy.imshow(vy_avg, origin='lower', cmap='magma',
-                    extent=extent, interpolation='gaussian',
-                    vmin=vmin, vmax=vmax)
-
-
-    # shared row labels
-    fig.text(0.01, 0.72, "Vx", va="center", ha="left", fontsize=12, weight="bold")
-    fig.text(0.01, 0.28, "Vy", va="center", ha="left", fontsize=12, weight="bold")
-
-    fig.subplots_adjust(left=0.06, right=0.98, top=0.92, bottom=0.15,
-                        wspace=0.12, hspace=0.12)
+    fig.subplots_adjust(left=0.08, right=0.98, top=0.95, bottom=0.12,
+                        wspace=0.10, hspace=0.15)
 
     # horizontal shared colorbar at bottom
-    cbar_ax = fig.add_axes([0.15, 0.06, 0.70, 0.02])
+    cbar_ax = fig.add_axes([0.15, 0.05, 0.70, 0.015])
     fig.colorbar(im, cax=cbar_ax, orientation='horizontal',
                 label='Voltage amplitude (V)')
+
+    fig.suptitle(f'Mach Probe: All 4 Channels Averaged Over {num_parts} Time Bins',
+                fontsize=14, fontweight='bold')
 
     plt.show()
 
