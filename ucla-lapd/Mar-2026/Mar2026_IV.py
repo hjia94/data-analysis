@@ -220,46 +220,153 @@ def load_data(data_dir, run_num):
 
     return Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls
 
-def plot_result(Vp_arr, Te_arr, ne_arr, xpos, ypos, t_ls):
-    extent = min(xpos), max(xpos), min(ypos), max(ypos)
-
-    sweep_idx = 24
-    grid_shape = (61, 61) 
-    # Extract the data for the requested sweep and reshape to 2D
-    Vp_2d = Vp_arr[:, sweep_idx].reshape(grid_shape)
-    Te_2d = Te_arr[:, sweep_idx].reshape(grid_shape)
-    ne_2d = ne_arr[:, sweep_idx].reshape(grid_shape)
-
+def plot_result(ne_arr, xpos, ypos, t_ls):
+    """
+    Plot electron density for all time frames in a grid layout.
+    
+    Parameters
+    ----------
+    ne_arr : np.ndarray
+        Electron density array (n_locs, n_sweeps)
+    xpos : np.ndarray
+        X positions of probe locations [cm]
+    ypos : np.ndarray
+        Y positions of probe locations [cm]
+    t_ls : np.ndarray
+        Time array for sweeps [s]
+    """
+    extent = (min(xpos), max(xpos), min(ypos), max(ypos))
+    
+    n_locs, n_sweeps = ne_arr.shape
+    grid_shape = (len(ypos), len(xpos))
+    
     # Create a base colormap and tell it to render NaNs as white
-    cmap = copy.copy(plt.cm.rainbow)
+    cmap = copy.copy(plt.cm.viridis)
     cmap.set_bad(color='white')
     interp = 'gaussian'
+    
+    # Get global ne range for consistent colormap
+    ne_valid_all = ne_arr[~np.isnan(ne_arr)]
+    if len(ne_valid_all) > 0:
+        ne_vmin = ne_valid_all.min()
+        ne_vmax = ne_valid_all.max()
+    else:
+        ne_vmin, ne_vmax = 0, 1  # Default range if no valid data
+    
+    # Determine subplot layout (5 columns)
+    ncols = 5
+    nrows = (n_sweeps + ncols - 1) // ncols
+    
+    # Create figure
+    fig, axs = plt.subplots(nrows, ncols, figsize=(18, 4*nrows), squeeze=False)
+    axs = axs.flatten()
+    
+    im_obj = None  # To store image object for colorbar
+    
+    # Plot each sweep
+    for sweep_idx in range(n_sweeps):
+        ne_2d = ne_arr[:, sweep_idx].reshape(grid_shape)
+        t_sweep = t_ls[sweep_idx] * 1e3  # Convert to ms
+        
+        ax = axs[sweep_idx]
+        im_obj = ax.imshow(ne_2d, origin='lower', cmap=cmap, extent=extent, 
+                           interpolation=interp, vmin=ne_vmin, vmax=ne_vmax)
+        
+        ax.set_title(f'{t_sweep:.1f} ms', fontsize=9)
+    
+    # Hide unused subplots
+    for idx in range(n_sweeps, len(axs)):
+        axs[idx].axis('off')
+    
+    # Single colorbar at bottom
+    fig.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.12,
+                        wspace=0.15, hspace=0.4)
+    cbar_ax = fig.add_axes([0.15, 0.05, 0.70, 0.02])
+    fig.colorbar(im_obj, cax=cbar_ax, orientation='horizontal',
+                label='Electron Density $n_e$ [cm$^{-3}$]')
 
-    # Set up a 1x3 panel figure
-    fig, axs = plt.subplots(1, 3, figsize=(18, 5))
-    t_wt_bias = t_ls[sweep_idx]*1e3 + 14 - 15.5
-    fig.suptitle(f'2D Spatial Plasma Profile (t = {t_wt_bias:.2f} ms)', fontsize=32, fontweight='bold')
+    plt.show()
 
-    # --- 1. Plasma Potential (Vp) ---
-    im0 = axs[0].imshow(Vp_2d, origin='lower', cmap=cmap, extent=extent, interpolation=interp, vmin=0, vmax=30)
-    axs[0].set_title('Plasma Potential ($V_p$) [V]')
-    axs[0].set_xlabel('X Position')
-    axs[0].set_ylabel('Y Position')
-    fig.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04)
-
-    # --- 2. Electron Temperature (Te) ---
-    im1 = axs[1].imshow(Te_2d, origin='lower', cmap=cmap, extent=extent, interpolation=interp, vmin=0, vmax=3)
-    axs[1].set_title('Electron Temp ($T_e$) [eV]')
-    axs[1].set_xlabel('X Position')
-    # Y-label hidden for the middle plot to save space
-    fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
-
-    # --- 3. Electron Density (ne) ---
-    im2 = axs[2].imshow(ne_2d, origin='lower', cmap=cmap, extent=extent, interpolation=interp, vmin=5e11, vmax=5e12)
-    axs[2].set_title('Electron Density ($n_e$) [cm$^{-3}$]')
-    axs[2].set_xlabel('X Position')
-    fig.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
-
+def plot_result_line(Vp_arr, Te_arr, ne_arr, xpos, ypos, t_ls, tndx_list):
+    """
+    Plot center line across y=0 showing Vp, Te, and ne at selected time indices.
+    
+    Parameters
+    ----------
+    Vp_arr : np.ndarray
+        Plasma potential array (n_locs, n_sweeps)
+    Te_arr : np.ndarray
+        Electron temperature array (n_locs, n_sweeps)
+    ne_arr : np.ndarray
+        Electron density array (n_locs, n_sweeps)
+    xpos : np.ndarray
+        X positions of probe locations [cm]
+    ypos : np.ndarray
+        Y positions of probe locations [cm]
+    t_ls : np.ndarray
+        Time array for sweeps [s]
+    tndx_list : list
+        List of time indices to plot
+    """
+    # Find the index of the center line (closest to y=0)
+    y_center_idx = np.argmin(np.abs(ypos))
+    
+    nx = len(xpos)
+    ny = len(ypos)
+    
+    # Calculate linear indices for the center line
+    line_indices = np.arange(ny) * nx + y_center_idx
+    
+    # Create figure with 3 subplots for Vp, Te, ne
+    fig, axs = plt.subplots(3, 1, figsize=(12, 10))
+    
+    # Color map for different time indices
+    colors = plt.cm.rainbow(np.linspace(0, 1, len(tndx_list)))
+    
+    # Iterate through selected time indices
+    for color, t_idx in zip(colors, tndx_list):
+        # Ensure time index is valid
+        if t_idx >= Vp_arr.shape[1]:
+            print(f"Warning: time index {t_idx} exceeds array size {Vp_arr.shape[1]}")
+            continue
+        
+        t_val = t_ls[t_idx] * 1e3  # Convert to ms
+        
+        # Extract center line data
+        Vp_line = Vp_arr[line_indices, t_idx]
+        Te_line = Te_arr[line_indices, t_idx]
+        ne_line = ne_arr[line_indices, t_idx]
+        
+        # Get corresponding x positions
+        x_line = xpos
+        
+        # Plot Vp
+        axs[0].plot(x_line, Vp_line, 'o-', color=color, 
+                   label=f't = {t_val:.2f} ms', linewidth=2, markersize=5)
+        
+        # Plot Te
+        axs[1].plot(x_line, Te_line, 's-', color=color, 
+                   label=f't = {t_val:.2f} ms', linewidth=2, markersize=5)
+        
+        # Plot ne
+        axs[2].plot(x_line, ne_line, '^-', color=color, 
+                   label=f't = {t_val:.2f} ms', linewidth=2, markersize=5)
+    
+    # Set labels and titles
+    axs[0].set_title(f'Plasma Parameter (Center Line at y ≈ {ypos[y_center_idx]:.2f} cm)', fontsize=12, fontweight='bold')
+    axs[0].set_ylabel('Vp [V]', fontsize=11)
+    axs[0].legend(fontsize=9, loc='best')
+    axs[0].grid(True, alpha=0.3)
+    
+    axs[1].set_ylabel('Te [eV]', fontsize=11)
+    axs[1].legend(fontsize=9, loc='best')
+    axs[1].grid(True, alpha=0.3)
+    
+    axs[2].set_xlabel('X Position [cm]', fontsize=11)
+    axs[2].set_ylabel('ne [cm$^{-3}$]', fontsize=11)
+    axs[2].legend(fontsize=9, loc='best')
+    axs[2].grid(True, alpha=0.3)
+    
     plt.tight_layout()
     plt.show()
 #===========================================================================================================
@@ -273,12 +380,13 @@ if __name__ == '__main__':
     data_dir = os.path.dirname(ifn)
     run_num = os.path.basename(ifn).split('-')[0]
     
-    IV_save_path = os.path.join(data_dir, f"{run_num}-sweep-data.npz")
-    data = np.load(IV_save_path)
-    voltage_data = data['Vswp_arr_rs']
-    current_data = data['IswpL_arr_rs']
+    # Load data
+    Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls = load_data(data_dir, run_num)
+    
+    # Plot result
+    with lapd.File(ifn) as f:
+        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_bmotion_probe_motion(f)
 
-    save_path = os.path.join(data_dir, f"{run_num}-plasma-data.npz")
-    Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err = process_and_save(voltage_data, current_data, save_path)
-
-    # save_IV_data(ifn, IV_save_path)
+    # plot_result(ne_arr, xpos, ypos, t_ls)
+    tndx_list = [0, 7, 15, 20]
+    plot_result_line(Vp_arr, Te_arr, ne_arr, xpos, ypos, t_ls, tndx_list)
