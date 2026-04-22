@@ -1,8 +1,159 @@
 import cv2
+import logging
 import numpy as np
 import os
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional, Iterator, Tuple
 from scipy.constants import g
+
+logger = logging.getLogger(__name__)
+
+# Chamber detection parameters
+CHAMBER_RADIUS_PX_RANGE = (300, 600)
+CHAMBER_HOUGH_PARAMS = dict(dp=1.2, param1=150, param2=25)
+CHAMBER_BRIGHTNESS_MIN = 200
+CHAMBER_BRIGHT_PIXEL_RATIO_MIN = 0.85
+
+# Ball detection parameters
+BALL_RADIUS_PX_RANGE = (1, 5)
+BALL_HOUGH_PARAMS = dict(dp=1, param1=50, param2=12)
+
+# Persistent chamber cache (camera mount is static across runs).
+# Keyed by frame shape (height, width); value: {"cx", "cy", "radius"}.
+CHAMBER_CACHE_PATH = Path(__file__).parent / "chamber_cache.npy"
+
+
+def load_chamber_cache(path: Path = CHAMBER_CACHE_PATH) -> dict:
+    """Load the chamber cache dict, or return empty dict if missing."""
+    if not os.path.exists(path):
+        return {}
+    return np.load(path, allow_pickle=True).item()
+
+
+def save_chamber_cache(cache: dict, path: Path = CHAMBER_CACHE_PATH) -> None:
+    np.save(path, cache)
+
+
+def set_chamber(
+    shape: Tuple[int, int],
+    cx: int,
+    cy: int,
+    radius: int,
+    path: Path = CHAMBER_CACHE_PATH,
+) -> None:
+    """Manually set/override the cached chamber for a given frame shape."""
+    cache = load_chamber_cache(path)
+    cache[tuple(shape)] = {"cx": int(cx), "cy": int(cy), "radius": int(radius)}
+    save_chamber_cache(cache, path)
+    logger.info("Chamber cache updated for shape %s: cx=%d cy=%d r=%d",
+                tuple(shape), cx, cy, radius)
+
+
+def clear_chamber_cache(path: Path = CHAMBER_CACHE_PATH) -> None:
+    if os.path.exists(path):
+        os.remove(path)
+        logger.info("Chamber cache cleared at %s", path)
+
+
+def show_chamber_cache(path: Path = CHAMBER_CACHE_PATH) -> None:
+    cache = load_chamber_cache(path)
+    if not cache:
+        print(f"No chamber cache at {path}")
+        return
+    print(f"Chamber cache ({len(cache)} entries) at {path}:")
+    for shape, v in cache.items():
+        print(f"  shape={shape}: cx={v['cx']} cy={v['cy']} radius={v['radius']}")
+
+
+def detect_and_cache_chamber(
+    video_path: str,
+    frame_idx: int = 0,
+    chamber_cache_path: Optional[Path] = CHAMBER_CACHE_PATH,
+    redetect: bool = False,
+    debug: bool = False,
+) -> Tuple[int, int, int]:
+    """
+    Open `video_path`, read one frame, run detect_chamber, and write the
+    result to the chamber cache. Cheap (~one frame read + one detection)
+    compared to track_object which processes the entire video.
+
+    Args:
+        video_path: Path to AVI/video file.
+        frame_idx: Which frame to use for detection (default 0).
+        chamber_cache_path: Cache file path. Pass None to skip writing.
+        redetect: If True, ignore any existing cache entry and re-detect.
+        debug: Forwarded to detect_chamber.
+
+    Returns:
+        (cx, cy, radius)
+    """
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    with _video_capture(video_path) as cap:
+        if frame_idx != 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            raise RuntimeError(f"Could not read frame {frame_idx} from {video_path}")
+
+    shape_key = (frame.shape[0], frame.shape[1])
+    cache = (
+        load_chamber_cache(chamber_cache_path)
+        if chamber_cache_path is not None else {}
+    )
+
+    if not redetect and shape_key in cache:
+        v = cache[shape_key]
+        logger.info("Chamber already cached for shape %s; use redetect=True to override",
+                    shape_key)
+        return v["cx"], v["cy"], v["radius"]
+
+    (cx, cy), radius = detect_chamber(frame, debug=debug)
+    if chamber_cache_path is not None:
+        cache[shape_key] = {"cx": int(cx), "cy": int(cy), "radius": int(radius)}
+        save_chamber_cache(cache, chamber_cache_path)
+        logger.info("Cached chamber for shape %s: cx=%d cy=%d r=%d",
+                    shape_key, cx, cy, radius)
+    return int(cx), int(cy), int(radius)
+
+
+@dataclass
+class TrackingResult:
+    """Result of track_object. Iterable for backward-compatible tuple unpacking."""
+    positions: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=int))
+    frame_numbers: np.ndarray = field(default_factory=lambda: np.empty((0,), dtype=int))
+    min_ydiff_frame: Optional[int] = None
+
+    def __iter__(self):
+        yield self.positions
+        yield self.frame_numbers
+        yield self.min_ydiff_frame
+
+
+@contextmanager
+def _video_capture(path: str) -> Iterator[cv2.VideoCapture]:
+    cap = cv2.VideoCapture(path)
+    try:
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video file: {path}")
+        yield cap
+    finally:
+        cap.release()
+
+
+def _iter_frames(cap: cv2.VideoCapture) -> Iterator[Tuple[int, np.ndarray]]:
+    """Yield (frame_index, frame) until the capture is exhausted."""
+    idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            return
+        yield idx, frame
+        idx += 1
+
 
 #===============================================================================================================================================
 def extract_calibration(cine_filename):
@@ -16,204 +167,244 @@ def extract_calibration(cine_filename):
     return calibration
 
 #===============================================================================================================================================
-def detect_chamber(frame, debug=False):
+def detect_chamber(
+    frame: np.ndarray,
+    debug: bool = False,
+    min_radius_px: int = CHAMBER_RADIUS_PX_RANGE[0],
+    max_radius_px: int = CHAMBER_RADIUS_PX_RANGE[1],
+) -> Tuple[Tuple[int, int], int]:
     """
     Detects the bright chamber circle using optimized thresholding and validation.
-    
+
     Args:
-        frame (np.ndarray): Input frame (BGR format)
-        calibration (float): Calibration factor in cm/pixel
-        
+        frame: Input frame (BGR format).
+        debug: If True, log detection details.
+        min_radius_px: Minimum candidate chamber radius in pixels.
+        max_radius_px: Maximum candidate chamber radius in pixels.
+
     Returns:
-        tuple: (origin, radius) where origin is (x,y) coordinates and radius is in pixels
+        (origin, radius) where origin is (x, y) pixel coordinates and radius is in pixels.
     """
     if not isinstance(frame, np.ndarray):
         raise ValueError("frame must be a numpy array")
-    
     if frame.ndim != 3:
         raise ValueError("frame must be a 3D array (height, width, channels)")
 
-    # radius constraints
-    min_radius_px = 300
-    max_radius_px = 600
-
     # Convert to grayscale and enhance contrast
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Optimized preprocessing for bright circles
+
+    # Optimized preprocessing for bright circles.
+    # Note: with THRESH_OTSU the manual threshold value is ignored by OpenCV,
+    # so we pass 0 to make that explicit.
     blurred = cv2.GaussianBlur(gray, (9, 9), 2)
-    _, thresh = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
     # Morphological closing to enhance circular shape
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    
+
     # Detect circles with optimized parameters
     circles = cv2.HoughCircles(
         closed,
         cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=frame.shape[1]//2,  # Assume only one main chamber
-        param1=150,  # Lower Canny threshold
-        param2=25,   # Accumulator threshold (lower for better detection)
+        minDist=frame.shape[1] // 2,  # Assume only one main chamber
         minRadius=min_radius_px,
-        maxRadius=max_radius_px
+        maxRadius=max_radius_px,
+        **CHAMBER_HOUGH_PARAMS,
     )
 
     # Validate and select best candidate
     best_circle = None
     if circles is not None:
         circles = np.int32(np.around(circles))[0]
-        
-        # Score circles by brightness and circularity
-        for circle in circles:
-            x, y, r = circle
-            if x-r < 0 or y-r < 0 or x+r > frame.shape[1] or y+r > frame.shape[0]:
+
+        for x, y, r in circles:
+            if x - r < 0 or y - r < 0 or x + r > frame.shape[1] or y + r > frame.shape[0]:
                 continue  # Skip edge-touching circles
-            
-            # Create mask for brightness verification
+
+            # Brightness verification within the candidate disk
             mask = np.zeros_like(gray)
-            cv2.circle(mask, (x, y), r, 255, -1)
+            cv2.circle(mask, (int(x), int(y)), int(r), 255, -1)
             mean_brightness = cv2.mean(gray, mask=mask)[0]
-            
-            # Circularity check
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
+
+            # Real validity check: fraction of bright (thresholded) pixels inside
+            # the candidate disk. The disk is synthetic so cv2.findContours-based
+            # circularity would always be ~1.0 — useless as a check.
+            disk_pixels = int(np.count_nonzero(mask))
+            if disk_pixels == 0:
                 continue
-                
-            contour = contours[0]
-            perimeter = cv2.arcLength(contour, True)
-            circularity = 4 * np.pi * (cv2.contourArea(contour)) / (perimeter ** 2)
-            
-            if circularity > 0.85 and mean_brightness > 200:
-                if best_circle is None or r > best_circle[2]:
-                    best_circle = (x, y, r)
+            bright_inside = int(np.count_nonzero(cv2.bitwise_and(closed, mask)))
+            bright_ratio = bright_inside / disk_pixels
+
+            if (
+                bright_ratio > CHAMBER_BRIGHT_PIXEL_RATIO_MIN
+                and mean_brightness > CHAMBER_BRIGHTNESS_MIN
+                and (best_circle is None or r > best_circle[2])
+            ):
+                best_circle = (int(x), int(y), int(r))
 
     # Fallback to contour detection if Hough fails
     if best_circle is None:
-        print("Hough failed, using contour fallback")
+        logger.warning("Hough failed, using contour fallback")
         contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
             largest_contour = max(contours, key=cv2.contourArea)
             (x, y), r = cv2.minEnclosingCircle(largest_contour)
             best_circle = (int(x), int(y), int(r))
 
-    # Final validation
     if best_circle:
         x, y, r = best_circle
-        origin = (x, y)
-        radius = r
+        origin, radius = (x, y), r
     else:
-        print("Warning: No valid circle found, using frame center")
-        origin = (frame.shape[1]//2, frame.shape[0]//2)
-        radius = int((min_radius_px + max_radius_px)/2)
+        logger.warning("No valid circle found, using frame center")
+        origin = (frame.shape[1] // 2, frame.shape[0] // 2)
+        radius = (min_radius_px + max_radius_px) // 2
 
     if debug:
-        print(f"Chamber detected at {origin} with radius {radius}px")
+        logger.info("Chamber detected at %s with radius %dpx", origin, radius)
     return origin, radius
 
+
 #===============================================================================================================================================
-def track_object(avi_path):
+def _detect_ball_in_frame(
+    frame: np.ndarray,
+    cx: int,
+    cy: int,
+    chamber_radius: int,
+) -> Optional[Tuple[int, int]]:
+    """Return (px, py) of the brightest valid ball candidate, or None."""
+    h, w = frame.shape[:2]
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.circle(mask, (cx, cy), chamber_radius, 255, -1)
+    masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
+
+    gray = cv2.cvtColor(masked_frame, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    inverted = 255 - blurred
+
+    circles = cv2.HoughCircles(
+        inverted,
+        cv2.HOUGH_GRADIENT,
+        minDist=chamber_radius // 4,
+        minRadius=BALL_RADIUS_PX_RANGE[0],
+        maxRadius=BALL_RADIUS_PX_RANGE[1],
+        **BALL_HOUGH_PARAMS,
+    )
+    if circles is None:
+        return None
+
+    circles = np.int32(np.around(circles[0]))
+
+    # Vectorized chamber-containment + image-bounds filter
+    inside_chamber = np.hypot(circles[:, 0] - cx, circles[:, 1] - cy) < chamber_radius
+    in_bounds = (
+        (circles[:, 0] >= 0) & (circles[:, 0] < w)
+        & (circles[:, 1] >= 0) & (circles[:, 1] < h)
+    )
+    valid = circles[inside_chamber & in_bounds]
+    if valid.size == 0:
+        return None
+
+    # Select brightest candidate (now safe — bounds checked)
+    brightness = gray[valid[:, 1], valid[:, 0]]
+    px, py = valid[int(np.argmax(brightness)), :2]
+    return int(px), int(py)
+
+
+def track_object(
+    avi_path: str,
+    cx: Optional[int] = None,
+    cy: Optional[int] = None,
+    chamber_radius: Optional[int] = None,
+    chamber_cache_path: Optional[Path] = CHAMBER_CACHE_PATH,
+    redetect: bool = False,
+) -> TrackingResult:
     """
-    Track tungsten ball through entire video sequence
-    
+    Track tungsten ball through entire video sequence.
+
+    Chamber resolution priority:
+        1. Explicit cx/cy/chamber_radius args (highest).
+        2. Persistent cache at `chamber_cache_path`, keyed by frame shape.
+        3. detect_chamber() on the first readable frame (slow); result is
+           written to the cache for reuse.
+
     Args:
-        avi_path (str): Path to input AVI file
-        cx (int): X-coordinate of chamber center
-        cy (int): Y-coordinate of chamber center
-        chamber_radius (int): Radius of chamber in pixels
-        
+        avi_path: Path to input AVI file.
+        cx, cy, chamber_radius: Optional pre-computed chamber geometry.
+        chamber_cache_path: Path to persistent cache file. Pass None to disable.
+        redetect: If True, ignore the cache and force re-detection (and update
+            the cache with the new value).
+
     Returns:
-    tuple: A tuple containing:
-        - positions (list): List of (x,y) coordinates of the tracked object
-        - frame_numbers (list): List of frame numbers where object was detected
-        - min_ydiff (float): Minimum y-difference between consecutive positions
-        - min_ydiff_frame (int): Frame number where minimum y-difference occurred
+        TrackingResult — iterable, so existing `pos, fn, mf = track_object(...)`
+        callers still work.
     """
-    # Input validation
     if not os.path.exists(avi_path):
         raise FileNotFoundError(f"Video file not found: {avi_path}")
 
-    # Initialize video capture
-    cap = cv2.VideoCapture(avi_path)
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {avi_path}")
-    
-    # Prepare tracking data structures
-    positions = []
-    frame_numbers = []
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    chamber_known = cx is not None and cy is not None and chamber_radius is not None
+
+    positions: list[Tuple[int, int]] = []
+    frame_numbers: list[int] = []
+    min_ydiff: float = float("inf")
+    min_ydiff_frame: Optional[int] = None
 
     try:
-        min_ydiff = 9999
-        min_ydiff_frame = None
+        with _video_capture(avi_path) as cap:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            logger.info("Processing %d frames", total_frames)
 
-        print(f"Processing {total_frames} frames")
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            for frame_idx, frame in _iter_frames(cap):
+                if not chamber_known:
+                    shape_key = (frame.shape[0], frame.shape[1])
+                    cache = (
+                        load_chamber_cache(chamber_cache_path)
+                        if chamber_cache_path is not None else {}
+                    )
+                    if not redetect and shape_key in cache:
+                        v = cache[shape_key]
+                        cx, cy, chamber_radius = v["cx"], v["cy"], v["radius"]
+                        logger.info("Using cached chamber for shape %s: "
+                                    "cx=%d cy=%d r=%d", shape_key, cx, cy, chamber_radius)
+                    else:
+                        (cx, cy), chamber_radius = detect_chamber(frame)
+                        if chamber_cache_path is not None:
+                            cache[shape_key] = {
+                                "cx": int(cx), "cy": int(cy),
+                                "radius": int(chamber_radius),
+                            }
+                            save_chamber_cache(cache, chamber_cache_path)
+                            logger.info("Chamber detected and cached for shape %s",
+                                        shape_key)
+                    chamber_known = True
 
-        for frame_idx in range(total_frames):
-            ret, frame = cap.read()
-            if frame_idx == 0:
-                (cx, cy), chamber_radius = detect_chamber(frame)
-            if not ret:
-                print(f"Warning: Could not read frame {frame_idx}")
-                continue
+                detection = _detect_ball_in_frame(frame, cx, cy, chamber_radius)
+                if detection is None:
+                    continue
 
-            # Detect ball position
-            mask = np.zeros_like(frame[:,:,0])
-            cv2.circle(mask, (cx, cy), chamber_radius, 255, -1)
-            masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
-            
-            gray = cv2.cvtColor(masked_frame, cv2.COLOR_BGR2GRAY)
-            blurred = cv2.GaussianBlur(gray, (5,5), 0)
-            inverted = 255 - blurred
+                px, py = detection
+                rel_x = px - cx
+                rel_y = cy - py
+                positions.append((rel_x, rel_y))
+                frame_numbers.append(frame_idx)
 
-            # Constants
-            min_radius = 1   # Tungsten ball size
-            max_radius = 5            
-            circles = cv2.HoughCircles(
-                inverted,
-                cv2.HOUGH_GRADIENT,
-                dp=1,
-                minDist=chamber_radius//4,
-                param1=50,
-                param2=12,
-                minRadius=min_radius,
-                maxRadius=max_radius
-            )
+                ay = abs(rel_y)
+                if ay < min_ydiff:
+                    min_ydiff = ay
+                    min_ydiff_frame = frame_idx
 
-            if circles is not None:
-                circles = np.int32(np.around(circles[0]))
-                valid = []
-                for c in circles:
-                    # Validate position within chamber
-                    if np.hypot(c[0] - cx, c[1] - cy) < chamber_radius:
-                        valid.append(c)
-                
-                if valid:
-                    # Select brightest candidate
-                    brightest = max(valid, key=lambda c: gray[c[1], c[0]])
-                    px, py, radius = brightest
-                    
-                    # Convert to chamber-relative coordinates
-                    rel_x = px - cx
-                    rel_y = cy - py
-                    positions.append((rel_x, rel_y))
-                    frame_numbers.append(frame_idx)
-
-                    if np.abs(rel_y) < min_ydiff:
-                        min_ydiff = np.abs(rel_y)
-                        min_ydiff_frame = frame_idx
-
+    except (FileNotFoundError, ValueError):
+        raise
     except Exception as e:
-        raise RuntimeError(f"Error during tracking: {str(e)}")
-        
-    finally:
-        cap.release()
-        cv2.destroyAllWindows()
-        
-    print(f"Frame closest to chamber center: {min_ydiff_frame}")
-    return np.array(positions), np.array(frame_numbers), min_ydiff_frame
+        raise RuntimeError(f"Error during tracking: {e}") from e
+
+    logger.info("Frame closest to chamber center: %s", min_ydiff_frame)
+    return TrackingResult(
+        positions=np.array(positions, dtype=int) if positions else np.empty((0, 2), dtype=int),
+        frame_numbers=np.array(frame_numbers, dtype=int),
+        min_ydiff_frame=min_ydiff_frame,
+    )
 
 #===============================================================================================================================================
 def get_vel_freefall(h=1):
@@ -321,7 +512,7 @@ def update_tracking_result(tr_ifn, filepath, cf_new, ct_new):
         # Load existing dictionary
         tracking_dict = np.load(tr_ifn, allow_pickle=True).item()
         print(f"Loaded existing tracking results with {len(tracking_dict)} entries")
-        
+
         # Show current value if it exists
         if filepath in tracking_dict:
             cf_old, ct_old = tracking_dict[filepath]
@@ -330,7 +521,7 @@ def update_tracking_result(tr_ifn, filepath, cf_new, ct_new):
             print(f"  Time: {ct_old:.6f}s")
         else:
             print(f"\nNo existing entry for {os.path.basename(filepath)}")
-        
+
         # Update with new values
         tracking_dict[filepath] = (cf_new, ct_new)
         np.save(tr_ifn, tracking_dict)
@@ -349,7 +540,7 @@ def show_tracking_results(tr_ifn):
     if os.path.exists(tr_ifn):
         tracking_dict = np.load(tr_ifn, allow_pickle=True).item()
         print(f"Found {len(tracking_dict)} entries in tracking results\n")
-        
+
         for filepath, (cf, ct) in tracking_dict.items():
             print(filepath)
             if cf is None or ct is None:

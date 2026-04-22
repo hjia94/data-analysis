@@ -1,4 +1,5 @@
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import struct
 import time
@@ -113,6 +114,67 @@ def read_cine(ifn):
 
         except Exception as e:
             raise RuntimeError(f"Error reading CINE file: {str(e)}")
+
+def overlay_motion_frames(
+    frame_arr,
+    center_frame,
+    n_frames,
+    mode="min",
+    ax=None,
+    cmap="gray",
+    show_window=True,
+):
+    """
+    Overlay (2*n_frames + 1) frames centered on `center_frame` into a single
+    image showing the moving object's trail.
+
+    Args:
+        frame_arr: (N, H, W) array as returned by read_cine().
+        center_frame: index into frame_arr to center the window on.
+        n_frames: half-window size; window is [center-n, center+n] inclusive.
+        mode: "min" stacks via per-pixel min (dark object on bright bg);
+              "max" stacks via per-pixel max (bright object on dark bg).
+        ax: matplotlib Axes to draw on. If None, a new figure is created.
+        cmap: matplotlib colormap.
+        show_window: if True, include frame range and count in the title.
+
+    Returns:
+        (ax, overlay) — the Axes and the (H, W) overlay array.
+    """
+    if frame_arr.ndim != 3:
+        raise ValueError("frame_arr must be 3-D (N, H, W)")
+    n_total = frame_arr.shape[0]
+    if not 0 <= center_frame < n_total:
+        raise ValueError(
+            f"center_frame {center_frame} out of range [0, {n_total - 1}]"
+        )
+    if n_frames < 0:
+        raise ValueError("n_frames must be non-negative")
+
+    lo = max(0, center_frame - n_frames)
+    hi = min(n_total - 1, center_frame + n_frames)
+    if (lo, hi) != (center_frame - n_frames, center_frame + n_frames):
+        print(f"Window clipped to frames [{lo}, {hi}]")
+
+    window = frame_arr[lo:hi + 1]
+    if mode == "min":
+        overlay = window.min(axis=0)
+    elif mode == "max":
+        overlay = window.max(axis=0)
+    else:
+        raise ValueError(f"mode must be 'min' or 'max', got {mode!r}")
+
+    if ax is None:
+        _, ax = plt.subplots()
+    ax.imshow(overlay, cmap=cmap, origin="lower")
+
+    if show_window:
+        ax.set_title(
+            f"Frames {lo}-{hi} ({hi - lo + 1} frames, centered on {center_frame})"
+        )
+
+    return ax, overlay
+
 
 def convert_cine_to_avi(frame_arr, avi_path, scale_factor=8):
     """Convert CINE frame array to AVI video"""
