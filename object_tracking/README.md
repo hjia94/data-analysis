@@ -42,7 +42,7 @@ overlay_motion_frames(frarr, center_frame=min_ydiff_frame, n_frames=30, mode="mi
 | `read_cine(ifn)` | Parse a Phantom `.cine` file. Returns `(time_arr, frame_arr, dt)` where `frame_arr` is `(N, H, W)` uint8/uint16. |
 | `convert_cine_to_avi(frame_arr, avi_path, scale_factor=8)` | Write an AVI (MJPG, vertically flipped, upscaled) for downstream OpenCV use. |
 | `batch_convert_cine_to_avi(base_path)` | Convert every `.cine` in a directory; skips files that already have an `.avi`. |
-| `overlay_motion_frames(frame_arr, center_frame, n_frames, mode="min", ax=None, ...)` | Stack `2*n_frames+1` frames into one image. `mode="min"` for dark objects on bright background, `"max"` for the inverse. Returns `(ax, overlay)`. |
+| `overlay_motion_frames(frame_arr, center_frame, n_frames, mode="min", step=1, ax=None, ...)` | Stack frames in `[center-n, center+n]` into one image. `mode="min"` for dark objects on bright background, `"max"` for the inverse. `step>1` samples every Nth frame anchored on `center_frame` for discrete snapshots instead of a continuous trail. Returns `(ax, overlay)`. |
 
 ## `track_object.py`
 
@@ -64,7 +64,7 @@ once and cached on disk. All cache helpers use `CHAMBER_CACHE_PATH`
 | Function | Description |
 |----------|-------------|
 | `detect_chamber(frame, debug=False)` | Locate the bright chamber circle in a single BGR frame using OTSU + Hough; falls back to largest-contour. Returns `((cx, cy), radius)`. |
-| `track_object(avi_path, cx=None, cy=None, chamber_radius=None, redetect=False)` | Track the ball through the whole video. Chamber is resolved by: explicit args → cache hit → fresh detection (then cached). Returns a `TrackingResult` dataclass. |
+| `track_object(avi_path, cx=None, cy=None, chamber_radius=None, redetect=False, n_workers=1)` | Track the ball through the whole video. Chamber is resolved by: explicit args → cache hit → fresh detection (then cached). Uses a fast cropped-ROI search around the last detection and falls back to full-chamber Hough after `BALL_ROI_LOSS_LIMIT` misses. Set `n_workers>1` to split frames into contiguous ranges across a `multiprocessing.Pool`. Returns a `TrackingResult` dataclass. |
 | `TrackingResult` | Fields: `positions` `(N, 2)`, `frame_numbers` `(N,)`, `min_ydiff_frame`. Iterable, so `pos, fn, mf = track_object(...)` still works. |
 
 ### Tracking results dictionary (separate from chamber cache)
@@ -97,7 +97,8 @@ Detection thresholds live as module-level constants at the top of
 
 - `CHAMBER_RADIUS_PX_RANGE`, `CHAMBER_HOUGH_PARAMS`,
   `CHAMBER_BRIGHTNESS_MIN`, `CHAMBER_BRIGHT_PIXEL_RATIO_MIN`
-- `BALL_RADIUS_PX_RANGE`, `BALL_HOUGH_PARAMS`
+- `BALL_RADIUS_PX_RANGE`, `BALL_HOUGH_PARAMS`,
+  `BALL_ROI_RADIUS_PX`, `BALL_ROI_LOSS_LIMIT`
 
 ## Logging
 
@@ -118,3 +119,7 @@ logging.basicConfig(level=logging.INFO)
 - **`overlay_motion_frames` chamber circle appears flipped.** The function
   uses `origin="lower"`; pass `(cx, H - cy)` for circle/scatter overlays, or
   call `ax.invert_yaxis()` and use `cy` directly.
+- **`n_workers>1` yields slightly different frame indices.** Worker processes
+  seek with `cv2.CAP_PROP_POS_FRAMES`, which on non-all-intra AVIs may snap to
+  the nearest preceding keyframe. Compare against `n_workers=1` once per new
+  codec to confirm results agree.

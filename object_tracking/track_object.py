@@ -1,11 +1,12 @@
 import cv2
 import logging
+import multiprocessing as mp
 import numpy as np
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Iterator, Tuple
+from typing import Optional, Iterator, List, Tuple
 from scipy.constants import g
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,10 @@ CHAMBER_BRIGHT_PIXEL_RATIO_MIN = 0.85
 # Ball detection parameters
 BALL_RADIUS_PX_RANGE = (1, 5)
 BALL_HOUGH_PARAMS = dict(dp=1, param1=50, param2=12)
+
+# ROI tracking parameters
+BALL_ROI_RADIUS_PX = 60          # half-width of crop around last detection
+BALL_ROI_LOSS_LIMIT = 3          # consecutive ROI misses before giving up tracking
 
 # Persistent chamber cache (camera mount is static across runs).
 # Keyed by frame shape (height, width); value: {"cx", "cy", "radius"}.
@@ -144,15 +149,6 @@ def _video_capture(path: str) -> Iterator[cv2.VideoCapture]:
         cap.release()
 
 
-def _iter_frames(cap: cv2.VideoCapture) -> Iterator[Tuple[int, np.ndarray]]:
-    """Yield (frame_index, frame) until the capture is exhausted."""
-    idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            return
-        yield idx, frame
-        idx += 1
 
 
 #===============================================================================================================================================
@@ -266,27 +262,23 @@ def detect_chamber(
 
 
 #===============================================================================================================================================
-def _detect_ball_in_frame(
-    frame: np.ndarray,
-    cx: int,
-    cy: int,
-    chamber_radius: int,
+def _hough_ball_brightest(
+    gray: np.ndarray,
+    min_dist: int,
+    chamber_check: Optional[Tuple[int, int, int]] = None,
 ) -> Optional[Tuple[int, int]]:
-    """Return (px, py) of the brightest valid ball candidate, or None."""
-    h, w = frame.shape[:2]
+    """Run GaussianBlur + invert + HoughCircles on a grayscale region;
+    return (x, y) of the brightest valid candidate (local to `gray`), or None.
 
-    mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.circle(mask, (cx, cy), chamber_radius, 255, -1)
-    masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
-
-    gray = cv2.cvtColor(masked_frame, cv2.COLOR_BGR2GRAY)
+    If `chamber_check` = (cx, cy, radius) is given, candidates outside
+    that disk are also rejected before picking the brightest.
+    """
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     inverted = 255 - blurred
-
     circles = cv2.HoughCircles(
         inverted,
         cv2.HOUGH_GRADIENT,
-        minDist=chamber_radius // 4,
+        minDist=min_dist,
         minRadius=BALL_RADIUS_PX_RANGE[0],
         maxRadius=BALL_RADIUS_PX_RANGE[1],
         **BALL_HOUGH_PARAMS,
@@ -295,21 +287,119 @@ def _detect_ball_in_frame(
         return None
 
     circles = np.int32(np.around(circles[0]))
-
-    # Vectorized chamber-containment + image-bounds filter
-    inside_chamber = np.hypot(circles[:, 0] - cx, circles[:, 1] - cy) < chamber_radius
-    in_bounds = (
+    h, w = gray.shape[:2]
+    valid_mask = (
         (circles[:, 0] >= 0) & (circles[:, 0] < w)
         & (circles[:, 1] >= 0) & (circles[:, 1] < h)
     )
-    valid = circles[inside_chamber & in_bounds]
+    if chamber_check is not None:
+        ccx, ccy, cradius = chamber_check
+        valid_mask &= np.hypot(circles[:, 0] - ccx, circles[:, 1] - ccy) < cradius
+
+    valid = circles[valid_mask]
     if valid.size == 0:
         return None
 
-    # Select brightest candidate (now safe — bounds checked)
     brightness = gray[valid[:, 1], valid[:, 0]]
     px, py = valid[int(np.argmax(brightness)), :2]
     return int(px), int(py)
+
+
+def _detect_ball_in_frame(
+    frame: np.ndarray,
+    cx: int,
+    cy: int,
+    chamber_radius: int,
+    last_pos: Optional[Tuple[int, int]] = None,
+    roi_radius: int = BALL_ROI_RADIUS_PX,
+) -> Optional[Tuple[int, int]]:
+    """Return (px, py) of the brightest valid ball candidate, or None.
+
+    If `last_pos` is provided, a fast cropped-ROI search runs first;
+    on a hit we return immediately. On miss (or no last_pos), the
+    full-chamber Hough pipeline runs.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
+
+    if last_pos is not None:
+        px0, py0 = last_pos
+        x0 = max(0, px0 - roi_radius)
+        x1 = min(w, px0 + roi_radius)
+        y0 = max(0, py0 - roi_radius)
+        y1 = min(h, py0 + roi_radius)
+        crop = gray[y0:y1, x0:x1]
+        if crop.size > 0:
+            local = _hough_ball_brightest(crop, min_dist=max(roi_radius // 2, 5))
+            if local is not None:
+                return local[0] + x0, local[1] + y0
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.circle(mask, (cx, cy), chamber_radius, 255, -1)
+    masked_gray = cv2.bitwise_and(gray, gray, mask=mask)
+
+    return _hough_ball_brightest(
+        masked_gray,
+        min_dist=chamber_radius // 4,
+        chamber_check=(cx, cy, chamber_radius),
+    )
+
+
+def _track_frame_range(
+    args: Tuple[str, int, int, int, int, int],
+) -> Tuple[List[Tuple[int, int]], List[int], float, Optional[int]]:
+    """Worker: process frames [start_frame, end_frame) of avi_path.
+
+    Module-level so multiprocessing (spawn on Windows) can pickle it.
+    Each worker opens its own cv2.VideoCapture (capture objects are not picklable).
+    """
+    cv2.setNumThreads(1)  # avoid oversubscription when N processes each spawn N threads
+    avi_path, start_frame, end_frame, cx, cy, chamber_radius = args
+
+    local_positions: List[Tuple[int, int]] = []
+    local_frame_numbers: List[int] = []
+    local_min_ydiff: float = float("inf")
+    local_min_ydiff_frame: Optional[int] = None
+
+    last_pos: Optional[Tuple[int, int]] = None
+    miss_count = 0
+
+    with _video_capture(avi_path) as cap:
+        if start_frame > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        for offset in range(end_frame - start_frame):
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            frame_idx = start_frame + offset
+
+            detection = _detect_ball_in_frame(
+                frame, cx, cy, chamber_radius, last_pos=last_pos,
+            )
+
+            if detection is None:
+                if last_pos is not None:
+                    miss_count += 1
+                    if miss_count >= BALL_ROI_LOSS_LIMIT:
+                        last_pos = None
+                        miss_count = 0
+                continue
+
+            px, py = detection
+            last_pos = (px, py)
+            miss_count = 0
+
+            rel_x = px - cx
+            rel_y = cy - py
+            local_positions.append((rel_x, rel_y))
+            local_frame_numbers.append(frame_idx)
+
+            ay = abs(rel_y)
+            if ay < local_min_ydiff:
+                local_min_ydiff = ay
+                local_min_ydiff_frame = frame_idx
+
+    return local_positions, local_frame_numbers, local_min_ydiff, local_min_ydiff_frame
 
 
 def track_object(
@@ -319,6 +409,7 @@ def track_object(
     chamber_radius: Optional[int] = None,
     chamber_cache_path: Optional[Path] = CHAMBER_CACHE_PATH,
     redetect: bool = False,
+    n_workers: int = 1,
 ) -> TrackingResult:
     """
     Track tungsten ball through entire video sequence.
@@ -335,6 +426,14 @@ def track_object(
         chamber_cache_path: Path to persistent cache file. Pass None to disable.
         redetect: If True, ignore the cache and force re-detection (and update
             the cache with the new value).
+        n_workers: Process pool size for parallel frame-range decode + detect.
+            Default 1 = single-process (bit-exact prior behavior).
+            Values >1 split frames into contiguous ranges and dispatch via
+            multiprocessing.Pool. Each worker opens its own cv2.VideoCapture
+            and seeks to its start frame; cv2.CAP_PROP_POS_FRAMES on AVIs that
+            are not all-intra may snap to the nearest preceding keyframe and
+            yield slightly different frame indices than n_workers=1. Compare
+            results with n_workers=1 once for any new codec to confirm.
 
     Returns:
         TrackingResult — iterable, so existing `pos, fn, mf = track_object(...)`
@@ -343,61 +442,125 @@ def track_object(
     if not os.path.exists(avi_path):
         raise FileNotFoundError(f"Video file not found: {avi_path}")
 
+    if n_workers > 1:
+        # Resolve chamber once so workers don't each re-detect and so cache
+        # writes only happen in one place.
+        if cx is None or cy is None or chamber_radius is None:
+            cx, cy, chamber_radius = detect_and_cache_chamber(
+                avi_path,
+                frame_idx=0,
+                chamber_cache_path=chamber_cache_path,
+                redetect=redetect,
+            )
+
+        with _video_capture(avi_path) as cap:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        logger.info("Processing %d frames across %d workers", total_frames, n_workers)
+
+        chunk = total_frames // n_workers
+        ranges = [
+            (i * chunk, total_frames if i == n_workers - 1 else (i + 1) * chunk)
+            for i in range(n_workers)
+        ]
+        worker_args = [
+            (avi_path, s, e, int(cx), int(cy), int(chamber_radius))
+            for (s, e) in ranges if s < e
+        ]
+
+        positions: List[Tuple[int, int]] = []
+        frame_numbers: List[int] = []
+        min_ydiff: float = float("inf")
+        min_ydiff_frame: Optional[int] = None
+
+        with mp.Pool(processes=n_workers) as pool:
+            # imap (not imap_unordered) preserves submission order; since worker
+            # args are sorted by start_frame, result lists stay globally ordered.
+            for lp, lfn, lmin, lmin_frame in pool.imap(_track_frame_range, worker_args):
+                positions.extend(lp)
+                frame_numbers.extend(lfn)
+                if lmin_frame is not None and (lmin, lmin_frame) < (
+                    min_ydiff, min_ydiff_frame if min_ydiff_frame is not None else float("inf")
+                ):
+                    min_ydiff = lmin
+                    min_ydiff_frame = lmin_frame
+
+        logger.info("Frame closest to chamber center: %s", min_ydiff_frame)
+        return TrackingResult(
+            positions=np.asarray(positions, dtype=int) if positions else np.empty((0, 2), dtype=int),
+            frame_numbers=np.asarray(frame_numbers, dtype=int),
+            min_ydiff_frame=min_ydiff_frame,
+        )
+
     chamber_known = cx is not None and cy is not None and chamber_radius is not None
 
-    positions: list[Tuple[int, int]] = []
-    frame_numbers: list[int] = []
+    positions: List[Tuple[int, int]] = []
+    frame_numbers: List[int] = []
     min_ydiff: float = float("inf")
     min_ydiff_frame: Optional[int] = None
 
-    try:
-        with _video_capture(avi_path) as cap:
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            logger.info("Processing %d frames", total_frames)
+    last_pos: Optional[Tuple[int, int]] = None
+    miss_count = 0
+    frame_idx = 0
 
-            for frame_idx, frame in _iter_frames(cap):
-                if not chamber_known:
-                    shape_key = (frame.shape[0], frame.shape[1])
-                    cache = (
-                        load_chamber_cache(chamber_cache_path)
-                        if chamber_cache_path is not None else {}
-                    )
-                    if not redetect and shape_key in cache:
-                        v = cache[shape_key]
-                        cx, cy, chamber_radius = v["cx"], v["cy"], v["radius"]
-                        logger.info("Using cached chamber for shape %s: "
-                                    "cx=%d cy=%d r=%d", shape_key, cx, cy, chamber_radius)
-                    else:
-                        (cx, cy), chamber_radius = detect_chamber(frame)
-                        if chamber_cache_path is not None:
-                            cache[shape_key] = {
-                                "cx": int(cx), "cy": int(cy),
-                                "radius": int(chamber_radius),
-                            }
-                            save_chamber_cache(cache, chamber_cache_path)
-                            logger.info("Chamber detected and cached for shape %s",
-                                        shape_key)
-                    chamber_known = True
+    with _video_capture(avi_path) as cap:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        logger.info("Processing %d frames", total_frames)
 
-                detection = _detect_ball_in_frame(frame, cx, cy, chamber_radius)
-                if detection is None:
-                    continue
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
 
-                px, py = detection
-                rel_x = px - cx
-                rel_y = cy - py
-                positions.append((rel_x, rel_y))
-                frame_numbers.append(frame_idx)
+            if not chamber_known:
+                shape_key = (frame.shape[0], frame.shape[1])
+                cache = (
+                    load_chamber_cache(chamber_cache_path)
+                    if chamber_cache_path is not None else {}
+                )
+                if not redetect and shape_key in cache:
+                    v = cache[shape_key]
+                    cx, cy, chamber_radius = v["cx"], v["cy"], v["radius"]
+                    logger.info("Using cached chamber for shape %s: "
+                                "cx=%d cy=%d r=%d", shape_key, cx, cy, chamber_radius)
+                else:
+                    (cx, cy), chamber_radius = detect_chamber(frame)
+                    if chamber_cache_path is not None:
+                        cache[shape_key] = {
+                            "cx": int(cx), "cy": int(cy),
+                            "radius": int(chamber_radius),
+                        }
+                        save_chamber_cache(cache, chamber_cache_path)
+                        logger.info("Chamber detected and cached for shape %s",
+                                    shape_key)
+                chamber_known = True
 
-                ay = abs(rel_y)
-                if ay < min_ydiff:
-                    min_ydiff = ay
-                    min_ydiff_frame = frame_idx
+            detection = _detect_ball_in_frame(
+                frame, cx, cy, chamber_radius, last_pos=last_pos,
+            )
 
-    except (FileNotFoundError, ValueError):
-        raise
-    except Exception as e:
-        raise RuntimeError(f"Error during tracking: {e}") from e
+            if detection is None:
+                if last_pos is not None:
+                    miss_count += 1
+                    if miss_count >= BALL_ROI_LOSS_LIMIT:
+                        last_pos = None
+                        miss_count = 0
+                frame_idx += 1
+                continue
+
+            px, py = detection
+            last_pos = (px, py)
+            miss_count = 0
+
+            rel_x = px - cx
+            rel_y = cy - py
+            positions.append((rel_x, rel_y))
+            frame_numbers.append(frame_idx)
+
+            ay = abs(rel_y)
+            if ay < min_ydiff:
+                min_ydiff = ay
+                min_ydiff_frame = frame_idx
+            frame_idx += 1
 
     logger.info("Frame closest to chamber center: %s", min_ydiff_frame)
     return TrackingResult(
@@ -564,3 +727,41 @@ def delete_tracking_entry(tr_ifn, filepath):
             print(f"No entry found for {os.path.basename(filepath)}")
     else:
         print(f"No tracking results file found at {tr_ifn}")
+
+
+# ===============================================================================================================================================
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    from read_cine import read_cine, convert_cine_to_avi, overlay_motion_frames
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    cine_path = r"E:\fast_cam\He3kA_B380G800G_pl0t20_uw15t35\Y20241115_kapton_P30_-16deg_x36_y0@1780_085.cine"
+    avi_path = cine_path.replace(".cine", ".avi")
+    n_workers = 4
+    n_frames = 300  # half-window for overlay
+    step = 60 # how many frames to skip between overlayed motion frames (for visibility)
+
+    tarr, frarr, dt = read_cine(cine_path)
+    if not os.path.exists(avi_path):
+        logger.info("AVI not found; converting %s -> %s", cine_path, avi_path)
+        convert_cine_to_avi(frarr, avi_path)
+
+    cx, cy, chamber_radius = detect_and_cache_chamber(avi_path)
+    parr, frarr_idx, cf = track_object(avi_path, n_workers=n_workers)
+    logger.info("track_object: %d positions, center-cross frame=%s", len(parr), cf)
+
+    if cf is None:
+        raise SystemExit("No center-crossing frame found; cannot build overlay.")
+
+    fig, ax = plt.subplots(figsize=(15, 5))
+    ax, _ = overlay_motion_frames(
+        frarr, center_frame=cf, n_frames=n_frames, step=step, ax=ax,
+    )
+    # overlay_motion_frames uses origin="lower"; flip the chamber circle's y to match
+    ax.add_patch(plt.Circle((cx, frarr.shape[1] - cy), chamber_radius,
+                            fill=False, color="green", linewidth=2))
+    ax.set_title(f"t={tarr[cf] * 1e3:.3f} ms  ±{n_frames} frames")
+    ax.axis("off")
+    plt.show()

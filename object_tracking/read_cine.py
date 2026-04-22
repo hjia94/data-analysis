@@ -120,13 +120,14 @@ def overlay_motion_frames(
     center_frame,
     n_frames,
     mode="min",
+    step=1,
     ax=None,
     cmap="gray",
     show_window=True,
 ):
     """
-    Overlay (2*n_frames + 1) frames centered on `center_frame` into a single
-    image showing the moving object's trail.
+    Overlay a set of frames centered on `center_frame` into a single image
+    showing the moving object's trail.
 
     Args:
         frame_arr: (N, H, W) array as returned by read_cine().
@@ -134,6 +135,10 @@ def overlay_motion_frames(
         n_frames: half-window size; window is [center-n, center+n] inclusive.
         mode: "min" stacks via per-pixel min (dark object on bright bg);
               "max" stacks via per-pixel max (bright object on dark bg).
+        step: sample every `step`-th frame within the window (anchored on
+              center_frame). step=1 is the default continuous overlay; step=5
+              keeps the center frame and every 5th frame on either side,
+              yielding discrete ball snapshots instead of a continuous trail.
         ax: matplotlib Axes to draw on. If None, a new figure is created.
         cmap: matplotlib colormap.
         show_window: if True, include frame range and count in the title.
@@ -150,13 +155,20 @@ def overlay_motion_frames(
         )
     if n_frames < 0:
         raise ValueError("n_frames must be non-negative")
+    if step < 1:
+        raise ValueError("step must be >= 1")
 
     lo = max(0, center_frame - n_frames)
     hi = min(n_total - 1, center_frame + n_frames)
     if (lo, hi) != (center_frame - n_frames, center_frame + n_frames):
         print(f"Window clipped to frames [{lo}, {hi}]")
 
-    window = frame_arr[lo:hi + 1]
+    # Build indices anchored on center_frame so the center is always included
+    # regardless of step, with symmetric sampling outward.
+    offsets = np.arange(-((center_frame - lo) // step), ((hi - center_frame) // step) + 1)
+    indices = center_frame + offsets * step
+
+    window = frame_arr[indices]
     if mode == "min":
         overlay = window.min(axis=0)
     elif mode == "max":
@@ -169,8 +181,10 @@ def overlay_motion_frames(
     ax.imshow(overlay, cmap=cmap, origin="lower")
 
     if show_window:
+        step_note = "" if step == 1 else f", every {step}th"
         ax.set_title(
-            f"Frames {lo}-{hi} ({hi - lo + 1} frames, centered on {center_frame})"
+            f"Frames {indices[0]}-{indices[-1]} "
+            f"({len(indices)} frames{step_note}, centered on {center_frame})"
         )
 
     return ax, overlay
@@ -259,5 +273,23 @@ def batch_convert_cine_to_avi(base_path):
             print(f"Failed to convert {cine_file}: {str(e)}")
 
 if __name__ == "__main__":
-    base_path = r"F:\AUG2025\P23"
-    batch_convert_cine_to_avi(base_path)
+    # --- Overlay a motion trail from a single .cine file -------------------
+    # Edit these three values and run this file directly.
+    cine_path = r"F:\AUG2025\P23\your_file.cine"
+    center_frame = 1549
+    n_frames = 30   # half-window
+    step = 10       # plot every Nth frame; 1 = continuous
+
+    tarr, frarr, dt = read_cine(cine_path)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    overlay_motion_frames(
+        frarr,
+        center_frame=center_frame,
+        n_frames=n_frames,
+        step=step,
+        mode="min",
+        ax=ax,
+    )
+    ax.axis("off")
+    plt.tight_layout()
+    plt.show()
