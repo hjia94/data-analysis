@@ -153,13 +153,36 @@ def _video_capture(path: str) -> Iterator[cv2.VideoCapture]:
 
 #===============================================================================================================================================
 def extract_calibration(cine_filename):
-    """Extract calibration factor from filename"""
-    if "P30" in cine_filename:
-        calibration = 1.5e-2
-    elif "P24" in cine_filename:
-        calibration = 0.031707
-    else:
-        raise ValueError(f"Unknown calibration for {cine_filename}")
+    """Return cm/px calibration for a cine file based on its port number tag.
+
+    Perspective model:  cal = K * (P_CAM - port)
+    Fitted to two measured points:
+        P30 → 0.015 cm/px,  P24 → 0.031707 cm/px
+    Solving the 2x2 system gives:
+        K     = (0.031707 - 0.015) / (30 - 24) = 0.0027845 cm/px per port
+        P_CAM = 30 + 0.015 / K                 ≈ 35.39
+    The effective camera port (~35.4) is the optical nodal point, not the
+    physical mounting port (~P60); the discrepancy reflects that "1 ft per
+    port" is approximate and the lens focal offset matters.
+    Valid for port < P_CAM (i.e. P1–P35, the far side of the machine).
+    """
+    import re
+    m = re.search(r'[Pp](\d+)', os.path.basename(cine_filename))
+    if m is None:
+        raise ValueError(
+            f"No port number (e.g. 'P23') found in filename: {cine_filename}"
+        )
+    port = int(m.group(1))
+
+    K = (0.031707 - 0.015) / (30 - 24)      # cm/px per port
+    P_CAM = 30 + 0.015 / K                   # effective camera port ≈ 35.39
+    calibration = K * (P_CAM - port)
+
+    if calibration <= 0:
+        raise ValueError(
+            f"Port {port} is at or beyond the effective camera position "
+            f"(P_CAM ≈ {P_CAM:.1f}); calibration formula not valid here."
+        )
     return calibration
 
 #===============================================================================================================================================
