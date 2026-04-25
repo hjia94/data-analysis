@@ -1,3 +1,33 @@
+"""
+Track a tungsten ball falling through a cylindrical plasma chamber.
+
+Coordinate system
+-----------------
+All positions are stored as (rel_x, rel_y) relative to the chamber center
+(CHAMBER_CX, CHAMBER_CY):
+    rel_x = px - cx        (positive = rightward)
+    rel_y = cy - py        (positive = upward; inverts the image y-axis)
+
+Core tracking logic (track_object)
+-----------------------------------
+For each video frame the detector (Hough circles on an inverted, blurred
+grayscale image) finds the brightest ball candidate inside the chamber disk.
+A narrow ROI crop around the last known position is tried first for speed;
+the full-chamber search is the fallback.
+
+On a successful detection the relative position is appended and the tracker
+updates min_ydiff_frame: the index of the frame whose |rel_y| is smallest,
+i.e. where the ball is vertically closest to the chamber center.  Because the
+ball falls straight through the chamber, this is the center-crossing frame
+(rel_y ≈ 0, t0 in all downstream kinematics).
+
+Calibration (extract_calibration)
+-----------------------------------
+The parabolic y(t) trajectory in pixel space is fit with np.polyfit.  The
+leading coefficient gives g in px/s², from which cm/px is derived.  t0 is
+set to tarr[min_ydiff_frame] so that the fit is expressed in physical time
+relative to the center crossing.
+"""
 import cv2
 import logging
 import multiprocessing as mp
@@ -370,13 +400,7 @@ def _track_frame_range(
     return local_positions, local_frame_numbers, local_min_ydiff, local_min_ydiff_frame
 
 
-def track_object(
-    avi_path: str,
-    cx: Optional[int] = None,
-    cy: Optional[int] = None,
-    chamber_radius: Optional[int] = None,
-    n_workers: int = 1,
-) -> TrackingResult:
+def track_object(avi_path: str, cx: Optional[int] = None, cy: Optional[int] = None, chamber_radius: Optional[int] = None, n_workers: int = 1,) -> TrackingResult:
     """
     Track tungsten ball through entire video sequence.
 
@@ -498,97 +522,43 @@ def track_object(
     )
 
 #===============================================================================================================================================
-def get_vel_freefall(h=1):
-    '''Return magnitude of velocity (m/s) after free falling from rest through height h (m).
+def get_ball_position_at_time(
+    t_ms: float,
+    result: TrackingResult,
+    tarr: np.ndarray,
+    cm_per_px: float,
+) -> Optional[Tuple[float, float]]:
+    """Return (x_cm, y_cm) at time t_ms by extending linear fits of the tracked trajectory.
 
-    Uses v = sqrt(2 * g * h). Direction (sign) is handled by caller.
-    '''
-    return np.sqrt(2 * g * h)
-
-def get_pos_freefall(t, t0, height=0.5, chamber_radius=None, enforce_bounds=False):
-    '''Return vertical position relative to chamber center with physically correct kinematics.
-
-    Coordinate system:
-        - Upward is positive.
-        - y = 0 when the ball passes the chamber center at time t0.
-        - y > 0 above center; y < 0 below center.
-
-    Parameter height:
-        Distance (m) the ball has ALREADY fallen before reaching the center.
-        Therefore the release-from-rest position was at y = +height at time
-        t_release = t0 - fall_time, where fall_time = sqrt(2*height/g).
-
-    Derivation:
-        Released from rest -> y_rel(τ) = height - 0.5*g*τ^2, τ in [0, fall_time].
-        At τ = fall_time: y = 0 and v = -g*fall_time = -sqrt(2*g*height).
-        Let dt = t - t0 (center-crossing frame). For motion phase (t >= t_release):
-            y(dt) = -0.5 * g * dt * (dt + 2*fall_time).
-        This gives y(t0)=0 and dy/dt(t0) = -g*fall_time.
-
-    Piecewise model implemented:
-        if t < t_release: y = height (still at rest prior to drop)
-        else:            y = -0.5 * g * dt * (dt + 2*fall_time)
-
-    Optional bounds:
-        If chamber_radius is provided and enforce_bounds is True, y is clipped to
-        [-chamber_radius, chamber_radius]. No bounce dynamics are modeled.
+    Fits straight lines to the x(t) and y(t) data observed in the cine frames
+    (converted to cm via cm_per_px), then evaluates those lines at any arbitrary
+    time — including before or after the recording window.
 
     Args:
-        t (float | array-like): Evaluation time(s) [s].
-        t0 (float): Time of center crossing [s].
-        height (float): Distance already fallen before center [m] (>=0).
-        chamber_radius (float | None): Physical radius of chamber [m] for validation
-            (= CHAMBER_DIAMETER_CM / 200, i.e. 0.18 m for the 36 cm chamber).
-        enforce_bounds (bool): Clip output to physical bounds if chamber_radius given.
+        t_ms: Query time in milliseconds (same reference as tarr * 1000).
+        result: TrackingResult from track_object.
+        tarr: Time array in seconds from read_cine.
+        cm_per_px: Calibration factor in cm/px — use cm_per_px_mean from the
+            .npy file saved by average_calibration.
 
     Returns:
-        float or np.ndarray: Position(s) y relative to center.
-    '''
-    # Basic validation (minimal per project guideline)
-    if height < 0:
-        raise ValueError("height must be non-negative")
-    if chamber_radius is not None and height > chamber_radius:
-        raise ValueError("height exceeds chamber_radius; inconsistent initial condition")
+        (x_cm, y_cm) relative to chamber center, or None if result has no data.
+    """
+    if result.frame_numbers.size == 0:
+        return None
 
-    t_arr = np.asarray(t, dtype=float)
-    if height == 0:
-        # Degenerate case: ball at center at t0 with zero prior fall.
-        y = np.zeros_like(t_arr)
-        if np.isscalar(t):
-            return float(y)
-        return y
+    t_tracked = tarr[result.frame_numbers]
+    t_s = t_ms / 1000.0
 
-    v0 = get_vel_freefall(height)  # sqrt(2*g*height)
-    fall_time = v0 / g             # sqrt(2*height/g)
-    dt = t_arr - t0
-    # Motion-phase formula
-    y_motion = -0.5 * g * dt * (dt + 2 * fall_time)
-    # Prior to release: constant height
-    y = np.where(dt < -fall_time, height, y_motion)
+    positions = np.asarray(result.positions, dtype=float)
+    x_cm_tracked = positions[:, 0] * cm_per_px
+    y_cm_tracked = positions[:, 1] * cm_per_px
 
-    if chamber_radius is not None and enforce_bounds:
-        y = np.clip(y, -chamber_radius, chamber_radius)
+    x_slope, x_intercept = np.polyfit(t_tracked, x_cm_tracked, 1)
+    y_slope, y_intercept = np.polyfit(t_tracked, y_cm_tracked, 1)
 
-    if np.isscalar(t):
-        return float(y)
-    return y
+    return float(x_intercept + x_slope * t_s), float(y_intercept + y_slope * t_s)
 
-def get_vel_freefall_time(t, t0, height=0.5):
-    '''Velocity (m/s, upward positive) as a function of time for the same model.
-
-    For t < t_release: v = 0
-    For t >= t_release: v = -g * (dt + fall_time)
-    where dt = t - t0 and fall_time = sqrt(2*height/g).
-    '''
-    t_arr = np.asarray(t, dtype=float)
-    v0 = get_vel_freefall(height)
-    fall_time = v0 / g
-    dt = t_arr - t0
-    v = -g * (dt + fall_time)
-    v = np.where(dt < -fall_time, 0.0, v)
-    if np.isscalar(t):
-        return float(v)
-    return v
 
 #===============================================================================================================================================
 def update_tracking_result(tr_ifn, filepath, cf_new, ct_new):
