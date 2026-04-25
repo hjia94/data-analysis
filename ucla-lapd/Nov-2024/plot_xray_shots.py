@@ -1,36 +1,25 @@
-"""Stacked X-ray traces for a sequence of shots, panels labeled (a)-(e)."""
+"""X-ray traces in two side-by-side panels (a) and (b) with pulse detection."""
 
 import os
+import re
 import sys
-from string import ascii_lowercase
 
 import matplotlib.pyplot as plt
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(_HERE)
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
 
 from read_scope_data import read_trc_data
+from process_xray_bdot import process_shot_xray
 
 
-DATA_DIR = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30"
-SHOT_NUMBERS = range(22, 26)
-FNAME_FMT = "C3--E-ring-p30-z13-x200-xray--{n:05d}.trc"
-BDOT_FMT = "C3--E-ring-p30-z13-x200-Bdot--{n:05d}.trc"
-
-EXTRA_TRACE_PATH = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30\background\C3--E-ring-p30-z13-x200-xray--00005.trc"
+PATH_A = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30\background\C3--E-ring-p30-z13-x200-xray--00003.trc"
+PATH_B = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30\C3--E-ring-p30-z13-x200-xray--00022.trc"
 
 OKABE_ITO = ['#0072B2', '#D55E00', '#009E73', '#CC79A7', '#E69F00',
              '#56B4E9', '#F0E442', '#000000']
-
-
-def collect_files(data_dir, shot_numbers):
-    files = []
-    for n in shot_numbers:
-        xray_path = os.path.join(data_dir, FNAME_FMT.format(n=n))
-        bdot_path = os.path.join(data_dir, BDOT_FMT.format(n=n))
-        if os.path.exists(bdot_path) and os.path.exists(xray_path):
-            files.append((n, xray_path))
-    return files
 
 
 def configure_style():
@@ -52,59 +41,54 @@ def configure_style():
     })
 
 
-def plot_shots(files, save_path=None):
-    n_files = len(files)
-    if n_files == 0:
-        raise RuntimeError("No matching shot files found.")
+def _file_number(path):
+    """Extract zero-padded shot number from filename, e.g. '00022' from '...--00022.trc'."""
+    m = re.search(r'--(\d{5})\.trc$', os.path.basename(path))
+    if not m:
+        raise ValueError(f"Cannot extract shot number from: {path}")
+    return m.group(1)
 
-    n_panels = n_files + (1 if EXTRA_TRACE_PATH else 0)
 
+def plot_panels(save_path=None):
     fig, axes = plt.subplots(
-        n_panels, 1, sharex=True,
-        figsize=(7.0, 1.6 * n_panels + 0.4),
+        1, 2,
+        figsize=(7.0, 3.0),
         constrained_layout=True,
     )
-    if n_panels == 1:
-        axes = [axes]
 
+    # Calculate y-axis limit based on both datasets
+    max_vals = []
+    for path in [PATH_A, PATH_B]:
+        if path:
+            data, tarr = read_trc_data(path)
+            max_vals.append(max(-data))
+    
+    y_max = max(max_vals) * 1.2
+    
+    for ax, path, label, color in zip(axes, [PATH_A, PATH_B], ['(a)', '(b)'], OKABE_ITO):
+        if path:
+            data, tarr = read_trc_data(path)
+            t_ms = tarr * 1e3
 
-    traces = []
-    for (shot_num, fpath) in files:
-        shot_data, shot_tarr = read_trc_data(fpath)
-        traces.append((shot_num, shot_tarr * 1e3, -shot_data))
+            if path == PATH_A:
+                max_sample = int(0.4 * len(t_ms))
+                ax.plot(t_ms[:max_sample], -data[:max_sample], color=color, lw=0.8)
+            if path == PATH_B:
+                ax.plot(t_ms, -data, color=color, lw=0.8)
+        
+        ax.set_ylim(0, y_max)
 
-    t_min = min(t.min() for _, t, _ in traces)
-    t_max = max(t.max() for _, t, _ in traces)
-
-    for i, (ax, (shot_num, t_ms, sig)) in enumerate(zip(axes, traces)):
-        color = OKABE_ITO[i % len(OKABE_ITO)]
-        ax.plot(t_ms, sig, color=color, lw=0.8)
+            # pulse_times, pulse_amps = process_shot_xray(_file_number(path), os.path.dirname(path))
+            # ax.scatter(pulse_times, pulse_amps, s=10, color='#CC79A7', alpha=0.8, zorder=3)
 
         ax.set_yticks([])
+        if ax == axes[0]:
+            ax.set_ylabel("X-ray signal (a.u.)")
+        ax.set_xlabel("Time (ms)")
+
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-
-        ax.text(0.01, 0.95, f"({ascii_lowercase[i]})",
-                transform=ax.transAxes, ha='left', va='top',
-                fontweight='bold')
-
-    if EXTRA_TRACE_PATH:
-        extra_data, extra_tarr = read_trc_data(EXTRA_TRACE_PATH)
-        extra_t_ms = extra_tarr * 1e3
-        mask = (extra_t_ms >= t_min) & (extra_t_ms <= t_max)
-        ax_extra = axes[-1]
-        ax_extra.plot(extra_t_ms[mask], -extra_data[mask],
-                      color=OKABE_ITO[n_files % len(OKABE_ITO)],
-                      lw=0.8)
-        ax_extra.set_yticks([])
-        ax_extra.spines['top'].set_visible(False)
-        ax_extra.spines['right'].set_visible(False)
-        ax_extra.text(0.01, 0.95, f"({ascii_lowercase[n_files]})",
-                      transform=ax_extra.transAxes, ha='left', va='top',
-                      fontweight='bold')
-
-    axes[0].set_xlim(t_min, t_max)
-    axes[-1].set_xlabel("Time (ms)")
+        ax.text(0.01, 0.95, label, transform=ax.transAxes, ha='left', va='top', fontweight='bold')
 
     if save_path:
         for ext in ('pdf', 'png'):
@@ -117,16 +101,12 @@ def plot_shots(files, save_path=None):
 
 def main(save=False):
     configure_style()
-    files = collect_files(DATA_DIR, SHOT_NUMBERS)
     out_path = None
     if save:
         out_dir = os.path.dirname(os.path.abspath(__file__))
-        out_path = os.path.join(out_dir, "xray_shots_22-26")
-        plot_shots(files, save_path=out_path)
-    else:
-        plot_shots(files)
+        out_path = os.path.join(out_dir, "xray_two_panels")
+    plot_panels(save_path=out_path)
 
 
 if __name__ == "__main__":
-
     main(save=False)

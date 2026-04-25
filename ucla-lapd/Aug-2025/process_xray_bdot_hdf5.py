@@ -29,7 +29,7 @@ sys.path = [repo_root, f"{repo_root}/read", f"{repo_root}/object_tracking"] + sy
 from read.read_scope_data import read_trc_data, read_hdf5_all_scopes_channels, read_scope_channel_descriptions
 from data_analysis_utils import Photons, calculate_stft, counts_per_bin
 from object_tracking.read_cine import read_cine, convert_cine_to_avi
-from object_tracking.track_object import track_object, detect_chamber, get_vel_freefall, get_pos_freefall
+from object_tracking.track_object import track_object, get_chamber, get_vel_freefall, get_pos_freefall
 
 #===========================================================================================================
 plt.rcParams.update({'font.size': 18})
@@ -273,7 +273,7 @@ def process_video(base_dir, cam_file, tracking_dict={}, tracking_file=None, plot
 		ax.set_title(cam_file)
 
 		ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-		(cx, cy), chamber_radius = detect_chamber(frame)
+		cx, cy, chamber_radius = get_chamber()
 		chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
 		ax.add_patch(chamber_circle)
 		_log('VIDEO', f"ball reaches chamber center at t={ct * 1e3:.3f}ms from plasma trigger")
