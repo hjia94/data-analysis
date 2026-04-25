@@ -2,20 +2,30 @@ import cv2
 import logging
 import multiprocessing as mp
 import numpy as np
+from scipy import constants
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional, Iterator, List, Tuple
 from scipy.constants import g
 
 logger = logging.getLogger(__name__)
 
-# Chamber detection parameters
-CHAMBER_RADIUS_PX_RANGE = (300, 600)
-CHAMBER_HOUGH_PARAMS = dict(dp=1.2, param1=150, param2=25)
-CHAMBER_BRIGHTNESS_MIN = 200
-CHAMBER_BRIGHT_PIXEL_RATIO_MIN = 0.85
+
+# Hardcoded chamber geometry. Verified visually against the bright chamber
+# disk in the 2048x2048 fast-cam frames (see fastcam_test.ipynb): the
+# Hough/contour detector's (1121, 1113, 609) result was overlaid on a real
+# frame and confirmed to lie on the bright background. The camera mount is
+# fixed across all runs in this analysis, so this is the single source of
+# truth — no per-shot detection is needed.
+CHAMBER_CX = 1121
+CHAMBER_CY = 1113
+CHAMBER_RADIUS = 609
+
+# Physical diameter of the bright chamber disk visible in the fast-cam frames.
+# 36 cm across (radius = 18 cm). Source of truth for the chamber-based cm/px
+# cross-check used to validate the gravity-derived calibration.
+CHAMBER_DIAMETER_CM = 36.0
 
 # Ball detection parameters
 BALL_RADIUS_PX_RANGE = (1, 5)
@@ -25,104 +35,22 @@ BALL_HOUGH_PARAMS = dict(dp=1, param1=50, param2=12)
 BALL_ROI_RADIUS_PX = 60          # half-width of crop around last detection
 BALL_ROI_LOSS_LIMIT = 3          # consecutive ROI misses before giving up tracking
 
-# Persistent chamber cache (camera mount is static across runs).
-# Keyed by frame shape (height, width); value: {"cx", "cy", "radius"}.
-CHAMBER_CACHE_PATH = Path(__file__).parent / "chamber_cache.npy"
+
+def get_chamber() -> Tuple[int, int, int]:
+    """Return the hardcoded chamber geometry as (cx, cy, radius_px)."""
+    return CHAMBER_CX, CHAMBER_CY, CHAMBER_RADIUS
 
 
-def load_chamber_cache(path: Path = CHAMBER_CACHE_PATH) -> dict:
-    """Load the chamber cache dict, or return empty dict if missing."""
-    if not os.path.exists(path):
-        return {}
-    return np.load(path, allow_pickle=True).item()
+def chamber_cm_per_px(chamber_radius_px: int = CHAMBER_RADIUS) -> float:
+    """cm/px from the chamber disk: (CHAMBER_DIAMETER_CM / 2) / radius_px.
 
-
-def save_chamber_cache(cache: dict, path: Path = CHAMBER_CACHE_PATH) -> None:
-    np.save(path, cache)
-
-
-def set_chamber(
-    shape: Tuple[int, int],
-    cx: int,
-    cy: int,
-    radius: int,
-    path: Path = CHAMBER_CACHE_PATH,
-) -> None:
-    """Manually set/override the cached chamber for a given frame shape."""
-    cache = load_chamber_cache(path)
-    cache[tuple(shape)] = {"cx": int(cx), "cy": int(cy), "radius": int(radius)}
-    save_chamber_cache(cache, path)
-    logger.info("Chamber cache updated for shape %s: cx=%d cy=%d r=%d",
-                tuple(shape), cx, cy, radius)
-
-
-def clear_chamber_cache(path: Path = CHAMBER_CACHE_PATH) -> None:
-    if os.path.exists(path):
-        os.remove(path)
-        logger.info("Chamber cache cleared at %s", path)
-
-
-def show_chamber_cache(path: Path = CHAMBER_CACHE_PATH) -> None:
-    cache = load_chamber_cache(path)
-    if not cache:
-        print(f"No chamber cache at {path}")
-        return
-    print(f"Chamber cache ({len(cache)} entries) at {path}:")
-    for shape, v in cache.items():
-        print(f"  shape={shape}: cx={v['cx']} cy={v['cy']} radius={v['radius']}")
-
-
-def detect_and_cache_chamber(
-    video_path: str,
-    frame_idx: int = 0,
-    chamber_cache_path: Optional[Path] = CHAMBER_CACHE_PATH,
-    redetect: bool = False,
-    debug: bool = False,
-) -> Tuple[int, int, int]:
+    Independent of the parabola fit — uses only the known physical size of
+    the bright chamber circle (36 cm diameter = 18 cm radius). Lies on the
+    chamber back-wall plane, which is farther from the camera than any port
+    plane, so it is NOT expected to equal the gravity-derived per-port
+    cm/px (see evaluate_freefall_accuracy.py --port-ratio).
     """
-    Open `video_path`, read one frame, run detect_chamber, and write the
-    result to the chamber cache. Cheap (~one frame read + one detection)
-    compared to track_object which processes the entire video.
-
-    Args:
-        video_path: Path to AVI/video file.
-        frame_idx: Which frame to use for detection (default 0).
-        chamber_cache_path: Cache file path. Pass None to skip writing.
-        redetect: If True, ignore any existing cache entry and re-detect.
-        debug: Forwarded to detect_chamber.
-
-    Returns:
-        (cx, cy, radius)
-    """
-    if not os.path.exists(video_path):
-        raise FileNotFoundError(f"Video file not found: {video_path}")
-
-    with _video_capture(video_path) as cap:
-        if frame_idx != 0:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            raise RuntimeError(f"Could not read frame {frame_idx} from {video_path}")
-
-    shape_key = (frame.shape[0], frame.shape[1])
-    cache = (
-        load_chamber_cache(chamber_cache_path)
-        if chamber_cache_path is not None else {}
-    )
-
-    if not redetect and shape_key in cache:
-        v = cache[shape_key]
-        logger.info("Chamber already cached for shape %s; use redetect=True to override",
-                    shape_key)
-        return v["cx"], v["cy"], v["radius"]
-
-    (cx, cy), radius = detect_chamber(frame, debug=debug)
-    if chamber_cache_path is not None:
-        cache[shape_key] = {"cx": int(cx), "cy": int(cy), "radius": int(radius)}
-        save_chamber_cache(cache, chamber_cache_path)
-        logger.info("Cached chamber for shape %s: cx=%d cy=%d r=%d",
-                    shape_key, cx, cy, radius)
-    return int(cx), int(cy), int(radius)
+    return (CHAMBER_DIAMETER_CM / 2.0) / float(chamber_radius_px)
 
 
 @dataclass
@@ -149,139 +77,156 @@ def _video_capture(path: str) -> Iterator[cv2.VideoCapture]:
         cap.release()
 
 
-
-
 #===============================================================================================================================================
-def extract_calibration(cine_filename):
-    """Return cm/px calibration for a cine file based on its port number tag.
+def ensure_avi(cine_path):
+    """Convert cine to AVI next to it if the AVI does not yet exist."""
+    avi_path = os.path.splitext(cine_path)[0] + ".avi"
+    if os.path.exists(avi_path):
+        return avi_path
+    _tarr, frarr, _dt = read_cine(cine_path)
+    convert_cine_to_avi(frarr, avi_path)
+    return avi_path
 
-    Perspective model:  cal = K * (P_CAM - port)
-    Fitted to two measured points:
-        P30 → 0.015 cm/px,  P24 → 0.031707 cm/px
-    Solving the 2x2 system gives:
-        K     = (0.031707 - 0.015) / (30 - 24) = 0.0027845 cm/px per port
-        P_CAM = 30 + 0.015 / K                 ≈ 35.39
-    The effective camera port (~35.4) is the optical nodal point, not the
-    physical mounting port (~P60); the discrepancy reflects that "1 ft per
-    port" is approximate and the lens focal offset matters.
-    Valid for port < P_CAM (i.e. P1–P35, the far side of the machine).
-    """
-    import re
-    m = re.search(r'[Pp](\d+)', os.path.basename(cine_filename))
-    if m is None:
-        raise ValueError(
-            f"No port number (e.g. 'P23') found in filename: {cine_filename}"
-        )
-    port = int(m.group(1))
-
-    K = (0.031707 - 0.015) / (30 - 24)      # cm/px per port
-    P_CAM = 30 + 0.015 / K                   # effective camera port ≈ 35.39
-    calibration = K * (P_CAM - port)
-
-    if calibration <= 0:
-        raise ValueError(
-            f"Port {port} is at or beyond the effective camera position "
-            f"(P_CAM ≈ {P_CAM:.1f}); calibration formula not valid here."
-        )
-    return calibration
-
-#===============================================================================================================================================
-def detect_chamber(
-    frame: np.ndarray,
-    debug: bool = False,
-    min_radius_px: int = CHAMBER_RADIUS_PX_RANGE[0],
-    max_radius_px: int = CHAMBER_RADIUS_PX_RANGE[1],
-) -> Tuple[Tuple[int, int], int]:
-    """
-    Detects the bright chamber circle using optimized thresholding and validation.
-
-    Args:
-        frame: Input frame (BGR format).
-        debug: If True, log detection details.
-        min_radius_px: Minimum candidate chamber radius in pixels.
-        max_radius_px: Maximum candidate chamber radius in pixels.
+def extract_calibration(cine_path):
+    """Track a cine file and deduce cm/px from the parabolic y(t) trajectory.
 
     Returns:
-        (origin, radius) where origin is (x, y) pixel coordinates and radius is in pixels.
+        (cm_per_px_gravity, cm_per_px_chamber, x_cm) on success, or
+        (None, None, None) on failure.
     """
-    if not isinstance(frame, np.ndarray):
-        raise ValueError("frame must be a numpy array")
-    if frame.ndim != 3:
-        raise ValueError("frame must be a 3D array (height, width, channels)")
+    cine_name = os.path.basename(cine_path)
 
-    # Convert to grayscale and enhance contrast
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    try:
+        tarr, _frarr, _dt = read_cine(cine_path)
+    except Exception as e:
+        print(f"[SKIP] {cine_name}: read_cine failed: {e}")
+        return None, None, None
 
-    # Optimized preprocessing for bright circles.
-    # Note: with THRESH_OTSU the manual threshold value is ignored by OpenCV,
-    # so we pass 0 to make that explicit.
-    blurred = cv2.GaussianBlur(gray, (9, 9), 2)
-    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    try:
+        avi_path = ensure_avi(cine_path)
+    except Exception as e:
+        print(f"[SKIP] {cine_name}: avi conversion failed: {e}")
+        return None, None, None
 
-    # Morphological closing to enhance circular shape
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    result = track_object(avi_path)
+    positions = np.asarray(result.positions)
+    frame_numbers = np.asarray(result.frame_numbers)
+    min_ydiff_frame = result.min_ydiff_frame
 
-    # Detect circles with optimized parameters
-    circles = cv2.HoughCircles(
-        closed,
-        cv2.HOUGH_GRADIENT,
-        minDist=frame.shape[1] // 2,  # Assume only one main chamber
-        minRadius=min_radius_px,
-        maxRadius=max_radius_px,
-        **CHAMBER_HOUGH_PARAMS,
-    )
+    if positions.size == 0 or min_ydiff_frame is None:
+        print(f"[SKIP] {cine_name}: tracker returned no usable frames")
+        return None, None, None
 
-    # Validate and select best candidate
-    best_circle = None
-    if circles is not None:
-        circles = np.int32(np.around(circles))[0]
+    x_px = positions[:, 0].astype(float)
+    y_px = positions[:, 1].astype(float)
+    t = tarr[frame_numbers]
+    t0 = float(tarr[min_ydiff_frame])
+    tau = t - t0
 
-        for x, y, r in circles:
-            if x - r < 0 or y - r < 0 or x + r > frame.shape[1] or y + r > frame.shape[0]:
-                continue  # Skip edge-touching circles
+    if tau.size < 5:
+        print(f"[SKIP] {cine_name}: too few tracked frames ({tau.size})")
+        return None, None, None
 
-            # Brightness verification within the candidate disk
-            mask = np.zeros_like(gray)
-            cv2.circle(mask, (int(x), int(y)), int(r), 255, -1)
-            mean_brightness = cv2.mean(gray, mask=mask)[0]
+    # Fit parabola in pixel space: y_px = a + b*tau + c*tau^2
+    c_px, _b_px, _a_px = np.polyfit(tau, y_px, 2)
 
-            # Real validity check: fraction of bright (thresholded) pixels inside
-            # the candidate disk. The disk is synthetic so cv2.findContours-based
-            # circularity would always be ~1.0 — useless as a check.
-            disk_pixels = int(np.count_nonzero(mask))
-            if disk_pixels == 0:
-                continue
-            bright_inside = int(np.count_nonzero(cv2.bitwise_and(closed, mask)))
-            bright_ratio = bright_inside / disk_pixels
+    # Deduce cm/px from gravity. Ball falls => c_px < 0 (y upward-positive).
+    #   y_m(tau)  = -0.5 * g * tau^2 + v0 * tau         (with y(t0)=0)
+    #   y_px(tau) = y_m / (cm/px * 0.01)
+    #   => coefficient of tau^2 in px: c_px = -0.5 * g * 100 / (cm/px)
+    #   => cm/px = -0.5 * (g*100) / c_px
+    G_CM_PER_S2 = constants.g * 100.0                       # 981.0 cm/s^2
+    if c_px >= 0:
+        print(f"[WARN] {cine_name}: non-falling quadratic (c_px={c_px:.2f}); cm/px unreliable")
+        return float("nan"), float("nan"), float("nan")
 
-            if (
-                bright_ratio > CHAMBER_BRIGHT_PIXEL_RATIO_MIN
-                and mean_brightness > CHAMBER_BRIGHTNESS_MIN
-                and (best_circle is None or r > best_circle[2])
-            ):
-                best_circle = (int(x), int(y), int(r))
+    cm_per_px_gravity = float(-0.5 * G_CM_PER_S2 / c_px)
+    cm_per_px_chamber = chamber_cm_per_px()
 
-    # Fallback to contour detection if Hough fails
-    if best_circle is None:
-        logger.warning("Hough failed, using contour fallback")
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest_contour = max(contours, key=cv2.contourArea)
-            (x, y), r = cv2.minEnclosingCircle(largest_contour)
-            best_circle = (int(x), int(y), int(r))
+    x_cm = x_px * cm_per_px_gravity
+    return cm_per_px_gravity, cm_per_px_chamber, x_cm
 
-    if best_circle:
-        x, y, r = best_circle
-        origin, radius = (x, y), r
+
+def average_calibration(dir_path, n=5, pattern="*.cine", out_dir=r"E:\\"):
+    """Run extract_calibration on up to `n` cine files in `dir_path`,
+    print averaged calibration / horizontal drift statistics to the terminal,
+    and save the results as an .npy file to `out_dir` keyed by port number.
+
+    The port tag (e.g. "P21", "P30") is parsed from the filenames and must
+    be consistent across the sampled files. Drift is summarized per shot
+    as the peak-to-peak horizontal excursion (np.ptp(x_cm)).
+    """
+    import glob
+    import re
+
+    cine_files = sorted(glob.glob(os.path.join(dir_path, pattern)))[:n]
+    if not cine_files:
+        print(f"[average_calibration] no files matching {pattern} in {dir_path}")
+        return
+
+    cm_vals = []
+    cm_chamber_vals = []
+    drift_vals = []
+    used = []
+    ports = set()
+    for path in cine_files:
+        cm_per_px, cm_per_px_chamber, x_cm = extract_calibration(path)
+        if cm_per_px is None or np.isnan(cm_per_px):
+            continue
+        cm_vals.append(cm_per_px)
+        if cm_per_px_chamber is not None and not np.isnan(cm_per_px_chamber):
+            cm_chamber_vals.append(cm_per_px_chamber)
+        drift_vals.append(float(np.ptp(np.asarray(x_cm))))
+        name = os.path.basename(path)
+        used.append(name)
+        m = re.search(r"P\d+", name)
+        if m:
+            ports.add(m.group(0))
+
+    if not cm_vals:
+        print("[average_calibration] no usable calibrations")
+        return
+
+    cm_arr = np.asarray(cm_vals)
+    drift_arr = np.asarray(drift_vals)
+    summary = {
+        "cm_per_px_mean": float(cm_arr.mean()),
+        "cm_per_px_std": float(cm_arr.std(ddof=0)),
+        "drift_cm_mean": float(drift_arr.mean()),
+        "drift_cm_std": float(drift_arr.std(ddof=0)),
+        "n_used": len(cm_vals),
+        "n_requested": len(cine_files),
+        "files": used,
+    }
+    if cm_chamber_vals:
+        ch_arr = np.asarray(cm_chamber_vals)
+        summary["cm_per_px_chamber_mean"] = float(ch_arr.mean())
+        summary["cm_per_px_chamber_std"] = float(ch_arr.std(ddof=0))
+
+    if len(ports) == 1:
+        port = ports.pop()
+    elif len(ports) == 0:
+        port = "Punknown"
+        print(f"[average_calibration] WARN: no port tag (P\\d+) in filenames; using {port}")
     else:
-        logger.warning("No valid circle found, using frame center")
-        origin = (frame.shape[1] // 2, frame.shape[0] // 2)
-        radius = (min_radius_px + max_radius_px) // 2
+        port = "_".join(sorted(ports))
+        print(f"[average_calibration] WARN: mixed port tags {sorted(ports)}; using {port}")
 
-    if debug:
-        logger.info("Chamber detected at %s with radius %dpx", origin, radius)
-    return origin, radius
+    print()
+    print(f"=== calibration summary ({port}) ===")
+    print(f"  source dir     : {dir_path}")
+    print(f"  files used     : {summary['n_used']}/{summary['n_requested']}")
+    print(f"  cm/px (gravity): {summary['cm_per_px_mean']:.5f} ± {summary['cm_per_px_std']:.5f}")
+    if "cm_per_px_chamber_mean" in summary:
+        print(f"  cm/px (chamber): {summary['cm_per_px_chamber_mean']:.5f} ± {summary['cm_per_px_chamber_std']:.5f}")
+    print(f"  drift (cm, pp) : {summary['drift_cm_mean']:.3f} ± {summary['drift_cm_std']:.3f}")
+    for f in used:
+        print(f"    - {f}")
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"calibration_factor_{port}.npy")
+    np.save(out_path, summary)
+    print(f"  saved to       : {out_path}")
 
 
 #===============================================================================================================================================
@@ -430,25 +375,17 @@ def track_object(
     cx: Optional[int] = None,
     cy: Optional[int] = None,
     chamber_radius: Optional[int] = None,
-    chamber_cache_path: Optional[Path] = CHAMBER_CACHE_PATH,
-    redetect: bool = False,
     n_workers: int = 1,
 ) -> TrackingResult:
     """
     Track tungsten ball through entire video sequence.
 
-    Chamber resolution priority:
-        1. Explicit cx/cy/chamber_radius args (highest).
-        2. Persistent cache at `chamber_cache_path`, keyed by frame shape.
-        3. detect_chamber() on the first readable frame (slow); result is
-           written to the cache for reuse.
+    Chamber is the hardcoded value from get_chamber() unless cx/cy/chamber_radius
+    are passed explicitly.
 
     Args:
         avi_path: Path to input AVI file.
-        cx, cy, chamber_radius: Optional pre-computed chamber geometry.
-        chamber_cache_path: Path to persistent cache file. Pass None to disable.
-        redetect: If True, ignore the cache and force re-detection (and update
-            the cache with the new value).
+        cx, cy, chamber_radius: Optional override of the hardcoded chamber.
         n_workers: Process pool size for parallel frame-range decode + detect.
             Default 1 = single-process (bit-exact prior behavior).
             Values >1 split frames into contiguous ranges and dispatch via
@@ -465,17 +402,10 @@ def track_object(
     if not os.path.exists(avi_path):
         raise FileNotFoundError(f"Video file not found: {avi_path}")
 
-    if n_workers > 1:
-        # Resolve chamber once so workers don't each re-detect and so cache
-        # writes only happen in one place.
-        if cx is None or cy is None or chamber_radius is None:
-            cx, cy, chamber_radius = detect_and_cache_chamber(
-                avi_path,
-                frame_idx=0,
-                chamber_cache_path=chamber_cache_path,
-                redetect=redetect,
-            )
+    if cx is None or cy is None or chamber_radius is None:
+        cx, cy, chamber_radius = get_chamber()
 
+    if n_workers > 1:
         with _video_capture(avi_path) as cap:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         logger.info("Processing %d frames across %d workers", total_frames, n_workers)
@@ -514,8 +444,6 @@ def track_object(
             min_ydiff_frame=min_ydiff_frame,
         )
 
-    chamber_known = cx is not None and cy is not None and chamber_radius is not None
-
     positions: List[Tuple[int, int]] = []
     frame_numbers: List[int] = []
     min_ydiff: float = float("inf")
@@ -533,29 +461,6 @@ def track_object(
             ret, frame = cap.read()
             if not ret or frame is None:
                 break
-
-            if not chamber_known:
-                shape_key = (frame.shape[0], frame.shape[1])
-                cache = (
-                    load_chamber_cache(chamber_cache_path)
-                    if chamber_cache_path is not None else {}
-                )
-                if not redetect and shape_key in cache:
-                    v = cache[shape_key]
-                    cx, cy, chamber_radius = v["cx"], v["cy"], v["radius"]
-                    logger.info("Using cached chamber for shape %s: "
-                                "cx=%d cy=%d r=%d", shape_key, cx, cy, chamber_radius)
-                else:
-                    (cx, cy), chamber_radius = detect_chamber(frame)
-                    if chamber_cache_path is not None:
-                        cache[shape_key] = {
-                            "cx": int(cx), "cy": int(cy),
-                            "radius": int(chamber_radius),
-                        }
-                        save_chamber_cache(cache, chamber_cache_path)
-                        logger.info("Chamber detected and cached for shape %s",
-                                    shape_key)
-                chamber_known = True
 
             detection = _detect_ball_in_frame(
                 frame, cx, cy, chamber_radius, last_pos=last_pos,
@@ -632,7 +537,8 @@ def get_pos_freefall(t, t0, height=0.5, chamber_radius=None, enforce_bounds=Fals
         t (float | array-like): Evaluation time(s) [s].
         t0 (float): Time of center crossing [s].
         height (float): Distance already fallen before center [m] (>=0).
-        chamber_radius (float | None): Physical half-height of chamber [m] for validation.
+        chamber_radius (float | None): Physical radius of chamber [m] for validation
+            (= CHAMBER_DIAMETER_CM / 200, i.e. 0.18 m for the 36 cm chamber).
         enforce_bounds (bool): Clip output to physical bounds if chamber_radius given.
 
     Returns:
@@ -757,21 +663,21 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from read_cine import read_cine, convert_cine_to_avi, overlay_motion_frames
 
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # logging.basicConfig(level=logging.INFO,
+    #                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     cine_path = r"E:\fast_cam\He3kA_B380G800G_pl0t20_uw15t35\Y20241115_kapton_P30_-16deg_x36_y0@1780_085.cine"
     avi_path = cine_path.replace(".cine", ".avi")
     n_workers = 4
     n_frames = 300  # half-window for overlay
-    step = 60 # how many frames to skip between overlayed motion frames (for visibility)
+    step = 60       # how many frames to skip between overlayed motion frames (for visibility)
 
     tarr, frarr, dt = read_cine(cine_path)
     if not os.path.exists(avi_path):
         logger.info("AVI not found; converting %s -> %s", cine_path, avi_path)
         convert_cine_to_avi(frarr, avi_path)
 
-    cx, cy, chamber_radius = detect_and_cache_chamber(avi_path)
+    cx, cy, chamber_radius = get_chamber()
     parr, frarr_idx, cf = track_object(avi_path, n_workers=n_workers)
     logger.info("track_object: %d positions, center-cross frame=%s", len(parr), cf)
 
