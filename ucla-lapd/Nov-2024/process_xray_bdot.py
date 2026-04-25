@@ -30,7 +30,7 @@ from read_scope_data import read_trc_data
 from data_analysis_utils import Photons, calculate_stft, counts_per_bin
 from plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
 from read_cine import read_cine, convert_cine_to_avi
-from track_object import track_object, detect_chamber, get_vel_freefall, get_pos_freefall
+from track_object import track_object, get_chamber, get_vel_freefall, get_pos_freefall
 
 #===========================================================================================================
 plt.rcParams.update({'font.size': 18})
@@ -261,8 +261,7 @@ def process_video(file_number, base_dir):
     if not ret:
         raise ValueError(f"Could not read frame")
 
-    # Detect chamber
-    (cx, cy), chamber_radius = detect_chamber(frame)
+    cx, cy, chamber_radius = get_chamber()
 
     cap.release()
     return ct, frame, (cx, cy), chamber_radius, filepath
