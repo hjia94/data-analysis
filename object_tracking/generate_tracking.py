@@ -30,8 +30,22 @@ import re
 import matplotlib.pyplot as plt
 import numpy as np
 
-from read_cine import read_cine, convert_cine_to_avi
+from read_cine import read_L, read_cine, convert_cine_to_avi
 from track_object import position_from_fit, track_object_sparse
+
+
+def _read_cine_fps(cine_path):
+    """Read the CINE frame rate without loading all frames."""
+    with open(cine_path, "rb") as cf:
+        cf.read(16)
+        read_L(cf)  # baseline image
+        read_L(cf)  # image count
+        pointers = [read_L(cf), read_L(cf), read_L(cf)]
+        cf.seek(int(pointers[1]) + 768)
+        fps = read_L(cf)
+    if fps <= 0:
+        raise ValueError(f"Invalid CINE frame rate: {fps}")
+    return float(fps)
 
 
 def _resolve_calibration(base_dir, calibration_file):
@@ -99,19 +113,27 @@ def track_shots(base_dir, pattern="*.cine", filenames=None, overwrite=False,
                 continue
 
             avi_path = os.path.splitext(cine_path)[0] + ".avi"
+            fps = None
             if not os.path.exists(avi_path):
                 # Cine is only decoded when the avi sidecar doesn't yet exist;
                 # the sparse tracker reads frames straight from the avi after.
                 print(f"[track_shots] converting {name} -> .avi")
                 try:
-                    _, frarr, _ = read_cine(cine_path)
+                    _, frarr, dt = read_cine(cine_path)
+                    fps = 1.0 / dt
                 except Exception as e:
                     print(f"[track_shots] {name}: read_cine failed: {e}")
                     continue
                 convert_cine_to_avi(frarr, avi_path)
+            else:
+                try:
+                    fps = _read_cine_fps(cine_path)
+                except Exception as e:
+                    print(f"[track_shots] {name}: read fps failed: {e}")
+                    continue
 
             print(f"[track_shots] tracking {name}")
-            entry = track_object_sparse(avi_path, cm_per_px=cm_per_px)
+            entry = track_object_sparse(avi_path, cm_per_px=cm_per_px, fps=fps)
             n = entry["n_points"]
             if n == 0:
                 print(f"[track_shots] {name}: no object tracked")

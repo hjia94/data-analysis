@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Iterator, List, Tuple
 from scipy.constants import g
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +65,12 @@ BALL_HOUGH_PARAMS = dict(dp=1, param1=50, param2=12)
 # ROI tracking parameters
 BALL_ROI_RADIUS_PX = 60          # half-width of crop around last detection
 BALL_ROI_LOSS_LIMIT = 3          # consecutive ROI misses before giving up tracking
+
+# Sparse-sampling tracker parameters (track_object_sparse)
+SPARSE_FIRST_DETECT_STRIDE = 50  # phase-1 scan: full-chamber Hough is slow
+SPARSE_TARGET_POINTS = 5
+SPARSE_MIN_SEPARATION_CM = 0.25
+SPARSE_SWEEP_MAX_FRAMES = 400    # safety cap for the forward stride-1 sweep
 
 
 def get_chamber() -> Tuple[int, int, int]:
@@ -138,7 +145,7 @@ def extract_calibration(cine_path):
         print(f"[SKIP] {cine_name}: avi conversion failed: {e}")
         return None, None, None
 
-    result = track_object(avi_path)
+    result = track_object_per_frame(avi_path)
     positions = np.asarray(result.positions)
     frame_numbers = np.asarray(result.frame_numbers)
     min_ydiff_frame = result.min_ydiff_frame
@@ -400,9 +407,13 @@ def _track_frame_range(
     return local_positions, local_frame_numbers, local_min_ydiff, local_min_ydiff_frame
 
 
-def track_object(avi_path: str, cx: Optional[int] = None, cy: Optional[int] = None, chamber_radius: Optional[int] = None, n_workers: int = 1,) -> TrackingResult:
+def track_object_per_frame(avi_path: str, cx: Optional[int] = None, cy: Optional[int] = None, chamber_radius: Optional[int] = None, n_workers: int = 1,) -> TrackingResult:
     """
-    Track tungsten ball through entire video sequence.
+    Track tungsten ball through entire video sequence (decodes every frame).
+
+    Used by extract_calibration / average_calibration where the parabolic
+    y(t) fit needs many points. For per-shot trajectory caching prefer
+    track_object_sparse, which samples ~5 frames and stores a line fit.
 
     Chamber is the hardcoded value from get_chamber() unless cx/cy/chamber_radius
     are passed explicitly.
@@ -520,6 +531,168 @@ def track_object(avi_path: str, cx: Optional[int] = None, cy: Optional[int] = No
         frame_numbers=np.array(frame_numbers, dtype=int),
         min_ydiff_frame=min_ydiff_frame,
     )
+
+
+#===============================================================================================================================================
+def _empty_sparse_fit(cm_per_px: float, fps: float = float("nan"),
+                      n_points: int = 0,
+                      sample_points: Optional[np.ndarray] = None) -> dict:
+    return {
+        "x_slope": float("nan"), "x_intercept": float("nan"),
+        "y_slope": float("nan"), "y_intercept": float("nan"),
+        "cm_per_px": float(cm_per_px),
+        "fps": float(fps),
+        "n_points": n_points,
+        "t_min": float("nan"), "t_max": float("nan"),
+        "ct": float("nan"),
+        "sample_points": sample_points if sample_points is not None else np.empty((0, 3), dtype=int),
+    }
+
+
+def _detect_at_frame(cap, frame_idx: int, cx: int, cy: int, chamber_radius: int,
+                     last_pos: Optional[Tuple[int, int]] = None):
+    """Seek to ``frame_idx`` and return (rel_x, rel_y) or None.
+
+    ``last_pos`` (absolute px, py) enables the cheap ROI fast-path inside
+    ``_detect_ball_in_frame``; pass it during narrow-back / sweep stages.
+    """
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        return None
+    detection = _detect_ball_in_frame(frame, cx, cy, chamber_radius, last_pos=last_pos)
+    if detection is None:
+        return None
+    px, py = detection
+    return px - cx, cy - py
+
+
+def track_object_sparse(
+    avi_path: str,
+    cm_per_px: float,
+    fps: float,
+    cx: Optional[int] = None,
+    cy: Optional[int] = None,
+    chamber_radius: Optional[int] = None,
+) -> dict:
+    """Sparse tracker that samples ~5 well-separated frames and fits a line.
+
+    Phase 1 finds the first detection by stride-10 scan + 1-by-1 narrow-back.
+    Phase 2 walks forward one frame at a time (using the previous detection
+    as the ROI seed for cheap detection), keeping samples that are at least
+    ``SPARSE_MIN_SEPARATION_CM`` away from every existing sample, until
+    ``SPARSE_TARGET_POINTS`` are collected or the ball leaves the chamber.
+
+    The caller supplies the cine's true ``fps`` because the avi sidecar
+    stores a placeholder fps (see read_cine.convert_cine_to_avi).
+    """
+    if not os.path.exists(avi_path):
+        raise FileNotFoundError(f"Video file not found: {avi_path}")
+
+    if cx is None or cy is None or chamber_radius is None:
+        cx, cy, chamber_radius = get_chamber()
+
+    if fps <= 0:
+        raise ValueError(f"track_object_sparse needs a positive fps; got {fps}")
+
+    min_sep_px = SPARSE_MIN_SEPARATION_CM / cm_per_px
+
+    with _video_capture(avi_path) as cap:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            logger.warning("track_object_sparse: empty avi %s", avi_path)
+            return _empty_sparse_fit(cm_per_px, fps)
+
+        # Phase 1a: stride scan for first detection.
+        first_hit = None
+        for fi in range(0, total_frames, SPARSE_FIRST_DETECT_STRIDE):
+            det = _detect_at_frame(cap, fi, cx, cy, chamber_radius)
+            if det is not None:
+                first_hit = (fi, det)
+                break
+        if first_hit is None:
+            logger.info("track_object_sparse: no detection in %s", avi_path)
+            return _empty_sparse_fit(cm_per_px, fps)
+
+        # Phase 1b: narrow back to the earliest frame that still detects.
+        # One sequential read pass is cheaper than seeking per frame.
+        f_hit, det_hit = first_hit
+        f_first, det_first = f_hit, det_hit
+        last_pos_seed = (det_hit[0] + cx, cy - det_hit[1])
+        win_start = max(0, f_hit - SPARSE_FIRST_DETECT_STRIDE + 1)
+        if win_start < f_hit:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, win_start)
+            for fi in range(win_start, f_hit):
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                detection = _detect_ball_in_frame(frame, cx, cy, chamber_radius, last_pos=last_pos_seed)
+                if detection is not None:
+                    px, py = detection
+                    f_first, det_first = fi, (px - cx, cy - py)
+                    break
+
+        samples = [(f_first, det_first[0], det_first[1])]
+
+        # Phase 2: sequential stride-1 sweep with ROI fast-path. Hough misses
+        # are tolerated — the separation gate (min_sep_px) rejects near-duplicates
+        # instead of a miss-streak terminator. SPARSE_SWEEP_MAX_FRAMES caps
+        # iteration for balls that linger in the chamber.
+        cap.set(cv2.CAP_PROP_POS_FRAMES, f_first + 1)
+        last_pos = (det_first[0] + cx, cy - det_first[1])  # convert rel→absolute
+        sweep_end = min(total_frames, f_first + 1 + SPARSE_SWEEP_MAX_FRAMES)
+        for fi in range(f_first + 1, sweep_end):
+            if len(samples) >= SPARSE_TARGET_POINTS:
+                break
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            detection = _detect_ball_in_frame(
+                frame, cx, cy, chamber_radius, last_pos=last_pos,
+            )
+            if detection is None:
+                continue
+            px, py = detection
+            last_pos = (px, py)
+            rel_x, rel_y = px - cx, cy - py
+            if any(np.hypot(rel_x - sx, rel_y - sy) < min_sep_px
+                   for _, sx, sy in samples):
+                continue
+            samples.append((fi, rel_x, rel_y))
+
+    sample_arr = np.asarray(samples, dtype=int)
+    if sample_arr.shape[0] < 2:
+        return _empty_sparse_fit(cm_per_px, fps,
+                                 n_points=int(sample_arr.shape[0]),
+                                 sample_points=sample_arr if sample_arr.size else None)
+
+    t_s = sample_arr[:, 0].astype(float) / fps
+    x_cm = sample_arr[:, 1].astype(float) * cm_per_px
+    y_cm = sample_arr[:, 2].astype(float) * cm_per_px
+    x_slope, x_intercept = np.polyfit(t_s, x_cm, 1)
+    y_slope, y_intercept = np.polyfit(t_s, y_cm, 1)
+    ct = float(-y_intercept / y_slope) if y_slope != 0 else float("nan")
+
+    return {
+        "x_slope": float(x_slope), "x_intercept": float(x_intercept),
+        "y_slope": float(y_slope), "y_intercept": float(y_intercept),
+        "cm_per_px": float(cm_per_px),
+        "fps": float(fps),
+        "n_points": int(sample_arr.shape[0]),
+        "t_min": float(t_s.min()), "t_max": float(t_s.max()),
+        "ct": ct,
+        "sample_points": sample_arr,
+    }
+
+
+def position_from_fit(t_ms: float, fit: dict) -> Tuple[float, float]:
+    """Evaluate a saved sparse-tracker line at ``t_ms`` (chamber-centre frame, cm)."""
+    t_s = t_ms / 1000.0
+    return (
+        fit["x_intercept"] + fit["x_slope"] * t_s,
+        fit["y_intercept"] + fit["y_slope"] * t_s,
+    )
+
 
 #===============================================================================================================================================
 def get_ball_position_at_time(
@@ -648,8 +821,8 @@ if __name__ == "__main__":
         convert_cine_to_avi(frarr, avi_path)
 
     cx, cy, chamber_radius = get_chamber()
-    parr, frarr_idx, cf = track_object(avi_path, n_workers=n_workers)
-    logger.info("track_object: %d positions, center-cross frame=%s", len(parr), cf)
+    parr, frarr_idx, cf = track_object_per_frame(avi_path, n_workers=n_workers)
+    logger.info("track_object_per_frame: %d positions, center-cross frame=%s", len(parr), cf)
 
     if cf is None:
         raise SystemExit("No center-crossing frame found; cannot build overlay.")
