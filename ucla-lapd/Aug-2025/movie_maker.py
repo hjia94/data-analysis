@@ -25,7 +25,6 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__ if '__file__' 
 sys.path = [repo_root, f"{repo_root}/read", f"{repo_root}/object_tracking"] + sys.path
 
 from data_analysis_utils import counts_per_bin  # noqa: E402
-from object_tracking.track_object import get_pos_freefall  # noqa: E402
 
 
 def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5):
@@ -84,18 +83,25 @@ class Player:
         self.loop()
 
 
-def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output_filename="animation.mp4", fps=10):
+def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
+                output_filename="animation.mp4", fps=10):
     """
     Interactive animation of counts vs position over time.
-    - X-axis: position r_arr (cm)
+    - X-axis: position r_arr (cm)  — distance below chamber centre, evaluated
+      from the per-shot line fit saved by
+      object_tracking/generate_tracking.py:track_shots (sparse tracker).
     - Y-axis: X-ray counts
     - Frames: time slices defined by bin_centers (ms)
     - frame_step_ms: time step between frames (default: 1.0 ms)
     - save_mp4: Whether to save the animation as an MP4 file (requires ffmpeg)
     - output_filename: The filename for the saved animation (if save_mp4 is True)
     - fps: Frames per second for the saved animation (if save_mp4 is True)
+
+    Inputs (npy files): analysis_results.npy and tracking_result.npy must
+    already exist in base_dir — produced by process_xray_bdot_hdf5.py and
+    object_tracking/generate_tracking.py respectively. The tracking entries
+    carry their own cm_per_px so no calibration file is loaded here.
     """
-    # Load cached results
     analysis_file = os.path.join(base_dir, 'analysis_results.npy')
     tracking_file = os.path.join(base_dir, 'tracking_result.npy')
 
@@ -107,24 +113,26 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output
     all_r_cm = []
     all_c = []
 
-    for key, item in tracking_dict.items():
-        if item[1] is None:
-            # missing ct for this video
+    for cine_path, entry in tracking_dict.items():
+        if not isinstance(entry, dict) or "y_slope" not in entry:
+            raise TypeError(
+                f"{cine_path}: legacy cache entry; re-run "
+                "object_tracking/generate_tracking.py to rebuild "
+                "tracking_result.npy with the sparse-fit schema."
+            )
+        if entry["n_points"] < 2 or not np.isfinite(entry["y_slope"]):
             continue
-        prefixes = os.path.basename(key)[:2]
-        shot_numbers = int(os.path.basename(key).split('_shot')[1][:3])
-        t0 = item[1]  # seconds
 
-        analysis_key = f"{prefixes}_{shot_numbers:03d}"
+        basename = os.path.basename(cine_path)
+        analysis_key = f"{basename[:2]}_{int(basename.split('_shot')[1][:3]):03d}"
         pulse_tarr, pulse_amp = analysis_dict.get(analysis_key, ([], []))
         if len(pulse_tarr) == 0:
             continue
 
-        # bin_centers in ms; counts are per-bin photon counts
         bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=frame_step_ms)
 
-        time_seconds = (bin_centers + uw_start) * 1e-3
-        r_arr_cm = get_pos_freefall(time_seconds, t0, height=1) * 100.0
+        t_s = (bin_centers + uw_start) * 1e-3
+        r_arr_cm = -(entry["y_intercept"] + entry["y_slope"] * t_s)
 
         all_t_ms.extend(bin_centers.tolist())
         all_r_cm.extend(r_arr_cm.tolist())
@@ -216,10 +224,10 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output
 
 
 if __name__ == '__main__':
-    base_dir = r"F:\AUG2025\P23"
-    
+    base_dir = r"E:\AUG2025\P24"
+
     # Example 1: Interactive plot
     plot_result(base_dir, uw_start=30, frame_step_ms=0.5)
-    
+
     # Example 2: Save as MP4 (uncomment to use)
     # plot_result(base_dir, uw_start=30, frame_step_ms=0.5, save_mp4=True, output_filename="xray_counts_animation.mp4", fps=15)

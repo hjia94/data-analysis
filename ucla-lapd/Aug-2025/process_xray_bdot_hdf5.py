@@ -10,26 +10,18 @@ Each figure will contain 4 subplots:
 
 import os
 import sys
-from unittest import result
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
-from matplotlib import colors
-import matplotlib.colors as colors  # Ensure we have colors for LogNorm
+import matplotlib.colors as colors  # for LogNorm in plot_averaged_bdot_stft
 from scipy import ndimage
-import tkinter as tk
-import cv2
 import re
 import h5py
-import glob
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__ if '__file__' in globals() else os.getcwd()), '../..'))
-sys.path = [repo_root, f"{repo_root}/read", f"{repo_root}/object_tracking"] + sys.path
+sys.path = [repo_root, f"{repo_root}/read"] + sys.path
 
-from read.read_scope_data import read_trc_data, read_hdf5_all_scopes_channels, read_scope_channel_descriptions
-from data_analysis_utils import Photons, calculate_stft, counts_per_bin
-from object_tracking.read_cine import read_cine, convert_cine_to_avi
-from object_tracking.track_object import track_object, get_chamber, get_vel_freefall, get_pos_freefall
+from read.read_scope_data import read_hdf5_all_scopes_channels, read_scope_channel_descriptions
+from data_analysis_utils import Photons, calculate_stft
 
 #===========================================================================================================
 plt.rcParams.update({'font.size': 18})
@@ -213,76 +205,6 @@ def process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False):
 
 	return detector.pulse_times, detector.pulse_amplitudes
 
-def process_video(base_dir, cam_file, tracking_dict={}, tracking_file=None, plotting=False):
-	'''
-	Process the video file for a given shot number and return the time at which the ball reaches the chamber center
-	'''
-	
-	filepath = os.path.join(base_dir, cam_file)
-	if not os.path.exists(filepath):
-		raise FileNotFoundError("Video file does not exist.")
-	avi_path = os.path.join(base_dir, f"{os.path.splitext(cam_file)[0]}.avi")
-
-	# Check if we already have results for this file
-	if filepath in tracking_dict:
-		_log('VIDEO', f"Loading existing tracking results for {filepath}")
-		cf, ct = tracking_dict[filepath]
-		if cf is None or ct is None:
-			_log('VIDEO', "No object was tracked in previous analysis.")
-			return None
-	else:
-		_log('VIDEO', "No existing tracking results found. Processing video...")
-		tarr, frarr, dt = read_cine(filepath)
-
-		# convert cine to avi if not already done
-		if not os.path.exists(avi_path):
-			_log('VIDEO', f"Converting {filepath} to {avi_path}")
-			convert_cine_to_avi(frarr, avi_path)
-
-		_log('VIDEO', f"Tracking object in {avi_path}")
-		parr, frarr, cf = track_object(avi_path)
-
-		if cf is None:
-			_log('VIDEO', "No object tracked in video.")
-			ct = None
-			# Save result with None frame
-			try:
-				tracking_dict[filepath] = (cf, ct)
-				if tracking_file is not None:
-					np.save(tracking_file, tracking_dict)
-			except Exception as e:
-				_log('VIDEO', f"Error saving tracking results: {e}")
-			return ct
-		else:
-			ct = tarr[cf]
-			try:
-				tracking_dict[filepath] = (cf, ct)         # Add new result to the dictionary and save
-				np.save(tracking_file, tracking_dict)
-			except Exception as e:
-				_log('VIDEO', f"Error saving tracking results: {e}")
-
-	if plotting and cf is not None:
-		cap = cv2.VideoCapture(avi_path)
-		cap.set(cv2.CAP_PROP_POS_FRAMES, cf)
-		ret, frame = cap.read()
-		if not ret:
-			raise ValueError(f"Could not read frame")
-		cap.release()
-
-		fig, ax = plt.subplots(figsize=(8, 8))
-		ax.set_title(cam_file)
-
-		ax.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-		cx, cy, chamber_radius = get_chamber()
-		chamber_circle = plt.Circle((cx, cy), chamber_radius, fill=False, color='green', linewidth=2)
-		ax.add_patch(chamber_circle)
-		_log('VIDEO', f"ball reaches chamber center at t={ct * 1e3:.3f}ms from plasma trigger")
-		ax.axis('off')
-		plt.draw()
-		plt.pause(0.1)
-
-	return ct
-
 def plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr):
 	"""
 	Plot averaged Bdot STFT data for each channel.
@@ -341,70 +263,51 @@ def plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr):
 #===========================================================================================================
 
 def xray_wt_cam(base_dir, fn):
-	# Define path
+	"""Run x-ray pulse detection for every shot in an HDF5 file and append
+	the per-shot ``(pulse_tarr, pulse_amp)`` to ``analysis_results.npy``.
+
+	Tracking is no longer done here — run
+	``object_tracking/generate_tracking.py`` separately to populate
+	``tracking_result.npy`` for downstream consumers like ``movie_maker.py``.
+	"""
 	ifn = os.path.join(base_dir, fn)
-	
-	# Extract two-digit prefix from filename (e.g., "02" from "02_He1kG430G_5800A_K-25_2025-08-12.hdf5")
+
+	# Two-digit prefix from filename (e.g. "02" from "02_He1kG430G_..._2025-08-12.hdf5")
 	file_prefix = fn[:2]
 
-	# Initialize or load the analysis dictionary
 	analysis_file = os.path.join(base_dir, 'analysis_results.npy')
 	if os.path.exists(analysis_file):
 		analysis_dict = np.load(analysis_file, allow_pickle=True).item()
 	else:
 		analysis_dict = {}
-		
-	# Initialize or load the tracking result dictionary
-	tracking_file = os.path.join(base_dir, f"tracking_result.npy")
-	if os.path.exists(tracking_file):
-		tracking_dict = np.load(tracking_file, allow_pickle=True).item()
-	else:
-		tracking_dict = {}
 
 	with h5py.File(ifn, 'r') as f:
 		_log('FILE', f"Opened file {ifn} for processing.")
 		shot_numbers = f['Control/FastCam']['shot number'][()]
 
+	threshold = [5, 70]
+	min_ts = 0.8e-6
+	d = 0.1
+
 	for shot_num in shot_numbers:
-		_log('SHOT', f"Processing shot {shot_num}")
 		analysis_key = f"{file_prefix}_{shot_num:03d}"
-
-		with h5py.File(ifn, 'r') as f:
-			cine_narr = f['Control/FastCam/cine file name'][()]
-			cam_file = cine_narr[shot_num-1].decode('utf-8')
-			if shot_num != int(cam_file[-8:-5]):
-				_log('FILE', f"Warning: shot number {shot_num} does not match {cam_file}")
-			mfn = os.path.join(base_dir, cam_file)
-
-		if mfn not in tracking_dict.keys():
-			_log('TRACKING', f"Analyzing video {cam_file} for tracking...")
-			try:
-				t0 = process_video(base_dir, cam_file, tracking_dict=tracking_dict, tracking_file=tracking_file)
-			except ValueError as e:
-				_log('VIDEO', f"Error processing video for shot {shot_num}: {e}")
-				continue
-			except FileNotFoundError as e:
-				_log('VIDEO', f"No video file found for shot {shot_num}; skipping...")
-				continue
-
 		if analysis_key in analysis_dict:
 			_log('ANALYSIS', f"Analysis result exists for {analysis_key}")
-		else:
-			with h5py.File(ifn, 'r') as f:
-				result = read_hdf5_all_scopes_channels(f, shot_num, include_tarr=True)
-				# tarr_P, P_data = get_magnetron_power_data(f, result)
-				tarr_x, xray_data = get_xray_data(result)
-				threshold = [5, 70]
-				min_ts = 0.8e-6
-				d = 0.1
-				pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold)
+			continue
 
-				analysis_dict[analysis_key] = (pulse_tarr, pulse_amp)
-				try:
-					np.save(analysis_file, analysis_dict)
-					_log('ANALYSIS', f"Added new analysis result for {analysis_key}")
-				except Exception as e:
-					_log('ANALYSIS', f"Error saving analysis results: {e}")
+		_log('SHOT', f"Processing shot {shot_num}")
+		with h5py.File(ifn, 'r') as f:
+			result = read_hdf5_all_scopes_channels(f, shot_num, include_tarr=True)
+			tarr_x, xray_data = get_xray_data(result)
+
+		pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold)
+		analysis_dict[analysis_key] = (pulse_tarr, pulse_amp)
+		_log('ANALYSIS', f"Added new analysis result for {analysis_key}")
+
+	try:
+		np.save(analysis_file, analysis_dict)
+	except Exception as e:
+		_log('ANALYSIS', f"Error saving analysis results: {e}")
 
 
 def batch_process_xray(base_dir):
