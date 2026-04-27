@@ -130,6 +130,52 @@ def track_shots(base_dir, pattern="*.cine", filenames=None, overwrite=False,
     print(f"[track_shots] wrote {out_path} ({len(tracking_dict)} entries)")
 
 
+def count_y_passes(base_dir, y, t_start, t_stop):
+    """Count tracked shots whose fitted trajectory crosses ``y`` in a time window.
+
+    Args:
+        base_dir: Folder containing ``tracking_result.npy``.
+        y: Chamber-centred vertical position in cm, or 1-D array of positions
+            (e.g. ``r_arr_cm`` derived from ``bin_centers``).
+        t_start: Inclusive start of the time window in ms, or 1-D array
+            matching ``y`` (e.g. ``bin_centers - half_width``).
+        t_stop: Inclusive end of the time window in ms, or 1-D array matching
+            ``y`` (e.g. ``bin_centers + half_width``).
+
+    Returns:
+        int when ``y`` is scalar; 1-D int array of per-bin counts when ``y``
+        is array-like. Each element counts how many valid tracking entries have
+        a fitted crossing time inside ``[t_start[i], t_stop[i]]`` at ``y[i]``.
+    """
+    scalar_input = np.ndim(y) == 0
+    y_arr = np.atleast_1d(np.asarray(y, dtype=float))
+    t_start_arr = np.atleast_1d(np.asarray(t_start, dtype=float))
+    t_stop_arr = np.atleast_1d(np.asarray(t_stop, dtype=float))
+
+    if np.any(t_start_arr > t_stop_arr):
+        raise ValueError("t_start must be less than or equal to t_stop")
+
+    out_path = os.path.join(base_dir, "tracking_result.npy")
+    tracking_dict = np.load(out_path, allow_pickle=True).item()
+
+    counts = np.zeros(len(y_arr), dtype=int)
+    for entry in tracking_dict.values():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("n_points", 0) < 2:
+            continue
+
+        y_slope = entry.get("y_slope", float("nan"))
+        y_intercept = entry.get("y_intercept", float("nan"))
+        if not np.isfinite(y_slope) or not np.isfinite(y_intercept) or y_slope == 0:
+            continue
+
+        t_cross_ms = (y_arr - y_intercept) / y_slope * 1e3
+        counts += (t_start_arr <= t_cross_ms) & (t_cross_ms <= t_stop_arr)
+
+    return int(counts[0]) if scalar_input else counts
+
+
 def verify_tracking(base_dir, show=True):
     """Plot a histogram of centre-crossing times (ct) over all tracked shots.
 
@@ -179,6 +225,6 @@ def verify_tracking(base_dir, show=True):
 
 
 if __name__ == "__main__":
-    base_dir = r"E:\AUG2025\P24"
+    base_dir = r"E:\AUG2025\P21"
     # track_shots(base_dir)
-    verify_tracking(base_dir)
+    # verify_tracking(base_dir)
