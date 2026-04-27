@@ -38,6 +38,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional, Iterator, List, Tuple
 from scipy.constants import g
+from read_cine import read_cine_header
 
 
 logger = logging.getLogger(__name__)
@@ -535,6 +536,7 @@ def track_object_per_frame(avi_path: str, cx: Optional[int] = None, cy: Optional
 
 #===============================================================================================================================================
 def _empty_sparse_fit(cm_per_px: float, fps: float = float("nan"),
+                      t_start: float = 0.0,
                       n_points: int = 0,
                       sample_points: Optional[np.ndarray] = None) -> dict:
     return {
@@ -542,6 +544,7 @@ def _empty_sparse_fit(cm_per_px: float, fps: float = float("nan"),
         "y_slope": float("nan"), "y_intercept": float("nan"),
         "cm_per_px": float(cm_per_px),
         "fps": float(fps),
+        "t_start": float(t_start),
         "n_points": n_points,
         "t_min": float("nan"), "t_max": float("nan"),
         "ct": float("nan"),
@@ -569,8 +572,8 @@ def _detect_at_frame(cap, frame_idx: int, cx: int, cy: int, chamber_radius: int,
 
 def track_object_sparse(
     avi_path: str,
+    cine_path: str,
     cm_per_px: float,
-    fps: float,
     cx: Optional[int] = None,
     cy: Optional[int] = None,
     chamber_radius: Optional[int] = None,
@@ -583,8 +586,8 @@ def track_object_sparse(
     ``SPARSE_MIN_SEPARATION_CM`` away from every existing sample, until
     ``SPARSE_TARGET_POINTS`` are collected or the ball leaves the chamber.
 
-    The caller supplies the cine's true ``fps`` because the avi sidecar
-    stores a placeholder fps (see read_cine.convert_cine_to_avi).
+    ``avi_path`` is used only for frame-by-frame object detection.
+    All timing (fps, t_start) is read from ``cine_path`` via read_cine_header.
     """
     if not os.path.exists(avi_path):
         raise FileNotFoundError(f"Video file not found: {avi_path}")
@@ -592,8 +595,7 @@ def track_object_sparse(
     if cx is None or cy is None or chamber_radius is None:
         cx, cy, chamber_radius = get_chamber()
 
-    if fps <= 0:
-        raise ValueError(f"track_object_sparse needs a positive fps; got {fps}")
+    fps, t_start = read_cine_header(cine_path)
 
     min_sep_px = SPARSE_MIN_SEPARATION_CM / cm_per_px
 
@@ -601,7 +603,7 @@ def track_object_sparse(
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames <= 0:
             logger.warning("track_object_sparse: empty avi %s", avi_path)
-            return _empty_sparse_fit(cm_per_px, fps)
+            return _empty_sparse_fit(cm_per_px, fps, t_start)
 
         # Phase 1a: stride scan for first detection.
         first_hit = None
@@ -612,7 +614,7 @@ def track_object_sparse(
                 break
         if first_hit is None:
             logger.info("track_object_sparse: no detection in %s", avi_path)
-            return _empty_sparse_fit(cm_per_px, fps)
+            return _empty_sparse_fit(cm_per_px, fps, t_start)
 
         # Phase 1b: narrow back to the earliest frame that still detects.
         # One sequential read pass is cheaper than seeking per frame.
@@ -662,11 +664,11 @@ def track_object_sparse(
 
     sample_arr = np.asarray(samples, dtype=int)
     if sample_arr.shape[0] < 2:
-        return _empty_sparse_fit(cm_per_px, fps,
+        return _empty_sparse_fit(cm_per_px, fps, t_start,
                                  n_points=int(sample_arr.shape[0]),
                                  sample_points=sample_arr if sample_arr.size else None)
 
-    t_s = sample_arr[:, 0].astype(float) / fps
+    t_s = t_start + sample_arr[:, 0].astype(float) / fps
     x_cm = sample_arr[:, 1].astype(float) * cm_per_px
     y_cm = sample_arr[:, 2].astype(float) * cm_per_px
     x_slope, x_intercept = np.polyfit(t_s, x_cm, 1)
@@ -678,6 +680,7 @@ def track_object_sparse(
         "y_slope": float(y_slope), "y_intercept": float(y_intercept),
         "cm_per_px": float(cm_per_px),
         "fps": float(fps),
+        "t_start": float(t_start),
         "n_points": int(sample_arr.shape[0]),
         "t_min": float(t_s.min()), "t_max": float(t_s.max()),
         "ct": ct,

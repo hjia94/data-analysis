@@ -115,6 +115,24 @@ def read_cine(ifn):
         except Exception as e:
             raise RuntimeError(f"Error reading CINE file: {str(e)}")
 
+def read_cine_header(cine_path):
+    """Read fps and t_start from the CINE header without loading frames.
+
+    Returns (fps, t_start) where t_start is the time in seconds of the first
+    frame, matching tarr[0] returned by read_cine.
+    """
+    with open(cine_path, "rb") as cf:
+        cf.read(16)
+        baseline_image = read_L(cf)
+        read_L(cf)  # image_count
+        pointers = [read_L(cf), read_L(cf), read_L(cf)]
+        cf.seek(int(pointers[1]) + 768)
+        fps = read_L(cf)
+    if fps <= 0:
+        raise ValueError(f"Invalid CINE frame rate: {fps}")
+    return float(fps), float(baseline_image) / float(fps)
+
+
 def overlay_motion_frames(
     frame_arr,
     center_frame,

@@ -30,22 +30,8 @@ import re
 import matplotlib.pyplot as plt
 import numpy as np
 
-from read_cine import read_L, read_cine, convert_cine_to_avi
-from track_object import position_from_fit, track_object_sparse
-
-
-def _read_cine_fps(cine_path):
-    """Read the CINE frame rate without loading all frames."""
-    with open(cine_path, "rb") as cf:
-        cf.read(16)
-        read_L(cf)  # baseline image
-        read_L(cf)  # image count
-        pointers = [read_L(cf), read_L(cf), read_L(cf)]
-        cf.seek(int(pointers[1]) + 768)
-        fps = read_L(cf)
-    if fps <= 0:
-        raise ValueError(f"Invalid CINE frame rate: {fps}")
-    return float(fps)
+from read_cine import read_cine, convert_cine_to_avi
+from track_object import track_object_sparse
 
 
 def _resolve_calibration(base_dir, calibration_file):
@@ -113,27 +99,19 @@ def track_shots(base_dir, pattern="*.cine", filenames=None, overwrite=False,
                 continue
 
             avi_path = os.path.splitext(cine_path)[0] + ".avi"
-            fps = None
             if not os.path.exists(avi_path):
                 # Cine is only decoded when the avi sidecar doesn't yet exist;
                 # the sparse tracker reads frames straight from the avi after.
                 print(f"[track_shots] converting {name} -> .avi")
                 try:
-                    _, frarr, dt = read_cine(cine_path)
-                    fps = 1.0 / dt
+                    _, frarr, _ = read_cine(cine_path)
                 except Exception as e:
                     print(f"[track_shots] {name}: read_cine failed: {e}")
                     continue
                 convert_cine_to_avi(frarr, avi_path)
-            else:
-                try:
-                    fps = _read_cine_fps(cine_path)
-                except Exception as e:
-                    print(f"[track_shots] {name}: read fps failed: {e}")
-                    continue
 
             print(f"[track_shots] tracking {name}")
-            entry = track_object_sparse(avi_path, cm_per_px=cm_per_px, fps=fps)
+            entry = track_object_sparse(avi_path, cine_path, cm_per_px=cm_per_px)
             n = entry["n_points"]
             if n == 0:
                 print(f"[track_shots] {name}: no object tracked")
@@ -152,63 +130,49 @@ def track_shots(base_dir, pattern="*.cine", filenames=None, overwrite=False,
     print(f"[track_shots] wrote {out_path} ({len(tracking_dict)} entries)")
 
 
-def verify_tracking(base_dir, n_cols=4, show=True):
-    """Plot tracked sample points + saved line for every shot.
-
-    Sanity check that the saved sparse fit actually passes through the
-    sample points and crosses ``y = 0`` near the derived ``ct``.
+def verify_tracking(base_dir, show=True):
+    """Plot a histogram of centre-crossing times (ct) over all tracked shots.
 
     Args:
         base_dir: Folder containing ``tracking_result.npy``.
-        n_cols: Subplot grid width.
         show: When True, blocks on ``plt.show``. Set False for non-interactive
             scripts; the caller is then responsible for the figure.
     """
     out_path = os.path.join(base_dir, "tracking_result.npy")
     tracking_dict = np.load(out_path, allow_pickle=True).item()
 
-    valid_items = [
-        (path, entry) for path, entry in tracking_dict.items()
-        if isinstance(entry, dict)
-        and entry.get("n_points", 0) >= 2
-        and not np.isnan(entry.get("y_slope", float("nan")))
-    ]
-    if not valid_items:
-        print(f"[verify_tracking] no usable entries in {out_path}")
+    ct_ms = []
+    t30_ms = []
+    for entry in tracking_dict.values():
+        if not isinstance(entry, dict):
+            continue
+        y_slope = entry.get("y_slope", float("nan"))
+        y_intercept = entry.get("y_intercept", float("nan"))
+        ct = entry.get("ct", float("nan"))
+        if np.isfinite(ct):
+            ct_ms.append(ct * 1e3)
+        if np.isfinite(y_slope) and np.isfinite(y_intercept) and y_slope != 0:
+            t30_ms.append((30.0 - y_intercept) / y_slope * 1e3)
+
+    if not ct_ms and not t30_ms:
+        print(f"[verify_tracking] no finite ct values in {out_path}")
         return
 
-    n = len(valid_items)
-    n_rows = int(np.ceil(n / n_cols))
-    fig, axes = plt.subplots(
-        n_rows, n_cols, figsize=(4 * n_cols, 3 * n_rows), squeeze=False,
-    )
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-    for ax, (cine_path, entry) in zip(axes.flat, valid_items):
-        cm_per_px = entry["cm_per_px"]
-        sample_points = np.asarray(entry["sample_points"])
-        t_sample_ms = (sample_points[:, 0].astype(float) / entry["fps"]) * 1e3
-        y_cm_sample = sample_points[:, 2].astype(float) * cm_per_px
+    axes[0].hist(np.array(ct_ms), bins="auto", edgecolor="k", linewidth=0.5)
+    axes[0].set_xlabel("ct (ms)")
+    axes[0].set_ylabel("count")
+    axes[0].set_title(f"y = 0 crossing ({len(ct_ms)} shots)")
+    axes[0].grid(True, alpha=0.3, axis="y")
 
-        t_endpoints_ms = np.array([entry["t_min"], entry["t_max"]]) * 1e3
-        y_fit_cm = np.array([
-            position_from_fit(float(t), entry)[1] for t in t_endpoints_ms
-        ])
+    axes[1].hist(np.array(t30_ms), bins="auto", edgecolor="k", linewidth=0.5)
+    axes[1].set_xlabel("t (ms)")
+    axes[1].set_ylabel("count")
+    axes[1].set_title(f"y = +30 cm crossing ({len(t30_ms)} shots)")
+    axes[1].grid(True, alpha=0.3, axis="y")
 
-        ax.plot(t_sample_ms, y_cm_sample, "o", ms=5, label=f"sample (n={entry['n_points']})")
-        ax.plot(t_endpoints_ms, y_fit_cm, "-", lw=1.5, label="linear fit")
-        ax.axhline(0, color="k", lw=0.8, ls="--", label="chamber centre")
-        ct_ms = entry["ct"] * 1e3
-        if np.isfinite(ct_ms):
-            ax.axvline(ct_ms, color="r", lw=0.8, ls=":", label=f"ct={ct_ms:.2f} ms")
-        ax.set_title(os.path.basename(cine_path), fontsize=9)
-        ax.set_xlabel("t (ms)")
-        ax.set_ylabel("y_cm")
-        ax.grid(True, alpha=0.3)
-
-    for ax in axes.flat[n:]:
-        ax.axis("off")
-
-    fig.suptitle(f"Sparse tracking verification ({n} shots)")
+    fig.suptitle(base_dir)
     fig.tight_layout()
     if show:
         plt.show(block=True)
@@ -216,5 +180,5 @@ def verify_tracking(base_dir, n_cols=4, show=True):
 
 if __name__ == "__main__":
     base_dir = r"E:\AUG2025\P24"
-    track_shots(base_dir)
+    # track_shots(base_dir)
     verify_tracking(base_dir)

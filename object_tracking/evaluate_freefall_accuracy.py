@@ -30,7 +30,7 @@ from scipy.constants import g
 
 from read_cine import read_cine
 from track_object import (
-    track_object, ensure_avi,
+    track_object_per_frame, ensure_avi,
     get_chamber, chamber_cm_per_px,
 )
 
@@ -69,7 +69,7 @@ def evaluate_shot(cine_path):
     _cx, _cy, ch_radius = get_chamber()
     cm_per_px_chamber = chamber_cm_per_px(ch_radius)
 
-    result = track_object(avi_path)
+    result = track_object_per_frame(avi_path)
     positions = np.asarray(result.positions)
     frame_numbers = np.asarray(result.frame_numbers)
     min_ydiff_frame = result.min_ydiff_frame
