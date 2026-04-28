@@ -265,10 +265,6 @@ def plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr):
 def xray_wt_cam(base_dir, fn):
 	"""Run x-ray pulse detection for every shot in an HDF5 file and append
 	the per-shot ``(pulse_tarr, pulse_amp)`` to ``analysis_results.npy``.
-
-	Tracking is no longer done here — run
-	``object_tracking/generate_tracking.py`` separately to populate
-	``tracking_result.npy`` for downstream consumers like ``movie_maker.py``.
 	"""
 	ifn = os.path.join(base_dir, fn)
 
@@ -285,7 +281,7 @@ def xray_wt_cam(base_dir, fn):
 		_log('FILE', f"Opened file {ifn} for processing.")
 		shot_numbers = f['Control/FastCam']['shot number'][()]
 
-	threshold = [5, 70]
+	threshold = [10, 80] # P23/P24 [5,70]; P21 [10, 80]
 	min_ts = 0.8e-6
 	d = 0.1
 
@@ -330,7 +326,7 @@ def batch_process_xray(base_dir):
 
 if __name__ == "__main__":
 
-	base_dir = r"F:\AUG2025\P23"
+	base_dir = r"E:\AUG2025\P21"
 	batch_process_xray(base_dir)
 
 	# ifn = r"F:\AUG2025\P24\27_He1kG430G_5800A_K-5_2025-08-12.hdf5"

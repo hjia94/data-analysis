@@ -18,22 +18,23 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 from matplotlib.animation import FuncAnimation
 
-# Set default font size for all labels
-plt.rcParams.update({'font.size': 24})
-
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__ if '__file__' in globals() else os.getcwd()), '../..'))
 sys.path = [repo_root, f"{repo_root}/read", f"{repo_root}/object_tracking"] + sys.path
 
+from object_tracking.generate_tracking import count_y_passes  # noqa: E402
 from data_analysis_utils import counts_per_bin  # noqa: E402
+
+# Set default font size for all labels
+plt.rcParams.update({'font.size': 24})
 
 
 def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5):
     ax.clear()
-    ax.set_xlabel('Position (cm)')
-    ax.set_ylabel('X-ray Counts')
+    ax.set_xlabel('y (cm)')
+    ax.set_ylabel('Normalized X-ray Counts')
     ax.grid(True, alpha=0.3)
     ymax = float(np.max(all_c))
-    ax.set_xlim(0,50)
+    ax.set_xlim(-50,50)
     ax.set_ylim(0, ymax * 1.01)
 
     # Select points in [t_ms-half_bin_width, t_ms+half_bin_width)
@@ -43,10 +44,10 @@ def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5):
 
     if r_vals.size > 0:
         ax.bar(r_vals, c_vals, width=0.5, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
-        ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
+        ax.set_title(f't = {t_ms:.1f} ms')
     else:
         ax.set_ylim(0, ymax * 1.01)
-        ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
+        ax.set_title(f't = {t_ms:.1f} ms')
 
     fig.canvas.draw_idle()
 
@@ -113,6 +114,7 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
     all_r_cm = []
     all_c = []
 
+    half_width = frame_step_ms / 2
     for cine_path, entry in tracking_dict.items():
         if not isinstance(entry, dict) or "y_slope" not in entry:
             raise TypeError(
@@ -133,7 +135,11 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
 
         t_s = (bin_centers + uw_start) * 1e-3
         r_arr_cm = -(entry["y_intercept"] + entry["y_slope"] * t_s)
+        
+        shot_counts = count_y_passes(base_dir, r_arr_cm, bin_centers - half_width, bin_centers + half_width)
+        counts = counts.astype(float) / np.where(shot_counts > 0, shot_counts, 1)
 
+        # Append to the global lists
         all_t_ms.extend(bin_centers.tolist())
         all_r_cm.extend(r_arr_cm.tolist())
         all_c.extend(counts.tolist())
@@ -155,10 +161,10 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
     if save_mp4:
         # Create figure for saving animation
         fig, ax = plt.subplots(figsize=(12, 8))
-        ax.set_xlim(0, 50)
+        ax.set_xlim(-50, 50)
         ax.set_ylim(0, float(np.max(all_c)) * 1.01)
         ax.set_xlabel('Position (cm)')
-        ax.set_ylabel('X-ray Counts')
+        ax.set_ylabel('Normalized X-ray Counts')
         ax.grid(True, alpha=0.3)
         
         # Create a function for FuncAnimation
@@ -166,9 +172,9 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
             t_ms = frame_ticks[frame_idx]
             ax.clear()
             ax.set_xlabel('Position (cm)')
-            ax.set_ylabel('X-ray Counts')
+            ax.set_ylabel('Normalized X-ray Counts')
             ax.grid(True, alpha=0.3)
-            ax.set_xlim(0, 50)
+            ax.set_xlim(-50, 50)
             ax.set_ylim(0, float(np.max(all_c)) * 1.01)
             
             # Select points in [t_ms-half_width, t_ms+half_width)
@@ -224,10 +230,10 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
 
 
 if __name__ == '__main__':
-    base_dir = r"E:\AUG2025\P24"
+    base_dir = r"E:\AUG2025\P21"
 
     # Example 1: Interactive plot
-    plot_result(base_dir, uw_start=30, frame_step_ms=0.5)
+    # plot_result(base_dir, uw_start=30, frame_step_ms=1)
 
     # Example 2: Save as MP4 (uncomment to use)
-    # plot_result(base_dir, uw_start=30, frame_step_ms=0.5, save_mp4=True, output_filename="xray_counts_animation.mp4", fps=15)
+    plot_result(base_dir, uw_start=30, frame_step_ms=1, save_mp4=True, output_filename="xray_counts_animation.mp4", fps=15)

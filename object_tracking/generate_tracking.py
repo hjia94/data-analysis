@@ -225,6 +225,6 @@ def verify_tracking(base_dir, show=True):
 
 
 if __name__ == "__main__":
-    base_dir = r"E:\AUG2025\P21"
-    # track_shots(base_dir)
+    base_dir = r"E:\fast_cam\caltech_cam_test"
+    track_shots(base_dir, calibration_file=r"E:\calibration_factor_P30.npy")
     # verify_tracking(base_dir)
