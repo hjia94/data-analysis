@@ -242,7 +242,85 @@ def verify_tracking(base_dir, show=True):
         plt.show(block=True)
 
 
+def plot_tracking_comparison(cine_path, cm_per_px, uw_start=0, show=True):
+    """Plot y-position vs time for one shot comparing per-frame and sparse trackers.
+
+    Three layers are drawn on a single axes:
+      - Grey scatter: every detection from ``track_object_per_frame``
+      - Red scatter: the ~5 sample points kept by ``track_object_sparse``
+      - Blue line: the straight-line fit stored in the sparse result
+
+    Args:
+        cine_path: Full path to the ``.cine`` file.
+        cm_per_px: Calibration factor in cm/px (from ``calibration_factor_P{N}.npy``).
+        uw_start: Unwind start offset in ms added to the cine ``t_start`` so the
+            time axis matches the rest of the analysis pipeline. Default 0.
+        show: When True, blocks on ``plt.show``. Set False to handle the figure
+            yourself (e.g. when embedding in a notebook).
+
+    Returns:
+        (fig, ax) so the caller can further annotate or save the figure.
+    """
+    from read_cine import read_cine_header
+    from track_object import track_object_sparse, track_object_per_frame
+
+    avi_path = os.path.splitext(cine_path)[0] + ".avi"
+    if not os.path.exists(avi_path):
+        raise FileNotFoundError(
+            f"AVI sidecar not found: {avi_path}\n"
+            "Run convert_cine_to_avi first (or call track_shots which does this automatically)."
+        )
+
+    fps, t_start = read_cine_header(cine_path)
+
+    # Per-frame result
+    pf_result = track_object_per_frame(avi_path)
+    pf_frame_numbers = np.asarray(pf_result.frame_numbers, dtype=float)
+    pf_t_ms = (t_start + pf_frame_numbers / fps) * 1e3 + uw_start
+    pf_y_cm = np.asarray(pf_result.positions, dtype=float)[:, 1] * cm_per_px
+
+    # Sparse result
+    sp_entry = track_object_sparse(avi_path, cine_path, cm_per_px=cm_per_px)
+    sp_samples = sp_entry["sample_points"]  # (n, 3): frame_idx, rel_x_px, rel_y_px
+    sp_t_ms = (t_start + sp_samples[:, 0].astype(float) / fps) * 1e3 + uw_start
+    sp_y_cm = sp_samples[:, 2].astype(float) * cm_per_px
+
+    # Line fit evaluated over the per-frame time range
+    y_slope = sp_entry["y_slope"]
+    y_intercept = sp_entry["y_intercept"]
+    if np.isfinite(y_slope) and np.isfinite(y_intercept):
+        t_line_ms = np.linspace(pf_t_ms.min(), pf_t_ms.max(), 200)
+        t_line_s = (t_line_ms - uw_start) * 1e-3
+        y_line_cm = y_intercept + y_slope * t_line_s
+    else:
+        t_line_ms = y_line_cm = None
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    ax.scatter(pf_t_ms, pf_y_cm, s=10, color="grey", alpha=0.5, label="per-frame")
+    ax.scatter(sp_t_ms, sp_y_cm, s=60, color="red", zorder=3, label="sparse samples")
+    if t_line_ms is not None:
+        ax.plot(t_line_ms, y_line_cm, color="tab:blue", linewidth=1.5, label="linear fit")
+
+    ax.set_xlabel("t (ms)")
+    ax.set_ylabel("y (cm)")
+    ax.set_title(os.path.basename(cine_path))
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    if show:
+        plt.show(block=True)
+    return fig, ax
+
+
 if __name__ == "__main__":
     base_dir = r"E:\good_data\kapton\He3kA_B380G800G_pl0t20_uw15t35"
-    track_shots(base_dir, calibration_file=r"E:\calibration_factor_P30.npy")
-    verify_tracking(base_dir)
+    # track_shots(base_dir, calibration_file=r"E:\calibration_factor_P30.npy")
+    # verify_tracking(base_dir)
+
+    ifn = r"E:\good_data\kapton\He3kA_B380G800G_pl0t20_uw15t35\Y20241115_kapton_P30_-24deg_x36_y0@2100_112.cine"
+
+    cm_per_px = _resolve_calibration(base_dir, calibration_file=r"E:\calibration_factor_P23.npy")
+
+    fig, ax = plot_tracking_comparison(ifn, uw_start=15, cm_per_px=cm_per_px, show=True)
