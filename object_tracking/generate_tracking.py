@@ -26,6 +26,7 @@ Failed shots have NaN coefficients and ``n_points = 0``.
 import glob
 import os
 import re
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -88,8 +89,11 @@ def track_shots(base_dir, pattern="*.cine", filenames=None, overwrite=False,
         except Exception as e:
             print(f"[track_shots] failed to save {out_path}: {e}")
 
+    total = len(cine_paths)
+    processed = 0
+    elapsed_total = 0.0
     try:
-        for cine_path in cine_paths:
+        for i, cine_path in enumerate(cine_paths, start=1):
             name = os.path.basename(cine_path)
             if cine_path in tracking_dict and not overwrite:
                 print(f"[track_shots] skip {name} (already cached)")
@@ -110,8 +114,18 @@ def track_shots(base_dir, pattern="*.cine", filenames=None, overwrite=False,
                     continue
                 convert_cine_to_avi(frarr, avi_path)
 
-            print(f"[track_shots] tracking {name}")
+            print(f"[track_shots] tracking {name} ({i}/{total})")
+            t0 = time.monotonic()
             entry = track_object_sparse(avi_path, cine_path, cm_per_px=cm_per_px)
+            dt = time.monotonic() - t0
+            processed += 1
+            elapsed_total += dt
+            avg = elapsed_total / processed
+            remaining = total - i
+            eta_s = avg * remaining
+            print(f"[track_shots] {name}: {dt:.1f}s (avg {avg:.1f}s/shot, "
+                  f"{remaining} left, ETA {eta_s/60:.1f} min)")
+
             n = entry["n_points"]
             if n == 0:
                 print(f"[track_shots] {name}: no object tracked")
@@ -130,17 +144,20 @@ def track_shots(base_dir, pattern="*.cine", filenames=None, overwrite=False,
     print(f"[track_shots] wrote {out_path} ({len(tracking_dict)} entries)")
 
 
-def count_y_passes(base_dir, y, t_start, t_stop):
+def count_y_passes(base_dir, y, t_start, t_stop, tracking_dict=None):
     """Count tracked shots whose fitted trajectory crosses ``y`` in a time window.
 
     Args:
-        base_dir: Folder containing ``tracking_result.npy``.
+        base_dir: Folder containing ``tracking_result.npy``. Ignored when
+            ``tracking_dict`` is provided.
         y: Chamber-centred vertical position in cm, or 1-D array of positions
             (e.g. ``r_arr_cm`` derived from ``bin_centers``).
         t_start: Inclusive start of the time window in ms, or 1-D array
             matching ``y`` (e.g. ``bin_centers - half_width``).
         t_stop: Inclusive end of the time window in ms, or 1-D array matching
             ``y`` (e.g. ``bin_centers + half_width``).
+        tracking_dict: Optional preloaded tracking dictionary. Pass this when
+            calling repeatedly to avoid reloading the file from disk each time.
 
     Returns:
         int when ``y`` is scalar; 1-D int array of per-bin counts when ``y``
@@ -155,8 +172,9 @@ def count_y_passes(base_dir, y, t_start, t_stop):
     if np.any(t_start_arr > t_stop_arr):
         raise ValueError("t_start must be less than or equal to t_stop")
 
-    out_path = os.path.join(base_dir, "tracking_result.npy")
-    tracking_dict = np.load(out_path, allow_pickle=True).item()
+    if tracking_dict is None:
+        out_path = os.path.join(base_dir, "tracking_result.npy")
+        tracking_dict = np.load(out_path, allow_pickle=True).item()
 
     counts = np.zeros(len(y_arr), dtype=int)
     for entry in tracking_dict.values():
@@ -225,6 +243,6 @@ def verify_tracking(base_dir, show=True):
 
 
 if __name__ == "__main__":
-    base_dir = r"E:\fast_cam\caltech_cam_test"
+    base_dir = r"E:\good_data\kapton\He3kA_B380G800G_pl0t20_uw15t35"
     track_shots(base_dir, calibration_file=r"E:\calibration_factor_P30.npy")
-    # verify_tracking(base_dir)
+    verify_tracking(base_dir)

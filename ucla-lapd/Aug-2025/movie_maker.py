@@ -28,32 +28,29 @@ from data_analysis_utils import counts_per_bin  # noqa: E402
 plt.rcParams.update({'font.size': 24})
 
 
-def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5):
+def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5, ymax=None):
     ax.clear()
     ax.set_xlabel('y (cm)')
     ax.set_ylabel('Normalized X-ray Counts')
     ax.grid(True, alpha=0.3)
-    ymax = float(np.max(all_c))
-    ax.set_xlim(-50,50)
+    if ymax is None:
+        ymax = float(np.max(all_c))
+    ax.set_xlim(-50, 50)
     ax.set_ylim(0, ymax * 1.01)
 
-    # Select points in [t_ms-half_bin_width, t_ms+half_bin_width)
     mask = (all_t_ms >= (t_ms - half_bin_width)) & (all_t_ms < (t_ms + half_bin_width))
     r_vals = all_r_cm[mask]
     c_vals = all_c[mask]
 
     if r_vals.size > 0:
         ax.bar(r_vals, c_vals, width=0.5, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
-        ax.set_title(f't = {t_ms:.1f} ms')
-    else:
-        ax.set_ylim(0, ymax * 1.01)
-        ax.set_title(f't = {t_ms:.1f} ms')
+    ax.set_title(f't = {t_ms:.1f} ms')
 
     fig.canvas.draw_idle()
 
 
 class Player:
-    def __init__(self, slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c):
+    def __init__(self, slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, ymax=None):
         self.play = False
         self.idx = 0
         self.slider = slider
@@ -63,6 +60,7 @@ class Player:
         self.all_t_ms = all_t_ms
         self.all_r_cm = all_r_cm
         self.all_c = all_c
+        self.ymax = ymax
 
     def toggle(self, event=None):
         self.play = not self.play
@@ -75,10 +73,8 @@ class Player:
             return
         t_ms = self.frame_ticks[self.idx]
         self.slider.set_val(t_ms)
-        # Use correct half bin width based on frame_step_ms
         frame_step_ms = self.frame_ticks[1] - self.frame_ticks[0] if len(self.frame_ticks) > 1 else 1.0
-        half_width = frame_step_ms / 2 if frame_step_ms < 1.0 else 0.5
-        draw_frame(self.ax, self.fig, self.all_t_ms, self.all_r_cm, self.all_c, t_ms, half_width)
+        draw_frame(self.ax, self.fig, self.all_t_ms, self.all_r_cm, self.all_c, t_ms, frame_step_ms / 2, ymax=self.ymax)
         self.idx = (self.idx + 1) % len(self.frame_ticks)
         self.fig.canvas.start_event_loop(0.1)
         self.loop()
@@ -136,10 +132,12 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
         t_s = (bin_centers + uw_start) * 1e-3
         r_arr_cm = -(entry["y_intercept"] + entry["y_slope"] * t_s)
         
-        shot_counts = count_y_passes(base_dir, r_arr_cm, bin_centers - half_width, bin_centers + half_width)
+        shot_counts = count_y_passes(
+            base_dir, r_arr_cm, bin_centers - half_width, bin_centers + half_width,
+            tracking_dict=tracking_dict,
+        )
         counts = counts.astype(float) / np.where(shot_counts > 0, shot_counts, 1)
 
-        # Append to the global lists
         all_t_ms.extend(bin_centers.tolist())
         all_r_cm.extend(r_arr_cm.tolist())
         all_c.extend(counts.tolist())
@@ -156,42 +154,15 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
     tmin = float(np.min(all_t_ms))
     tmax = float(np.max(all_t_ms))
     frame_ticks = np.arange(np.floor(tmin), np.ceil(tmax) + frame_step_ms, frame_step_ms)
-    half_width = frame_step_ms / 2 if frame_step_ms < 1.0 else 0.5
-    
+    ymax = float(np.max(all_c))
+
     if save_mp4:
-        # Create figure for saving animation
         fig, ax = plt.subplots(figsize=(12, 8))
-        ax.set_xlim(-50, 50)
-        ax.set_ylim(0, float(np.max(all_c)) * 1.01)
-        ax.set_xlabel('Position (cm)')
-        ax.set_ylabel('Normalized X-ray Counts')
-        ax.grid(True, alpha=0.3)
-        
-        # Create a function for FuncAnimation
+
         def update(frame_idx):
-            t_ms = frame_ticks[frame_idx]
-            ax.clear()
-            ax.set_xlabel('Position (cm)')
-            ax.set_ylabel('Normalized X-ray Counts')
-            ax.grid(True, alpha=0.3)
-            ax.set_xlim(-50, 50)
-            ax.set_ylim(0, float(np.max(all_c)) * 1.01)
-            
-            # Select points in [t_ms-half_width, t_ms+half_width)
-            mask = (all_t_ms >= (t_ms - half_width)) & (all_t_ms < (t_ms + half_width))
-            r_vals = all_r_cm[mask]
-            c_vals = all_c[mask]
-            
-            if r_vals.size > 0:
-                ax.bar(r_vals, c_vals, width=0.5, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
-                ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
-            else:
-                ax.set_ylim(0, float(np.max(all_c)) * 1.01)
-                ax.set_title(f'X-ray Counts vs Position  —  t = {t_ms:.1f} ms')
-            
-            return ax,
-        
-        # Create the animation
+            draw_frame(ax, fig, all_t_ms, all_r_cm, all_c,
+                       frame_ticks[frame_idx], half_width, ymax=ymax)
+
         anim = FuncAnimation(fig, update, frames=len(frame_ticks), blit=False)
         
         # Save the animation
@@ -214,14 +185,13 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
                         valinit=frame_ticks[0], valstep=frame_ticks)
 
         def on_slide(val):
-            draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, slider.val, half_width)
+            draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, slider.val, half_width, ymax=ymax)
 
         slider.on_changed(on_slide)
 
-        # Initial frame
-        draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, frame_ticks[0], half_width)
+        draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, frame_ticks[0], half_width, ymax=ymax)
 
-        player = Player(slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c)
+        player = Player(slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, ymax=ymax)
         ax_btn = plt.axes([0.85, 0.1, 0.1, 0.05])
         btn = Button(ax_btn, 'Play/Pause')
         btn.on_clicked(player.toggle)
