@@ -28,7 +28,8 @@ from data_analysis_utils import counts_per_bin  # noqa: E402
 plt.rcParams.update({'font.size': 24})
 
 
-def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5, ymax=None):
+def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5,
+               ymax=None, all_m=None):
     ax.clear()
     ax.set_xlabel('y (cm)')
     ax.set_ylabel('Normalized X-ray Counts')
@@ -41,16 +42,51 @@ def draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, t_ms, half_bin_width=0.5, yma
     mask = (all_t_ms >= (t_ms - half_bin_width)) & (all_t_ms < (t_ms + half_bin_width))
     r_vals = all_r_cm[mask]
     c_vals = all_c[mask]
+    title = f't = {t_ms:.1f} ms'
+    if all_m is not None:
+        m_vals = np.asarray(all_m)[mask]
+        if m_vals.size > 0:
+            m_min = int(np.min(m_vals))
+            m_max = int(np.max(m_vals))
+            m_text = f'M = {m_min}' if m_min == m_max else f'M = {m_min}-{m_max}'
+            print(f"t = {t_ms:.1f} ms: {m_text}")
+            title = f'{title}, {m_text}'
+        else:
+            print(f"t = {t_ms:.1f} ms: M = none")
+            title = f'{title}, M = none'
 
     if r_vals.size > 0:
         ax.bar(r_vals, c_vals, width=0.5, align='center', alpha=0.85, edgecolor='k', color='tab:blue')
-    ax.set_title(f't = {t_ms:.1f} ms')
+    ax.set_title(title)
 
     fig.canvas.draw_idle()
 
 
+def draw_coverage_frame(ax, fig, y_centers_cm, coverage_counts, t_ms, ymax=None):
+    ax.clear()
+    ax.set_xlabel('y (cm)')
+    ax.set_ylabel('Valid Trajectory Crossings')
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(-50, 50)
+    if ymax is None:
+        ymax = float(np.max(coverage_counts))
+    ax.set_ylim(0, max(ymax * 1.1, 1))
+    ax.bar(
+        y_centers_cm,
+        coverage_counts,
+        width=np.diff(y_centers_cm).mean() if y_centers_cm.size > 1 else 0.5,
+        align='center',
+        alpha=0.85,
+        edgecolor='k',
+        color='tab:orange',
+    )
+    ax.set_title(f't = {t_ms:.1f} ms')
+    fig.canvas.draw_idle()
+
+
 class Player:
-    def __init__(self, slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, ymax=None):
+    def __init__(self, slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c,
+                 ymax=None, all_m=None):
         self.play = False
         self.idx = 0
         self.slider = slider
@@ -61,6 +97,7 @@ class Player:
         self.all_r_cm = all_r_cm
         self.all_c = all_c
         self.ymax = ymax
+        self.all_m = all_m
 
     def toggle(self, event=None):
         self.play = not self.play
@@ -74,7 +111,10 @@ class Player:
         t_ms = self.frame_ticks[self.idx]
         self.slider.set_val(t_ms)
         frame_step_ms = self.frame_ticks[1] - self.frame_ticks[0] if len(self.frame_ticks) > 1 else 1.0
-        draw_frame(self.ax, self.fig, self.all_t_ms, self.all_r_cm, self.all_c, t_ms, frame_step_ms / 2, ymax=self.ymax)
+        draw_frame(
+            self.ax, self.fig, self.all_t_ms, self.all_r_cm, self.all_c,
+            t_ms, frame_step_ms / 2, ymax=self.ymax, all_m=self.all_m,
+        )
         self.idx = (self.idx + 1) % len(self.frame_ticks)
         self.fig.canvas.start_event_loop(0.1)
         self.loop()
@@ -109,6 +149,9 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
     all_t_ms = []
     all_r_cm = []
     all_c = []
+    all_m = []
+    valid_tracking_shots = 0
+    contributing_shots = 0
 
     half_width = frame_step_ms / 2
     for cine_path, entry in tracking_dict.items():
@@ -120,12 +163,14 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
             )
         if entry["n_points"] < 2 or not np.isfinite(entry["y_slope"]):
             continue
+        valid_tracking_shots += 1
 
         basename = os.path.basename(cine_path)
         analysis_key = f"{basename[:2]}_{int(basename.split('_shot')[1][:3]):03d}"
         pulse_tarr, pulse_amp = analysis_dict.get(analysis_key, ([], []))
         if len(pulse_tarr) == 0:
             continue
+        contributing_shots += 1
 
         bin_centers, counts = counts_per_bin(pulse_tarr, pulse_amp, bin_width=frame_step_ms)
 
@@ -141,6 +186,13 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
         all_t_ms.extend(bin_centers.tolist())
         all_r_cm.extend(r_arr_cm.tolist())
         all_c.extend(counts.tolist())
+        all_m.extend(shot_counts.tolist())
+
+    print(
+        f"Valid tracking shots: {valid_tracking_shots} / "
+        f"{len(tracking_dict)} entries in tracking_result.npy"
+    )
+    print(f"Shots contributing x-ray counts to movie: {contributing_shots}")
 
     if len(all_t_ms) == 0:
         print("No data available to plot.")
@@ -149,6 +201,7 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
     all_t_ms = np.asarray(all_t_ms, dtype=float)
     all_r_cm = np.asarray(all_r_cm, dtype=float)
     all_c = np.asarray(all_c, dtype=float)
+    all_m = np.asarray(all_m, dtype=int)
 
 
     tmin = float(np.min(all_t_ms))
@@ -161,7 +214,8 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
 
         def update(frame_idx):
             draw_frame(ax, fig, all_t_ms, all_r_cm, all_c,
-                       frame_ticks[frame_idx], half_width, ymax=ymax)
+                       frame_ticks[frame_idx], half_width, ymax=ymax,
+                       all_m=all_m)
 
         anim = FuncAnimation(fig, update, frames=len(frame_ticks), blit=False)
         
@@ -185,13 +239,16 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
                         valinit=frame_ticks[0], valstep=frame_ticks)
 
         def on_slide(val):
-            draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, slider.val, half_width, ymax=ymax)
+            draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, slider.val,
+                       half_width, ymax=ymax, all_m=all_m)
 
         slider.on_changed(on_slide)
 
-        draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, frame_ticks[0], half_width, ymax=ymax)
+        draw_frame(ax, fig, all_t_ms, all_r_cm, all_c, frame_ticks[0],
+                   half_width, ymax=ymax, all_m=all_m)
 
-        player = Player(slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c, ymax=ymax)
+        player = Player(slider, frame_ticks, fig, ax, all_t_ms, all_r_cm,
+                        all_c, ymax=ymax, all_m=all_m)
         ax_btn = plt.axes([0.85, 0.1, 0.1, 0.05])
         btn = Button(ax_btn, 'Play/Pause')
         btn.on_clicked(player.toggle)
@@ -199,11 +256,107 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
         plt.show(block=True)
 
 
+def plot_trajectory_coverage(base_dir, frame_step_ms=1.0, y_min=-50, y_max=50,
+                             y_bin_width=0.5, t_min=0, t_max=45,
+                             save_mp4=False,
+                             output_filename="trajectory_coverage_animation.mp4",
+                             fps=10):
+    """
+    Plot or save a movie of valid fitted trajectory crossings per y-time bin.
+
+    This is a coverage diagnostic for the ensemble reconstruction. It uses only
+    ``tracking_result.npy`` and applies the same per-bin crossing count used by
+    ``plot_result`` for x-ray-count normalization.
+    """
+    tracking_file = os.path.join(base_dir, 'tracking_result.npy')
+    tracking_dict = np.load(tracking_file, allow_pickle=True).item()
+
+    valid_tracking_shots = 0
+    for cine_path, entry in tracking_dict.items():
+        if not isinstance(entry, dict) or "y_slope" not in entry:
+            raise TypeError(
+                f"{cine_path}: legacy cache entry; re-run "
+                "object_tracking/generate_tracking.py to rebuild "
+                "tracking_result.npy with the sparse-fit schema."
+            )
+        if entry["n_points"] < 2 or not np.isfinite(entry["y_slope"]):
+            continue
+        valid_tracking_shots += 1
+
+    half_width = frame_step_ms / 2
+    y_centers_cm = np.arange(y_min, y_max + 0.5 * y_bin_width, y_bin_width)
+    frame_ticks = np.arange(t_min, t_max + frame_step_ms, frame_step_ms)
+    coverage_by_frame = []
+
+    for t_ms in frame_ticks:
+        coverage_counts = count_y_passes(
+            base_dir,
+            y_centers_cm,
+            np.full_like(y_centers_cm, t_ms - half_width, dtype=float),
+            np.full_like(y_centers_cm, t_ms + half_width, dtype=float),
+            tracking_dict=tracking_dict,
+        )
+        coverage_by_frame.append(coverage_counts)
+
+    coverage_by_frame = np.asarray(coverage_by_frame, dtype=int)
+    ymax = int(np.max(coverage_by_frame)) if coverage_by_frame.size else 1
+
+    print(
+        f"Valid tracking shots: {valid_tracking_shots} / "
+        f"{len(tracking_dict)} entries in tracking_result.npy"
+    )
+    print(
+        f"Coverage movie bins: {y_bin_width:g} cm in y, "
+        f"{frame_step_ms:g} ms in time"
+    )
+    print(f"Maximum trajectory crossings in a plotted bin: {ymax}")
+
+    if save_mp4:
+        fig, ax = plt.subplots(figsize=(12, 8))
+
+        def update(frame_idx):
+            draw_coverage_frame(
+                ax, fig, y_centers_cm, coverage_by_frame[frame_idx],
+                frame_ticks[frame_idx], ymax=ymax,
+            )
+
+        anim = FuncAnimation(fig, update, frames=len(frame_ticks), blit=False)
+        output_path = os.path.join(base_dir, output_filename)
+        print(f"Saving trajectory coverage animation to {output_path}...")
+        anim.save(output_path, writer='ffmpeg', fps=fps)
+        print(f"Trajectory coverage animation saved successfully to {output_path}")
+        plt.close(fig)
+        return output_path
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    plt.subplots_adjust(bottom=0.25)
+
+    ax_slider = plt.axes([0.2, 0.1, 0.6, 0.03])
+    slider = Slider(ax_slider, 'Time (ms)',
+                    t_min, t_max,
+                    valinit=frame_ticks[0], valstep=frame_ticks)
+
+    def on_slide(val):
+        frame_idx = int(np.argmin(np.abs(frame_ticks - val)))
+        draw_coverage_frame(
+            ax, fig, y_centers_cm, coverage_by_frame[frame_idx],
+            frame_ticks[frame_idx], ymax=ymax,
+        )
+
+    slider.on_changed(on_slide)
+    draw_coverage_frame(ax, fig, y_centers_cm, coverage_by_frame[0],
+                        frame_ticks[0], ymax=ymax)
+    plt.show(block=True)
+
+
 if __name__ == '__main__':
-    base_dir = r"E:\AUG2025\P21"
+    base_dir = r"E:\AUG2025\P23"
 
     # Example 1: Interactive plot
-    # plot_result(base_dir, uw_start=30, frame_step_ms=1)
+    plot_result(base_dir, uw_start=30, frame_step_ms=1)
 
     # Example 2: Save as MP4 (uncomment to use)
-    plot_result(base_dir, uw_start=30, frame_step_ms=1, save_mp4=True, output_filename="xray_counts_animation.mp4", fps=15)
+    # plot_result(base_dir, uw_start=30, frame_step_ms=1, save_mp4=True, output_filename="xray_counts_animation.mp4", fps=15)
+
+    # Example 3: Save trajectory-coverage movie (uncomment to use)
+    # plot_trajectory_coverage(base_dir, frame_step_ms=1, save_mp4=False)
