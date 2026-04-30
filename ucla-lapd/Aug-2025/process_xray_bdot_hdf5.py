@@ -39,11 +39,11 @@ def get_magnetron_power_data(f, result, scope_name='magscope'):
 	"""
 	if scope_name not in result:
 		_log('POWER', f"Scope '{scope_name}' not found.")
-		return None, None, None, None, None
+		return None, None
 
 	tarr = result[scope_name].get('time_array')
 	chan_data = result[scope_name].get('channels', {})
-	descriptions = read_scope_channel_descriptions(f,'magscope')
+	descriptions = read_scope_channel_descriptions(f, scope_name)
 
 	I_data = None
 	V_data = None
@@ -72,7 +72,7 @@ def get_magnetron_power_data(f, result, scope_name='magscope'):
 
 	return tarr, P_data
 
-def get_xray_data(result, scope_name = 'xrayscope'):
+def get_xray_data(result, scope_name='xrayscope'):
 	tarr_x = result[scope_name].get('time_array')
 	xray_data = result[scope_name]['channels']['C2']
 	return tarr_x, xray_data
@@ -82,12 +82,6 @@ def get_bdot_data(f, result, scope_name='bdotscope'):
 	tarr = result[scope_name].get('time_array')
 	chan_data = result[scope_name].get('channels', {})
 	descriptions = read_scope_channel_descriptions(f, scope_name)
-
-	# for ch, desc in descriptions.items():
-
-	#     m = re.search(r'P(\d+)', desc)
-	#     if m:
-	#         p_number = int(m.group(1))
 
 	return tarr, chan_data, descriptions
 
@@ -156,7 +150,8 @@ def process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq
 		all_stft_matrices = {}  # Format: {channel: [stft_matrix1, stft_matrix2, ...]}
 		stft_tarr_final = None
 		freq_arr_final = None
-		
+		descriptions = {}
+
 		# Process each shot
 		for shot_num in shot_numbers:
 			_log('BDOT', f"Processing shot {shot_num}")
@@ -195,6 +190,8 @@ def process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq
 	if plot and avg_stft_matrices:
 		plot_averaged_bdot_stft(avg_stft_matrices, descriptions, stft_tarr_final, freq_arr_final)
 
+	return avg_stft_matrices, descriptions, stft_tarr_final, freq_arr_final
+
 
 def process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False):
 	"""Process a single shot of xray data and return data for averaging.
@@ -205,13 +202,22 @@ def process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False):
 
 	return detector.pulse_times, detector.pulse_amplitudes
 
+def _floor_for_lognorm(matrix):
+	"""Replace non-positive entries with the smallest positive value so the
+	matrix is safe for matplotlib LogNorm. Returns (safe_matrix, vmin)."""
+	safe = matrix.copy()
+	vmin = safe[safe > 0].min() if np.any(safe > 0) else 1e-10
+	safe[safe <= 0] = vmin
+	return safe, vmin
+
+
 def plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr):
 	"""
 	Plot averaged Bdot STFT data for each channel.
-	
+
 	Parameters:
 	- stft_matrices: Dictionary of averaged STFT matrices by channel
-	- channel_description: String description for the channel
+	- description: Dict mapping channel name to description string
 	- stft_tarr: Time array for STFT (seconds)
 	- freq_arr: Frequency array for STFT (Hz)
 	"""
@@ -236,18 +242,15 @@ def plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr):
 	for i, channel in enumerate(channels):
 		matrix = stft_matrices[channel]
 		
-		# Create the plot - ensure matrix has positive values for LogNorm
-		positive_matrix = matrix.copy()
-		min_positive = positive_matrix[positive_matrix > 0].min() if np.any(positive_matrix > 0) else 1e-10
-		positive_matrix[positive_matrix <= 0] = min_positive
-		
+		positive_matrix, min_positive = _floor_for_lognorm(matrix)
+
 		im = axes[i].imshow(positive_matrix.T,
 						  aspect='auto',
 						  origin='lower',
 						  extent=[stft_tarr[0]*1e3, stft_tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
 						  interpolation='None',
 						  cmap='jet',
-						  norm=colors.LogNorm(vmin=min_positive, 
+						  norm=colors.LogNorm(vmin=min_positive,
 										  vmax=positive_matrix.max()))
 		
 		axes[i].set_ylabel('Frequency (MHz)')
@@ -277,28 +280,27 @@ def xray_wt_cam(base_dir, fn):
 	else:
 		analysis_dict = {}
 
-	with h5py.File(ifn, 'r') as f:
-		_log('FILE', f"Opened file {ifn} for processing.")
-		shot_numbers = f['Control/FastCam']['shot number'][()]
-
 	threshold = [10, 80] # P23/P24 [5,70]; P21 [10, 80]
 	min_ts = 0.8e-6
 	d = 0.1
 
-	for shot_num in shot_numbers:
-		analysis_key = f"{file_prefix}_{shot_num:03d}"
-		if analysis_key in analysis_dict:
-			_log('ANALYSIS', f"Analysis result exists for {analysis_key}")
-			continue
+	with h5py.File(ifn, 'r') as f:
+		_log('FILE', f"Opened file {ifn} for processing.")
+		shot_numbers = f['Control/FastCam']['shot number'][()]
 
-		_log('SHOT', f"Processing shot {shot_num}")
-		with h5py.File(ifn, 'r') as f:
+		for shot_num in shot_numbers:
+			analysis_key = f"{file_prefix}_{shot_num:03d}"
+			if analysis_key in analysis_dict:
+				_log('ANALYSIS', f"Analysis result exists for {analysis_key}")
+				continue
+
+			_log('SHOT', f"Processing shot {shot_num}")
 			result = read_hdf5_all_scopes_channels(f, shot_num, include_tarr=True)
 			tarr_x, xray_data = get_xray_data(result)
 
-		pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold)
-		analysis_dict[analysis_key] = (pulse_tarr, pulse_amp)
-		_log('ANALYSIS', f"Added new analysis result for {analysis_key}")
+			pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold)
+			analysis_dict[analysis_key] = (pulse_tarr, pulse_amp)
+			_log('ANALYSIS', f"Added new analysis result for {analysis_key}")
 
 	try:
 		np.save(analysis_file, analysis_dict)
@@ -316,7 +318,7 @@ def batch_process_xray(base_dir):
 	hdf5_files = [f for f in os.listdir(base_dir) if f.endswith('.hdf5')]
 
 	for fn in hdf5_files:
-		print(f"Processing {fn} ...")
+		_log('FILE', f"Processing {fn} ...")
 		xray_wt_cam(base_dir, fn)
 
 
