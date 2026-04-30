@@ -135,7 +135,7 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
     - fps: Frames per second for the saved animation (if save_mp4 is True)
 
     Inputs (npy files): analysis_results.npy and tracking_result.npy must
-    already exist in base_dir — produced by process_xray_bdot_hdf5.py and
+    already exist in base_dir — produced by process_xray.py and
     object_tracking/generate_tracking.py respectively. The tracking entries
     carry their own cm_per_px so no calibration file is loaded here.
     """
