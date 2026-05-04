@@ -37,8 +37,24 @@ UW_END_S   = 0.045
 # instead of using the constants above.
 USE_UW_FROM_HDF5 = False
 
+# STFT / FFT parameters.
+FREQ_BINS = 1000
+OVERLAP_FRACTION = 0.05
+FREQ_MIN = 50e6
+FREQ_MAX = 1000e6
+
+# Number of shots per group for the comparison.
+N_PER_GROUP = 5
+
+# Tracking results filename (relative to dir_path).
+TRACKING_FILENAME = "tracking_result.npy"
+
 # Where to save the averaged-STFT comparison figure (set to None to skip saving).
 SAVE_FIG_PATH = r"C:\Users\hjia9\Documents\lapd\e-ring\diagnostic_fig\compare_bdot_groups.png"
+
+# Toggle which actions run when this file is executed as a script.
+RUN_SHOW_EXAMPLE = True
+RUN_COMPARE_GROUPS = False
 # ============================================================
 
 CINE_PREFIX_RE = re.compile(r"^(\d{2})_.*_shot(\d{3})\.cine$", re.IGNORECASE)
@@ -175,8 +191,7 @@ def select_shots(tracking_npy_path, base_dir, n_pass=5, n_fail=5,
 	return pass_map, fail_map, diag
 
 
-def compute_group_avg_stft(shot_map, freq_bins=1000, overlap_fraction=0.05,
-						   freq_min=50e6, freq_max=1000e6):
+def compute_group_avg_stft(shot_map):
 	"""Compute per-channel averaged Bdot STFT across all shots in shot_map.
 
 	shot_map: {hdf5_path: [(shot_num, _ignored), ...]}
@@ -198,8 +213,8 @@ def compute_group_avg_stft(shot_map, freq_bins=1000, overlap_fraction=0.05,
 					continue
 				descriptions = descs
 				tarr_out, freq_out, stft_matrices = calculate_bdot_stft(
-					tarr_B, bdot_data, freq_bins, overlap_fraction,
-					freq_min, freq_max,
+					tarr_B, bdot_data, FREQ_BINS, OVERLAP_FRACTION,
+					FREQ_MIN, FREQ_MAX,
 				)
 				for ch, m in stft_matrices.items():
 					if m is None:
@@ -217,10 +232,9 @@ def compute_group_avg_stft(shot_map, freq_bins=1000, overlap_fraction=0.05,
 	return avg, descriptions, stft_tarr, freq_arr
 
 
-def show_example_shot(shot_map, freq_bins=1000, overlap_fraction=0.05,
-					  freq_min=50e6, freq_max=1000e6):
-	"""Display one raw Bdot trace and its STFT for the first shot in shot_map."""
-	hdf5_path = next(iter(shot_map))
+def show_example_shot(shot_map):
+	"""Display one raw Bdot trace and its STFT for the last shot in shot_map."""
+	hdf5_path = list(shot_map.keys())[-1]
 	shot_num, _ = shot_map[hdf5_path][0]
 	with h5py.File(hdf5_path, "r") as f:
 		result = read_hdf5_all_scopes_channels(f, shot_num)
@@ -229,8 +243,8 @@ def show_example_shot(shot_map, freq_bins=1000, overlap_fraction=0.05,
 	first_ch = sorted(bdot_data.keys())[0]
 	sig = bdot_data[first_ch]
 	stft_t, freq, stft_mats = calculate_bdot_stft(
-		tarr_B, {first_ch: sig}, freq_bins, overlap_fraction,
-		freq_min, freq_max,
+		tarr_B, {first_ch: sig}, FREQ_BINS, OVERLAP_FRACTION,
+		FREQ_MIN, FREQ_MAX,
 	)
 	stft_mat = stft_mats[first_ch]
 
@@ -259,16 +273,14 @@ def show_example_shot(shot_map, freq_bins=1000, overlap_fraction=0.05,
 	plt.show(block=True)
 
 
-def compare_bdot_groups(base_dir=dir_path,
-						tracking_filename="tracking_result.npy",
-						y_range_cm=Y_RANGE_CM,
-						n_per_group=5,
-						freq_bins=1000, overlap_fraction=0.05,
-						freq_min=50e6, freq_max=1000e6,
-						show_example=True):
+def run_selection(base_dir=dir_path,
+				  tracking_filename=TRACKING_FILENAME,
+				  y_range_cm=Y_RANGE_CM,
+				  n_per_group=N_PER_GROUP):
+	"""Run shot selection and log diagnostics. Returns
+	(pass_map, fail_map, diag, tracking_npy_path) or None if too few shots."""
 	tracking_npy_path = os.path.join(base_dir, tracking_filename)
 
-	# Phase 1: select
 	pass_map, fail_map, diag = select_shots(
 		tracking_npy_path, base_dir,
 		n_pass=n_per_group, n_fail=n_per_group, y_range_cm=y_range_cm,
@@ -293,7 +305,6 @@ def compare_bdot_groups(base_dir=dir_path,
 	if diag["pass_selected"]:
 		hp, sn, ts = diag["pass_selected"][0]
 		tracking_dict = np.load(tracking_npy_path, allow_pickle=True).item()
-		# locate matching cine entry by prefix+shot
 		prefix = os.path.basename(hp)[:2]
 		for cp, entry in tracking_dict.items():
 			parsed = _parse_cine_basename(cp)
@@ -307,19 +318,16 @@ def compare_bdot_groups(base_dir=dir_path,
 						   f"t*={ts*1e3:.2f} ms")
 				break
 
-	# Optional example raw + STFT
-	if show_example:
-		show_example_shot(pass_map, freq_bins, overlap_fraction, freq_min, freq_max)
+	return pass_map, fail_map, diag, tracking_npy_path
 
-	# Phase 2: compute averages
+
+def compare_bdot_groups(pass_map, fail_map, base_dir=dir_path):
+	"""Compute averaged STFTs for the two groups and produce the comparison plot."""
 	log("BDOT", "=== Group A: pass-y ===")
-	group_a = compute_group_avg_stft(pass_map, freq_bins, overlap_fraction,
-									 freq_min, freq_max)
+	group_a = compute_group_avg_stft(pass_map)
 	log("BDOT", "=== Group B: tracking failed ===")
-	group_b = compute_group_avg_stft(fail_map, freq_bins, overlap_fraction,
-									 freq_min, freq_max)
+	group_b = compute_group_avg_stft(fail_map)
 
-	# Phase 3: compare plot
 	port_match = re.search(r"P\d+", base_dir)
 	port_label = port_match.group(0) if port_match else "P??"
 	plot_bdot_stft_comparison(
@@ -331,4 +339,11 @@ def compare_bdot_groups(base_dir=dir_path,
 
 
 if __name__ == "__main__":
-	compare_bdot_groups()
+	if RUN_SHOW_EXAMPLE or RUN_COMPARE_GROUPS:
+		sel = run_selection()
+		if sel is not None:
+			pass_map, fail_map, _diag, _tracking_path = sel
+			if RUN_SHOW_EXAMPLE:
+				show_example_shot(pass_map)
+			if RUN_COMPARE_GROUPS:
+				compare_bdot_groups(pass_map, fail_map)
