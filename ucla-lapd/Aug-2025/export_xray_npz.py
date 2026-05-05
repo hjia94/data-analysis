@@ -26,28 +26,11 @@ import h5py
 from lapd_io import log, get_xray_data
 from read.read_scope_data import read_hdf5_all_scopes_channels
 from data_analysis_utils import Photons
-
-
-def _find_cine_path_for_shot(tracking_dict, file_prefix, shot_num):
-	"""Return the cine path in tracking_dict matching {prefix}_..._shot{NNN}.cine,
-	or None if absent."""
-	target = f"_shot{shot_num:03d}"
-	for cine_path in tracking_dict:
-		base = os.path.basename(cine_path)
-		if base[:2] == file_prefix and target in base:
-			return cine_path
-	return None
-
-
-def _y_cm_at_scope_times(entry, tarr_ds_ms, uw_start_ms):
-	"""Evaluate the tracking line at scope times. Returns NaN-filled array
-	when the entry is missing or its fit is not usable."""
-	if (entry is None or entry.get("n_points", 0) < 2
-			or not np.isfinite(entry.get("y_slope", float("nan")))
-			or not np.isfinite(entry.get("y_intercept", float("nan")))):
-		return np.full_like(tarr_ds_ms, np.nan, dtype=float)
-	t_s = (tarr_ds_ms + uw_start_ms) * 1e-3
-	return entry["y_intercept"] + entry["y_slope"] * t_s
+from tracking_utils import (
+	evaluate_y_cm,
+	find_cine_path_for_shot,
+	is_valid_tracking_entry,
+)
 
 
 def export_shot_xray_npz(f_h5, shot_num, file_prefix, tracking_dict,
@@ -70,13 +53,10 @@ def export_shot_xray_npz(f_h5, shot_num, file_prefix, tracking_dict,
 	tarr_ds_ms = np.asarray(detector.tarr_ds, dtype=float)
 	xray_ds = np.asarray(detector.baseline_subtracted, dtype=float)
 
-	cine_path = _find_cine_path_for_shot(tracking_dict, file_prefix, shot_num)
+	cine_path = find_cine_path_for_shot(tracking_dict, file_prefix, shot_num)
 	entry = tracking_dict.get(cine_path) if cine_path else None
-	y_cm = _y_cm_at_scope_times(entry, tarr_ds_ms, uw_start_ms)
-
-	has_tracking = bool(entry is not None and entry.get("n_points", 0) >= 2
-						and np.isfinite(entry.get("y_slope", float("nan")))
-						and np.isfinite(entry.get("y_intercept", float("nan"))))
+	y_cm = evaluate_y_cm(entry, tarr_ds_ms, uw_start_ms)
+	has_tracking = is_valid_tracking_entry(entry)
 
 	np.savez_compressed(
 		out_path,

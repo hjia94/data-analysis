@@ -10,6 +10,7 @@ import h5py
 from lapd_io import log, get_xray_data
 from read.read_scope_data import read_hdf5_all_scopes_channels
 from data_analysis_utils import Photons
+from tracking_utils import analysis_key
 
 
 def process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False):
@@ -43,9 +44,9 @@ def xray_wt_cam(base_dir, fn):
 		shot_numbers = f['Control/FastCam']['shot number'][()]
 
 		for shot_num in shot_numbers:
-			analysis_key = f"{file_prefix}_{shot_num:03d}"
-			if analysis_key in analysis_dict:
-				log('ANALYSIS', f"Analysis result exists for {analysis_key}")
+			key = analysis_key(file_prefix, shot_num)
+			if key in analysis_dict:
+				log('ANALYSIS', f"Analysis result exists for {key}")
 				continue
 
 			log('SHOT', f"Processing shot {shot_num}")
@@ -53,8 +54,8 @@ def xray_wt_cam(base_dir, fn):
 			tarr_x, xray_data = get_xray_data(result)
 
 			pulse_tarr, pulse_amp = process_shot_xray(tarr_x, xray_data, min_ts, d, threshold)
-			analysis_dict[analysis_key] = (pulse_tarr, pulse_amp)
-			log('ANALYSIS', f"Added new analysis result for {analysis_key}")
+			analysis_dict[key] = (pulse_tarr, pulse_amp)
+			log('ANALYSIS', f"Added new analysis result for {key}")
 
 	try:
 		np.save(analysis_file, analysis_dict)
