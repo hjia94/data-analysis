@@ -132,7 +132,7 @@ rebuild it.
 Notebook-only Langmuir probe pipeline for the XY-plane sweep file (e.g.
 `31-LP-p24-XYplane+line-He1kG380G-6300A_2025-08-21.hdf5`):
 
-1. `read_bmotion_control(ifn)` → `(m_list, pos_array, npos, nshot)`
+1. `read_positions(ifn)` → `(m_list, pos_array, npos, nshot)`
    (motion list, positions, number of unique positions, shots per
    position).
 2. Loop over `npos × nshot`, average `lpscope/C1` and `C2` per position

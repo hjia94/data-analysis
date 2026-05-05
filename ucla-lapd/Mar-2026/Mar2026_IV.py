@@ -12,7 +12,7 @@ import h5py
 from bapsflib import lapd
 import matplotlib.pyplot as plt
 
-import read_hdf5 as rh
+import read_hdf5_bapsflib as rh
 from lp_analysis import find_sweep_indices, reshape_IV
 from lp_iv_analysis import analyze_IV_safe
 
@@ -55,7 +55,7 @@ def save_IV_data(ifn, save_path):
         
         adc, digi_dict = rh.read_digitizer_config(f)
         # read probe motion into arrays
-        pos_array, xpos, ypos, zpos, npos, nshot = rh.read_bmotion_probe_motion(f)
+        pos_array, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_bmotion(f)
 
         # read probe signal into arrays
         tarr, Vswp_arr, IswpL_arr, IswpR_arr = get_IV_arr(f, adc, npos, nshot)
@@ -385,7 +385,7 @@ if __name__ == '__main__':
     
     # Plot result
     with lapd.File(ifn) as f:
-        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_bmotion_probe_motion(f)
+        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_bmotion(f)
 
     # plot_result(ne_arr, xpos, ypos, t_ls)
     tndx_list = [0, 7, 15, 20]

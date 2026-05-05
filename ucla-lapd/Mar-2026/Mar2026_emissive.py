@@ -33,7 +33,7 @@ import matplotlib.pyplot as plt
 import copy
 from bapsflib import lapd
 
-import read_hdf5 as rh
+import read_hdf5_bapsflib as rh
 
 
 def get_emissive_data(f, adc, npos, nshot):
@@ -94,7 +94,7 @@ def save_emissive_data(ifn, save_path):
         adc, digi_dict = rh.read_digitizer_config(f)
         
         # Read probe motion (spatial positions)
-        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_bmotion_probe_motion(f)
+        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_bmotion(f)
         key = list(pos_dict.keys())[0]
         pos_array = pos_dict[key]
         

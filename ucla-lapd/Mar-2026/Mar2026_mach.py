@@ -48,7 +48,7 @@ sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\ucla-lapd")
 
 from bapsflib import lapd
-import read_hdf5 as rh
+import read_hdf5_bapsflib as rh
 from data_analysis_utils import butter_bandpass
 
 
@@ -124,7 +124,7 @@ def save_mach_data(ifn, save_path):
     """
     with lapd.File(ifn) as f:
         adc, digi_dict = rh.read_digitizer_config(f)
-        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_bmotion_probe_motion(f)
+        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_bmotion(f)
         key = list(pos_dict.keys())[0]
         pos_array = pos_dict[key]
         

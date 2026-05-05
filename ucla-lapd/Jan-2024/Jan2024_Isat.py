@@ -8,7 +8,7 @@ import h5py
 from bapsflib import lapd
 import matplotlib.pyplot as plt
 
-import read_hdf5 as rh
+import read_hdf5_bapsflib as rh
 from lp_analysis import analyze_IV, derivative
 
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
@@ -20,7 +20,7 @@ colors = ['r', 'g', 'b', 'c', 'm', 'y', 'k']
 def init_read(ifn):
     with lapd.File(ifn) as f:
         adc, digi_dict = rh.read_digitizer_config(f)
-        pos_array, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion(f)
+        pos_array, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_6k(f)
         Bdata, port_ls = rh.read_magnetic_field(f)
         int_arr, int_tarr, d_phi = rh.read_interferometer_old(f)
 
