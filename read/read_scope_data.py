@@ -40,12 +40,56 @@ Sep.2025 update:
 Added functions to read scope data from HDF5 files written by LAPD_DAQ, including reading time arrays and channel data for specific shots.
 '''
 
+import os
+import sys
+import functools
 import numpy as np
 import struct
 from datetime import datetime
 import h5py
 
 from LeCroy_Scope_Header import LeCroy_Scope_Header
+
+#======================================================================================
+# scope_io locator
+#======================================================================================
+# The HDF5 scope readers below are thin wrappers over the `scope_io` package that
+# lives in the sibling LAPD_DAQ repo (single source of truth for LAPD_DAQ HDF5
+# decoding). This import is done lazily, inside the HDF5 readers, so the legacy
+# .trc/.txt readers in this module keep working even if LAPD_DAQ is not present.
+
+@functools.lru_cache(maxsize=None)
+def _import_scope_io():
+	"""Locate the sibling LAPD_DAQ repo and import its `scope_io` package.
+
+	Resolution order: the LAPD_DAQ_PATH env var, then `../../LAPD_DAQ` relative to
+	this file (data-analysis and LAPD_DAQ are sibling clones). Raises a clear
+	ImportError if neither is found so the failure is actionable. Cached so the
+	lookup runs at most once per process.
+	"""
+	# Discover candidate roots and put the first that holds `scope_io` on sys.path,
+	# then import once. (If scope_io is already importable, both branches no-op and
+	# the import below hits Python's module cache.)
+	candidates = []
+	env_path = os.environ.get('LAPD_DAQ_PATH')
+	if env_path:
+		candidates.append(env_path)
+	# data-analysis/read/read_scope_data.py -> data-analysis -> GitHub -> LAPD_DAQ
+	candidates.append(os.path.abspath(os.path.join(
+		os.path.dirname(__file__), '..', '..', 'LAPD_DAQ')))
+
+	for path in candidates:
+		if os.path.isdir(os.path.join(path, 'scope_io')) and path not in sys.path:
+			sys.path.insert(0, path)
+
+	try:
+		import scope_io
+		return scope_io
+	except ImportError:
+		raise ImportError(
+			"Could not import 'scope_io': clone LAPD_DAQ beside data-analysis "
+			"(as a sibling folder) or set the LAPD_DAQ_PATH environment variable "
+			"to the LAPD_DAQ repo root.")
 
 #======================================================================================
 
@@ -226,29 +270,12 @@ def read_hdf5_scope_tarr(f, scope_name):
 	"""
 	Read the time array for a given scope group from an open HDF5 file.
 
-	Parameters
-	----------
-	f : h5py.File
-		Open HDF5 file object (not a filename)
-	scope_name : str
-		Name of the scope group (e.g., 'bdotscope', 'xrayscope')
-
-	Returns
-	-------
-	np.ndarray
-		Time array for the specified scope group
-
-	Raises
-	------
-	KeyError
-		If the scope group or time array is not found
+	Delegates to ``scope_io.read_hdf5_scope_tarr`` (LAPD_DAQ); see :func:`_import_scope_io`.
+	Returns the scope group's time array. Raises KeyError if the scope group or
+	its time array is missing.
 	"""
-	if scope_name not in f:
-		raise KeyError(f"Scope group '{scope_name}' not found in HDF5 file")
-	scope_group = f[scope_name]
-	if 'time_array' not in scope_group:
-		raise KeyError(f"Time array not found for scope '{scope_name}'")
-	return scope_group['time_array'][:]
+	scope_io = _import_scope_io()
+	return scope_io.read_hdf5_scope_tarr(f, scope_name)
 
 #======================================================================================
 
@@ -256,58 +283,13 @@ def read_hdf5_scope_data(f, scope_name, channel_name, shot_number):
 	"""
 	Read and convert raw scope channel data for a given shot from an open HDF5 file.
 
-	Parameters
-	----------
-	f : h5py.File
-		Open HDF5 file object (not a filename)
-	scope_name : str
-		Name of the scope group (e.g., 'bdotscope', 'xrayscope')
-	channel_name : str
-		Name of the channel (e.g., 'C1', 'C2')
-	shot_number : int
-		Shot number to read (e.g., 1)
-
-	Returns
-	-------
-	np.ndarray
-		Calibrated voltage data for the specified channel
-
-	Raises
-	------
-	KeyError
-		If the group or dataset is missing
-	ValueError
-		If the shot is marked as skipped or header cannot be decoded
+	Delegates to ``scope_io.read_hdf5_scope_data`` (LAPD_DAQ); see
+	:func:`_import_scope_io`. Returns ``(voltage_data, dt, t0)`` with the voltage
+	scaled to volts. Raises KeyError if the group/dataset is missing and ValueError
+	if the shot is skipped or the header cannot be decoded.
 	"""
-	
-	# Fast local lookups
-	try:
-		scope_group = f[scope_name]
-		shot_group = scope_group[f'shot_{shot_number}']
-	except KeyError as e:
-		raise KeyError(f"Missing group: {e}")
-
-	attrs = shot_group.attrs
-	if attrs.get('skipped', False):
-		raise ValueError(f"Shot {shot_number} was skipped. Reason: {attrs.get('skip_reason', 'Unknown reason')}")
-
-	data_key = f'{channel_name}_data'
-	header_key = f'{channel_name}_header'
-	try:
-		raw_data = shot_group[data_key][:]
-		header_bytes = shot_group[header_key][()]
-	except KeyError as e:
-		raise KeyError(f"Missing dataset: {e}")
-
-	header = decode_header_info(header_bytes)
-	if header is None:
-		raise ValueError(f"Could not decode header for {scope_name}/shot_{shot_number}/{channel_name}")
-
-	# Vectorized conversion
-	gain = header.hdr.vertical_gain
-	offset = header.hdr.vertical_offset
-	voltage_data = raw_data.astype(np.float64) * gain - offset
-	return voltage_data, header.dt, header.t0
+	scope_io = _import_scope_io()
+	return scope_io.read_hdf5_scope_data(f, scope_name, channel_name, shot_number)
 
 #======================================================================================
 
