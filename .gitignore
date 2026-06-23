@@ -64,3 +64,6 @@ Thumbs.db
 
 # Files in temp directory
 temp/
+
+# Claude Code local settings / skills
+.claude/

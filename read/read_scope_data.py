@@ -365,26 +365,12 @@ def read_hdf5_all_scopes_channels(f, shot_number, include_tarr=True):
 def read_scope_channel_descriptions(f, scope_name):
 	"""
 	Return a dictionary of channel descriptions for a given scope group from an open HDF5 file.
+
+	Delegates to ``scope_io.read_hdf5_scope_channel_descriptions`` (LAPD_DAQ),
+	which handles both the new (per-channel ``<CH>_description`` scope-group
+	attrs) and old (per-shot ``<CH>_data`` description attr) layouts, and scans
+	for the first populated shot rather than assuming ``shot_1`` exists. Returns
+	``{}`` if the scope group is absent. See :func:`_import_scope_io`.
 	"""
-	description_dict = {}
-
-	if scope_name not in f:
-		print(f"Scope '{scope_name}' not found in file.")
-		return description_dict
-
-	current_shot = f[scope_name]['shot_1']
-
-	# Extract channel names and their descriptions
-	channel_names = [k.split('_')[0] for k in current_shot.keys() if k.endswith('_data')]
-
-	# Print channel information
-	for channel in sorted(channel_names):
-		data_key = f"{channel}_data"
-		if data_key in current_shot:
-			if 'description' in current_shot[data_key].attrs:
-				desc = current_shot[data_key].attrs['description']
-				description_dict[channel] = desc
-			else:
-				description_dict[channel] = "No description available"
-
-	return description_dict
+	scope_io = _import_scope_io()
+	return scope_io.read_hdf5_scope_channel_descriptions(f, scope_name)
