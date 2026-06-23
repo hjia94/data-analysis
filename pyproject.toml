@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-analysis"
+dynamic = ["version"]
+description = "LAPD data analysis library: readers organized by data shape, shared signal/plasma/viz utilities."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "h5py",
+]
+
+# NOTE: the `scope` optional-dependency (lapd-daq @ git+...) is intentionally NOT
+# declared yet. HDF5 scope reading is delegated to scope_io in the sibling
+# LAPD_DAQ repo, but LAPD_DAQ does not yet package scope_io. The extra is wired
+# in Step 3a (after the sibling-repo packaging change lands), per REORG_PLAN.md.
+
+[tool.setuptools.dynamic]
+version = { attr = "data_analysis.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["data_analysis*"]

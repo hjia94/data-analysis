@@ -43,6 +43,13 @@ wheels/
 *.hdf5
 *.h5
 
+# Generated artifacts (default output root is OUTSIDE the repo; these are a
+# belt-and-suspenders in case the root is pointed inside the repo for a quick run)
+output/
+*.png
+*.pdf
+*.svg
+
 # IDE specific files
 .idea/
 .vscode/
