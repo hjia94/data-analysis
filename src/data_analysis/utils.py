@@ -12,7 +12,6 @@ Included functions:
 '''
 
 import os
-import sys
 import re
 import numpy as np
 from scipy import signal, ndimage
@@ -23,11 +22,6 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import Tuple, Optional
 from numpy.typing import NDArray
-
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\Nov-2024")
-from read_scope_data import read_trc_data
-from plot_utils import plot_original_and_baseline, plot_subtracted_signal
 #===========================================================================================================
 #===========================================================================================================
 def first_and_last_zerocrossings(cur):

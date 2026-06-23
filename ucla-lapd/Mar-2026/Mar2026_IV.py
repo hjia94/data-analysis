@@ -13,8 +13,7 @@ from bapsflib import lapd
 import matplotlib.pyplot as plt
 
 import read_hdf5_bapsflib as rh
-from lp_analysis import find_sweep_indices, reshape_IV
-from lp_iv_analysis import analyze_IV_safe
+from data_analysis.plasma.langmuir import find_sweep_indices, reshape_IV, analyze_IV_safe
 
 from scipy.ndimage import gaussian_filter1d
 

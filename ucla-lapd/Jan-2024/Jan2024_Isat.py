@@ -9,7 +9,7 @@ from bapsflib import lapd
 import matplotlib.pyplot as plt
 
 import read_hdf5_bapsflib as rh
-from lp_analysis import analyze_IV, derivative
+from data_analysis.plasma.langmuir import analyze_IV, derivative
 
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.signal import find_peaks, savgol_filter
