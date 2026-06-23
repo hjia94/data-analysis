@@ -25,7 +25,7 @@ import h5py
 
 from lapd_io import log, get_xray_data
 from read.read_scope_data import read_hdf5_all_scopes_channels
-from data_analysis_utils import Photons
+from data_analysis.utils import Photons
 from tracking_utils import (
 	evaluate_y_cm,
 	find_cine_path_for_shot,

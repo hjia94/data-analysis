@@ -8,7 +8,7 @@ import h5py
 
 from lapd_io import log, get_bdot_data
 from read.read_scope_data import read_hdf5_all_scopes_channels
-from data_analysis_utils import calculate_stft
+from data_analysis.utils import calculate_stft
 from plot_bdot import plot_averaged_bdot_stft
 
 

@@ -38,7 +38,7 @@ import numpy as np
 from scipy.constants import physical_constants, elementary_charge as QE
 from scipy.constants import atomic_mass as AMU
 
-from plasma_utils import ion_sound_speed, collision_en, neutral_density
+from data_analysis.plasma.formulas import ion_sound_speed, collision_en, neutral_density
 
 # ----------------------------- Constants -----------------------------
 K_B = 1.380649e-23      # Boltzmann constant [J/K]

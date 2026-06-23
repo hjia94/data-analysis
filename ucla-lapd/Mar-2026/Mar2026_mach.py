@@ -49,7 +49,7 @@ sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\ucla-lapd")
 
 from bapsflib import lapd
 import read_hdf5_bapsflib as rh
-from data_analysis_utils import butter_bandpass
+from data_analysis.utils import butter_bandpass
 
 
 def get_mach_data(f, adc, npos, nshot):

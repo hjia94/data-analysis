@@ -7,7 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import calibrate_power as cbp
-import data_analysis_utils as utils
+import data_analysis.utils as utils
 from read_scope_data import read_trc_data
 
 

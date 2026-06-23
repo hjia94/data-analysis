@@ -22,7 +22,7 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__ if '__file__' 
 sys.path = [repo_root, f"{repo_root}/read", f"{repo_root}/object_tracking"] + sys.path
 
 from object_tracking.generate_tracking import count_y_passes  # noqa: E402
-from data_analysis_utils import counts_per_bin  # noqa: E402
+from data_analysis.utils import counts_per_bin  # noqa: E402
 from tracking_utils import (  # noqa: E402
     analysis_key_for_basename,
     evaluate_y_cm,

@@ -27,7 +27,7 @@ sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
 
 
 from read_scope_data import read_trc_data
-from data_analysis_utils import Photons, calculate_stft, counts_per_bin
+from data_analysis.utils import Photons, calculate_stft, counts_per_bin
 from plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
 from read_cine import read_cine, convert_cine_to_avi
 from track_object import track_object, get_chamber, get_vel_freefall, get_pos_freefall

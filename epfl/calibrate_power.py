@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 import numpy as np
-import data_analysis_utils as utils
+import data_analysis.utils as utils
 from read_scope_data import read_trc_data
 
 #======================================================================================
