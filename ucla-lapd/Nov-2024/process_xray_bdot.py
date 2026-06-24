@@ -20,15 +20,13 @@ import cv2
 import re
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
-# Add paths for custom modules
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
+# object_tracking is not yet packaged; keep it on sys.path until Step 3 moves it.
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\object_tracking")
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
 
 
 from data_analysis.io.scope import read_trc_data
 from data_analysis.utils import Photons, calculate_stft, counts_per_bin
-from plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
+from data_analysis.viz.plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
 from read_cine import read_cine, convert_cine_to_avi
 from track_object import track_object, get_chamber, get_vel_freefall, get_pos_freefall
 

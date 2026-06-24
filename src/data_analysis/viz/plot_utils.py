@@ -7,21 +7,19 @@ into the following categories:
 
 1. Frequency Analysis
     - plot_fft: Plot Fast Fourier Transform of signals
-    - plot_stft: Plot Short-Time Fourier Transform (spectrogram)
+    - plot_stft_wt_photon_counts: Plot STFT spectrogram with photon-count overlay
 
 2. Multi-Shot Display
+    - select_monitor / position_window: place figures across monitors
     - plot_shots_grid: Display multiple shots in a grid layout across monitors
     - cleanup_figures: Clean up matplotlib figures and free memory
 
 3. Photon Counting
     - plot_counts_per_bin: Plot histogram of photon counts in time bins
+    - plot_photon_detection / plot_original_and_baseline / plot_subtracted_signal
 
 Each function includes detailed documentation of its parameters and returns.
 '''
-import sys
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
-
 import tkinter as tk
 from screeninfo import get_monitors
 import matplotlib.pyplot as plt
