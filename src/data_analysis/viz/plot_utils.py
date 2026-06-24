@@ -20,13 +20,17 @@ into the following categories:
 
 Each function includes detailed documentation of its parameters and returns.
 '''
-import tkinter as tk
-from screeninfo import get_monitors
 import matplotlib.pyplot as plt
 from typing import Callable, Optional
 from data_analysis.io.scope import read_trc_data
 import gc  # For garbage collection
 import numpy as np
+
+# NOTE: `tkinter` and `screeninfo` are GUI/monitor dependencies used only by the
+# multi-shot display helpers (select_monitor, plot_shots_grid). They are imported
+# lazily inside those functions so the pure-plotting helpers (plot_fft,
+# plot_counts_per_bin, ...) import cleanly on headless machines without them.
+# `screeninfo` is an optional dependency (the `gui` extra in pyproject.toml).
 
 
 #==============================================================================
@@ -91,6 +95,7 @@ def select_monitor(monitor_idx: Optional[int] = None,
     Returns:
         tuple: (monitor_object, x_pos, y_pos, window_width, window_height)
     """
+    from screeninfo import get_monitors
     monitors = get_monitors()
     
     # If monitor_idx not provided, show available monitors and prompt user
@@ -128,20 +133,21 @@ def select_monitor(monitor_idx: Optional[int] = None,
 def plot_shots_grid(data_path_template: str, shot_range: range, n_cols: int = 2,
                    data_processor: Optional[Callable] = None, monitor_idx: Optional[int] = None) -> None:
     """Plot multiple shots in windows with 2x2 subplots."""
+    import tkinter as tk
+
     # Clean up any existing figures first
     cleanup_figures()
-    
+
     # Get monitor information using full window size
     monitor, base_x, base_y, window_width, window_height = select_monitor(
         monitor_idx=monitor_idx,
         window_scale=(0.9, 0.9)  # Use 90% of monitor size for each window
     )
-    
+
     # Calculate number of windows needed (each window shows 4 plots)
     n_shots = len(shot_range)
     n_windows = (n_shots + 3) // 4  # Ceiling division by 4
-    n_rows = (n_windows + n_cols - 1) // n_cols  # Ceiling division for window layout
-    
+
     # Find common path prefix for naming windows
     first_path = data_path_template.format(shot=shot_range[0])
     path_parts = first_path.split('/')
@@ -185,33 +191,20 @@ def plot_shots_grid(data_path_template: str, shot_range: range, n_cols: int = 2,
                 # Clear data from memory
                 del data
                 del tarr
-                gc.collect()  # Force garbage collection
             else:
                 # Hide empty subplots
                 axs[subplot_idx].set_visible(False)
-        
+
         # Position window
         mngr = plt.get_current_fig_manager()
         # Set window title using common path
         try:
             mngr.set_window_title(common_prefix)
-        except:
+        except Exception:
             print(f"Could not set window title for {common_prefix}")
-            
-        try:
-            # For Qt backend
-            mngr.window.setGeometry(x_pos, y_pos, window_width, window_height)
-        except:
-            try:
-                # For TkAgg backend
-                mngr.window.wm_geometry(f"+{x_pos}+{y_pos}")
-            except:
-                try:
-                    # For WX backend
-                    mngr.window.SetPosition((x_pos, y_pos))
-                except:
-                    print("Could not position window - unsupported backend")
-        
+
+        position_window(mngr, x_pos, y_pos, window_width, window_height)
+
         plt.show(block=False)
         
         # Force garbage collection of data (but keep the figure)
@@ -277,16 +270,17 @@ def plot_photon_detection(tarr, data, pulse_times, detector, ax=None):
     ax.plot(tarr, detector.baseline, 'g-', label='Baseline', alpha=0.7)
     
     # Plot baseline-subtracted signal
+    baseline_mean = detector.baseline.mean()
     subtracted_signal = data - detector.baseline
-    ax.plot(tarr, subtracted_signal + detector.baseline.mean(), 'k-', 
+    ax.plot(tarr, subtracted_signal + baseline_mean, 'k-',
             label='Subtracted', alpha=0.5)
-    
+
     # Plot detected pulses on the subtracted signal
-    pulse_heights = subtracted_signal[np.searchsorted(tarr, pulse_times)] + detector.baseline.mean()
+    pulse_heights = subtracted_signal[np.searchsorted(tarr, pulse_times)] + baseline_mean
     ax.plot(pulse_times, pulse_heights, 'r.', label='Pulses')
-    
+
     # Plot threshold level
-    ax.axhline(y=detector.baseline.mean() + detector.threshold, color='r', 
+    ax.axhline(y=baseline_mean + detector.threshold, color='r',
                linestyle='--', alpha=0.5, label='Threshold')
     
     ax.set_xlabel('Time (ms)')
@@ -312,7 +306,6 @@ def plot_fft(time_array, signals_dict, window=None):
     """
     # Calculate sampling parameters
     dt = time_array[1] - time_array[0]  # Time step
-    fs = 1/dt  # Sampling frequency
     n = len(time_array)
     
     # Create frequency array in MHz

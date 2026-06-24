@@ -20,6 +20,10 @@ dependencies = [
 # extra makes the dependency explicit. For local co-development, prefer an
 # editable sibling install: `pip install -e ../LAPD_DAQ` (points at your checkout).
 scope = ["lapd-daq @ git+https://github.com/hjia94/LAPD_DAQ.git"]
+# GUI/monitor helpers in data_analysis.viz.plot_utils (select_monitor,
+# plot_shots_grid) need screeninfo for multi-monitor figure placement. Pure
+# plotting works without it; install the `gui` extra for the display helpers.
+gui = ["screeninfo"]
 
 [tool.setuptools.dynamic]
 version = { attr = "data_analysis.__version__" }
