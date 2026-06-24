@@ -305,6 +305,30 @@ def read_hdf5_scope_data(f, scope_name, channel_name, shot_number):
 
 #======================================================================================
 
+def scope_shot_numbers(scope_group):
+	"""
+	Return the available shot numbers in a scope group (an open HDF5 group).
+
+	Delegates to ``scope_io.scope_shot_numbers`` (LAPD_DAQ); see :func:`_import_scope_io`.
+	"""
+	scope_io = _import_scope_io()
+	return scope_io.scope_shot_numbers(scope_group)
+
+#======================================================================================
+
+def read_hdf5_scope_channel_shots(f, scope_name, channel_name, shot_numbers, expected_len=None):
+	"""
+	Read many shots of one channel into a ``(nshot, nsamples)`` float64 stack.
+
+	Delegates to ``scope_io.read_hdf5_scope_channel_shots`` (LAPD_DAQ); see
+	:func:`_import_scope_io`. Returns ``(stack, dt, t0)`` (NaN rows for unreadable
+	shots; ``None`` stack if no shot could be read).
+	"""
+	scope_io = _import_scope_io()
+	return scope_io.read_hdf5_scope_channel_shots(f, scope_name, channel_name, shot_numbers, expected_len=expected_len)
+
+#======================================================================================
+
 def read_hdf5_all_scopes_channels(f, shot_number, include_tarr=True):
 	"""
 	Read all channel data for all scope groups for a given shot from an open HDF5 file.
