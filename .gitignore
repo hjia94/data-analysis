@@ -74,3 +74,8 @@ temp/
 
 # Claude Code local settings / skills
 .claude/
+
+# Planning docs are kept local-only (any *plan.md, case-insensitive)
+*plan.md
+*PLAN.md
+*Plan.md
