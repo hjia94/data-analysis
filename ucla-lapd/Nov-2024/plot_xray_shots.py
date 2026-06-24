@@ -13,7 +13,7 @@ sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
 sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\object_tracking")
 
-from read_scope_data import read_trc_data
+from data_analysis.io.scope import read_trc_data
 from read_cine import read_cine, convert_cine_to_avi, overlay_motion_frames
 from track_object import track_object, get_chamber
 

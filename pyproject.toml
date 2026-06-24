@@ -14,10 +14,12 @@ dependencies = [
     "h5py",
 ]
 
-# NOTE: the `scope` optional-dependency (lapd-daq @ git+...) is intentionally NOT
-# declared yet. HDF5 scope reading is delegated to scope_io in the sibling
-# LAPD_DAQ repo, but LAPD_DAQ does not yet package scope_io. The extra is wired
-# in Step 3a (after the sibling-repo packaging change lands), per REORG_PLAN.md.
+[project.optional-dependencies]
+# HDF5 scope reading is delegated to `scope_io` in the sibling LAPD_DAQ repo
+# (single source of truth). LAPD_DAQ now ships scope_io in its package, so this
+# extra makes the dependency explicit. For local co-development, prefer an
+# editable sibling install: `pip install -e ../LAPD_DAQ` (points at your checkout).
+scope = ["lapd-daq @ git+https://github.com/hjia94/LAPD_DAQ.git"]
 
 [tool.setuptools.dynamic]
 version = { attr = "data_analysis.__version__" }

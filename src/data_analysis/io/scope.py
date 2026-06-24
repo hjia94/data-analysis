@@ -44,39 +44,50 @@ import os
 import sys
 import functools
 import numpy as np
-import struct
-from datetime import datetime
 import h5py
 
-from LeCroy_Scope_Header import LeCroy_Scope_Header
+from .LeCroy_Scope_Header import LeCroy_Scope_Header
 
 #======================================================================================
 # scope_io locator
 #======================================================================================
 # The HDF5 scope readers below are thin wrappers over the `scope_io` package that
 # lives in the sibling LAPD_DAQ repo (single source of truth for LAPD_DAQ HDF5
-# decoding). This import is done lazily, inside the HDF5 readers, so the legacy
-# .trc/.txt readers in this module keep working even if LAPD_DAQ is not present.
+# decoding). `scope_io` ships with the `lapd-daq` package, so the normal path is a
+# plain `import scope_io` once `pip install -e ../LAPD_DAQ` (the `scope` extra) is
+# in place. Sibling-clone path discovery is the fallback for checkouts run
+# without a `pip install` (common in this repo), not a temporary measure.
+# The import is done lazily, inside the HDF5 readers, so the legacy .trc/.txt
+# readers in this module keep working even if LAPD_DAQ is not present at all.
 
 @functools.lru_cache(maxsize=None)
 def _import_scope_io():
-	"""Locate the sibling LAPD_DAQ repo and import its `scope_io` package.
+	"""Import LAPD_DAQ's `scope_io` package (single source of truth for LAPD_DAQ
+	HDF5 scope decoding).
 
-	Resolution order: the LAPD_DAQ_PATH env var, then `../../LAPD_DAQ` relative to
-	this file (data-analysis and LAPD_DAQ are sibling clones). Raises a clear
-	ImportError if neither is found so the failure is actionable. Cached so the
-	lookup runs at most once per process.
+	Resolution order:
+	  1. installed `scope_io` (from `pip install -e ../LAPD_DAQ`) -- the normal path
+	  2. fallback: sibling-clone discovery via the LAPD_DAQ_PATH env var, else
+	     `../../LAPD_DAQ` relative to this file (data-analysis and LAPD_DAQ as
+	     sibling clones), put on sys.path -- for checkouts run without an install.
+
+	Raises a clear ImportError if neither resolves. Cached so the lookup runs at
+	most once per process.
 	"""
-	# Discover candidate roots and put the first that holds `scope_io` on sys.path,
-	# then import once. (If scope_io is already importable, both branches no-op and
-	# the import below hits Python's module cache.)
+	try:
+		import scope_io
+		return scope_io
+	except ImportError:
+		pass
+
+	# Fallback: discover a sibling LAPD_DAQ clone and put it on sys.path.
 	candidates = []
 	env_path = os.environ.get('LAPD_DAQ_PATH')
 	if env_path:
 		candidates.append(env_path)
-	# data-analysis/read/read_scope_data.py -> data-analysis -> GitHub -> LAPD_DAQ
+	# src/data_analysis/io/scope.py -> data_analysis -> src -> data-analysis -> GitHub -> LAPD_DAQ
 	candidates.append(os.path.abspath(os.path.join(
-		os.path.dirname(__file__), '..', '..', 'LAPD_DAQ')))
+		os.path.dirname(__file__), '..', '..', '..', '..', 'LAPD_DAQ')))
 
 	for path in candidates:
 		if os.path.isdir(os.path.join(path, 'scope_io')) and path not in sys.path:
@@ -87,9 +98,10 @@ def _import_scope_io():
 		return scope_io
 	except ImportError:
 		raise ImportError(
-			"Could not import 'scope_io': clone LAPD_DAQ beside data-analysis "
-			"(as a sibling folder) or set the LAPD_DAQ_PATH environment variable "
-			"to the LAPD_DAQ repo root.")
+			"Could not import 'scope_io': install LAPD_DAQ (`pip install -e "
+			"../LAPD_DAQ`, the `scope` extra), or clone LAPD_DAQ beside "
+			"data-analysis (as a sibling folder), or set the LAPD_DAQ_PATH "
+			"environment variable to the LAPD_DAQ repo root.")
 
 #======================================================================================
 
@@ -327,8 +339,7 @@ def read_hdf5_all_scopes_channels(f, shot_number, include_tarr=True):
 	for scope_name, scope_group in f.items():
 		if scope_name in skip_groups:
 			continue
-		else:
-			result[scope_name] = {}
+		result[scope_name] = {}
 		shot_group_name = f'shot_{shot_number}'
 		if shot_group_name not in scope_group:
 			print(f"Scope '{scope_name}' is not recorded for shot '{shot_number}'")
@@ -356,7 +367,7 @@ def read_hdf5_all_scopes_channels(f, shot_number, include_tarr=True):
 				result[scope_name]['time_array'] = tarr
 			except Exception as e:
 				print(f"Could not read time array for scope '{scope_name}': {e}")
-				tarr = None
+				result[scope_name]['time_array'] = None
 
 	return result
 

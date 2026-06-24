@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Shared HDF5 readers and logger for Aug-2025 LAPD scope data.
 
-Importing this module also configures sys.path so the project's
-``read`` and ``data_analysis_utils`` modules are available.
+Scope reading is provided by the installed ``data_analysis`` package
+(``data_analysis.io.scope``); the sys.path setup below is a fallback for
+running these scripts from a checkout without ``pip install``.
 """
 
 import os
@@ -14,7 +15,7 @@ from scipy import ndimage
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__ if '__file__' in globals() else os.getcwd()), '../..'))
 sys.path = [repo_root, f"{repo_root}/read"] + sys.path
 
-from read.read_scope_data import read_scope_channel_descriptions  # noqa: E402
+from data_analysis.io.scope import read_scope_channel_descriptions  # noqa: E402
 
 
 def log(tag, msg):

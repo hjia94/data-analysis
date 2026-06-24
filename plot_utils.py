@@ -26,7 +26,7 @@ import tkinter as tk
 from screeninfo import get_monitors
 import matplotlib.pyplot as plt
 from typing import Callable, Optional
-from read_scope_data import read_trc_data
+from data_analysis.io.scope import read_trc_data
 import gc  # For garbage collection
 import numpy as np
 

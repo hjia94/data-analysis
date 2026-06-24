@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 
 import calibrate_power as cbp
 import data_analysis.utils as utils
-from read_scope_data import read_trc_data
+from data_analysis.io.scope import read_trc_data
 
 
 def get_sheet_names(filepath):
