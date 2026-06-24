@@ -23,11 +23,11 @@ Data Flow:
 Author: Data analysis pipeline for LAPD Mar2026 campaign
 """
 
-import sys
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\ucla-lapd")
-
 import os
+import sys
+# read_hdf5_bapsflib is not yet packaged; keep its folder on sys.path until Step 3.
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import matplotlib.pyplot as plt
 import copy

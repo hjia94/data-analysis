@@ -21,7 +21,8 @@ import re
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
 # object_tracking is not yet packaged; keep it on sys.path until Step 3 moves it.
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\object_tracking")
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.join(_REPO_ROOT, "object_tracking"))
 
 
 from data_analysis.io.scope import read_trc_data

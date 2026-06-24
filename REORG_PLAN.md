@@ -236,18 +236,27 @@ for go-ahead before the next.
     resolves under that external root and creates parent dirs; with it unset, falls
     back to `~/data-analysis-output` (outside the repo). No existing script changes.
 
-- [ ] **Step 1 — Kill sys.path hacks, one folder at a time.**
+- [x] **Step 1 — Kill sys.path hacks, one folder at a time.**
   Replace `sys.path.append(...)` with real `data_analysis` imports (re-export
   current root modules so paths resolve during transition).
-  - **Verify:** that folder's routine runs against a real data file and matches
-    prior output. Repeat per folder.
-  - Files with sys.path hacks (14): `compute_B/example.py`, `data_analysis_utils.py`,
-    `epfl/crds_tools.py`, `plot_utils.py`, `read/read_scope_data.py`,
-    `ucla-lapd/Aug-2025/lapd_io.py`, `ucla-lapd/Aug-2025/movie_maker.py`,
-    `ucla-lapd/Jan-2024/Jan2024_Isat.py`, `ucla-lapd/Mar-2026/Mar2026_IV.py`,
-    `ucla-lapd/Mar-2026/Mar2026_emissive.py`, `ucla-lapd/Mar-2026/Mar2026_mach.py`,
-    `ucla-lapd/Nov-2024/plot_xray_shots.py`, `ucla-lapd/Nov-2024/process_xray_bdot.py`,
-    `ucla-lapd/interf_save.py`
+  - **Done:** dropped the now-dead hard-coded `...\data-analysis` and `...\read`
+    appends (those modules are in the installed package). Where a folder still
+    needs a not-yet-packaged module, the absolute machine path was replaced with a
+    portable `__file__`-relative append, kept until Step 3 packages it:
+    `ucla-lapd/` (for `read_hdf5_bapsflib`) in `Jan2024_Isat.py`, `Mar2026_IV.py`,
+    `Mar2026_emissive.py`, `Mar2026_mach.py`; `object_tracking/` (for
+    `read_cine`/`track_object`) in `Nov-2024/plot_xray_shots.py`,
+    `Nov-2024/process_xray_bdot.py`. Fully removed in `epfl/crds_tools.py`,
+    `ucla-lapd/interf_save.py`. No hard-coded `C:\Users\...\data-analysis` paths
+    remain in any `.py`.
+  - **Verify:** `crds_tools.py` imports clean; `interf_save.py` resolves all
+    imports (reaches its data-file open); the four bapsflib scripts compile and
+    their portable paths resolve to the real module locations. (Full data-file
+    runs deferred — no sample data in this environment.)
+  - **Deferred:** `compute_B/example.py` already uses a portable relative append
+    and `compute_B` is out of migration scope. Notebook (`.ipynb`) `sys.path`
+    cells were not edited here — they fall outside the script list and are best
+    cleaned when their experiments are next touched.
 
 - [ ] **Step 2 — Move shared library into the package.**
   Relocate `signal/plasma/viz/compute_b/tracking`; merge `lp_analysis` +

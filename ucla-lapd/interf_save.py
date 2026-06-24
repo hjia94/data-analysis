@@ -1,7 +1,3 @@
-import sys
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
-
 import numpy as np
 import time
 import os

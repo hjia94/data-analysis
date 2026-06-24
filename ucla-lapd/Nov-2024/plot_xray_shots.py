@@ -7,11 +7,9 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(_HERE)
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\read")
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\object_tracking")
+# object_tracking is not yet packaged; keep it on sys.path until Step 3 moves it.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.join(_REPO_ROOT, "object_tracking"))
 
 from data_analysis.io.scope import read_trc_data
 from read_cine import read_cine, convert_cine_to_avi, overlay_motion_frames

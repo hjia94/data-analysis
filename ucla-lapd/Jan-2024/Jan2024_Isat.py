@@ -1,6 +1,7 @@
+import os
 import sys
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
-sys.path.append(r"C:\Users\hjia9\Documents\GitHub\data-analysis\ucla-lapd")
+# read_hdf5_bapsflib is not yet packaged; keep its folder on sys.path until Step 3.
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import math
 import numpy as np
