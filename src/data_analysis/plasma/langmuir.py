@@ -25,6 +25,10 @@ from scipy.optimize import curve_fit
 from scipy import integrate, constants
 from scipy.ndimage import gaussian_filter1d
 
+# np.trapz was renamed np.trapezoid in numpy 2.0 (np.trapz deprecated).
+# Prefer the new name, fall back for numpy < 2.0.
+trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 # physical constants (from former lp_analysis.py)
 qe = constants.e          # electron charge (C)
 me = constants.electron_mass  # electron mass (kg)
@@ -290,7 +294,7 @@ def EEPF(I, V, smooth=True, plot=False):
 	Vp_ndx_1 = np.argmax(f)
 	print('Vp(old) = %.3f  Vp(new) = %.3f' %(V[Vp_ndx], V[Vp_ndx_1]))
 
-	ne = np.trapz(f[:Vp_ndx_1], Vnew[:Vp_ndx_1])	# density = area under EEPF
+	ne = trapezoid(f[:Vp_ndx_1], Vnew[:Vp_ndx_1])	# density = area under EEPF
 	print('density = %.3e' %(ne))
 
 	return Vnew[:Vp_ndx_1], f[:Vp_ndx_1], ne, Vp

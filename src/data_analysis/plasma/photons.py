@@ -25,6 +25,10 @@ Example usage:
 import numpy as np
 from scipy import signal
 
+# np.trapz was renamed np.trapezoid in numpy 2.0 (np.trapz deprecated).
+# Prefer the new name, fall back for numpy < 2.0.
+trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 from dataclasses import dataclass
 from typing import Tuple, Optional
 from numpy.typing import NDArray
@@ -223,7 +227,7 @@ class Photons:
             # Create pulse object
             pulse = PhotonPulse(
                 time=self.tarr_ds[peak_idx],
-                area=np.trapz(pulse_amplitudes, pulse_times),
+                area=trapezoid(pulse_amplitudes, pulse_times),
                 width=pulse_times[-1] - pulse_times[0]
             )
             self.pulses.append(pulse)
