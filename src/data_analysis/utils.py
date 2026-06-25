@@ -1,10 +1,9 @@
 '''
 General utility functions used across data analysis: file discovery and .npy I/O.
 
-Signal-processing helpers now live in ``data_analysis.signal.core`` and the
-photon-pulse classes in ``data_analysis.plasma.photons``. They are re-exported
-here for backward compatibility so existing ``from data_analysis.utils import ...``
-imports keep working; new code should import from those modules directly.
+Signal-processing helpers live in ``data_analysis.signal.core`` and the
+photon-pulse classes in ``data_analysis.plasma.photons`` -- import them from
+there directly.
 
 Author: Jia Han
 Date: 2024-02-28
@@ -20,24 +19,6 @@ import os
 import re
 import numpy as np
 from datetime import datetime
-
-# Backward-compatibility re-exports (moved in Step 2 of the reorg).
-from data_analysis.signal.core import (  # noqa: F401
-    first_and_last_zerocrossings,
-    find_all_zerocrossing,
-    fast_gaussian_filter,
-    low_pass_filter,
-    butter_bandpass,
-    rolling_baseline,
-    hl_envelopes_idx,
-    analyze_downsample_options,
-    calculate_stft,
-)
-from data_analysis.plasma.photons import (  # noqa: F401
-    PhotonPulse,
-    Photons,
-    counts_per_bin,
-)
 
 
 def get_files_in_folder(folder_path, modified_date=None, omit_keyword=None):

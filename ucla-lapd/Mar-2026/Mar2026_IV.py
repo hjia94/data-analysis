@@ -1,9 +1,3 @@
-from multiprocessing import process
-import os
-import sys
-# read_hdf5_bapsflib is not yet packaged; keep its folder on sys.path until Step 3.
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import time
 import datetime
 import os
@@ -13,7 +7,7 @@ import h5py
 from bapsflib import lapd
 import matplotlib.pyplot as plt
 
-import read_hdf5_bapsflib as rh
+from data_analysis.io._backends import bapsflib_daq as rh
 from data_analysis.plasma.langmuir import find_sweep_indices, reshape_IV, analyze_IV_safe
 
 from scipy.ndimage import gaussian_filter1d

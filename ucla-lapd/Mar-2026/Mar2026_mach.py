@@ -35,7 +35,6 @@ Author: Data analysis pipeline for LAPD Mar2026 campaign
 import nt
 import os
 import re
-import sys
 from jellyfish import nysiis
 import numpy as np
 import copy
@@ -44,12 +43,9 @@ from scipy import signal, ndimage, interpolate
 from scipy.fft import next_fast_len
 from tqdm import tqdm
 
-# read_hdf5_bapsflib is not yet packaged; keep its folder on sys.path until Step 3.
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from bapsflib import lapd
-import read_hdf5_bapsflib as rh
-from data_analysis.utils import butter_bandpass
+from data_analysis.io._backends import bapsflib_daq as rh
+from data_analysis.signal.core import butter_bandpass
 
 
 def get_mach_data(f, adc, npos, nshot):

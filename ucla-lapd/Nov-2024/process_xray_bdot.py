@@ -26,7 +26,8 @@ sys.path.append(os.path.join(_REPO_ROOT, "object_tracking"))
 
 
 from data_analysis.io.scope import read_trc_data
-from data_analysis.utils import Photons, calculate_stft, counts_per_bin
+from data_analysis.signal.core import calculate_stft
+from data_analysis.plasma.photons import Photons, counts_per_bin
 from data_analysis.viz.plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
 from read_cine import read_cine, convert_cine_to_avi
 from track_object import track_object, get_chamber, get_vel_freefall, get_pos_freefall
