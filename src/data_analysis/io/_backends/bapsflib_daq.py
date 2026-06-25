@@ -297,27 +297,22 @@ def read_data(f, board_num, chan_num, index_arr=None, adc='SIS 3302', control=No
 def unpack_datarun_sequence(f):
 
 	sequence_list = f['Raw data + config/Data run sequence/Data run sequence']
-	message_array = np.array([])
-	status_array = np.array([])
-	timestamp_array = np.array([])
+	messages = []
+	statuses = []
+	timestamps = []
 
-	for i in range(len(sequence_list)):
-		output = sequence_list[i]
-
+	for output in sequence_list:
 		# Extract elements
-		message = output[0].decode('utf-8')  # Convert bytes to string
-		message_array = np.append(message_array, message)
+		messages.append(output[0].decode('utf-8'))  # Convert bytes to string
 
 		# Don't know what output[1] is
 		# output[2] seems to be an index
 
-		status = output[3].decode('utf-8')  # Convert bytes to string
-		status_array = np.append(status_array, status)
+		statuses.append(output[3].decode('utf-8'))  # Convert bytes to string
 
-		timestamp = output[4]
-		timestamp_array = np.append(timestamp_array, timestamp)
+		timestamps.append(output[4])
 
-	return message_array, status_array, timestamp_array
+	return np.array(messages), np.array(statuses), np.array(timestamps)
 
 def read_magnetic_field(f):
 
