@@ -21,13 +21,11 @@ This file combines common functions from read_3Ddata.py, read_field_3D.py, read_
 Functions:
 - check_input_file(ifn): Checks if the input file exists.
 - save_to_file(sfn, data): Saves data to a file.
-- read_save_file(sfn): Reads data from a saved file.
 - print_data_objects(file_path): Prints the objects present in an HDF5 file.
 - channel_description(chnum, h5obj): Returns the description of a channel in an HDF5 file.
 - get_header(file_path, print_info=False): Retrieves the header information from an HDF5 file.
 - read_channel_data(file_path, chnum, print_description=False): Reads the data of a specific channel from an HDF5 file.
 - read_position_data(file_path): Reads the position data from an HDF5 file.
-- generate_time_array(h, data): Generates a time array based on the header information and data length.
 
 Author: Jia Han (with GitHub Copilot)
 Created on: 2024-02-20
@@ -53,7 +51,7 @@ def check_input_file(ifn):
     RuntimeError: If the input file does not exist.
     """
     if not os.path.isfile(ifn):
-        raise RuntimeError('input file "', ifn, '" not found', sep='')
+        raise RuntimeError(f'input file "{ifn}" not found')
 
 def save_to_file(sfn, data):
     """
@@ -65,20 +63,6 @@ def save_to_file(sfn, data):
     """
     np.save(sfn, data)
     print("Saved to file", sfn)
-
-def read_save_file(sfn):
-    """
-    Reads data from a saved file.
-
-    Parameters:
-    sfn (str): The path to the saved file.
-
-    Returns:
-    numpy.ndarray: The data read from the file.
-    """
-    sfn = os.path.splitext(ifn)[0] + ".cache.npy"
-    if os.path.isfile(sfn):
-        return np.load(sfn)
 
 #======================================================================================
 #======================================================================================
@@ -197,18 +181,3 @@ def read_position_data(file_path):
         zpos = f["Control/Positions/positions_setup_array"].attrs['zpos']
 
     return pos_array, xpos, ypos, zpos
-
-def generate_time_array(h, data):
-    """
-    Generates a time array based on the header information and data length.
-
-    Parameters:
-    h (LeCroy_Scope_Header): The header object.
-    data (numpy.ndarray): The data array.
-
-    Returns:
-    numpy.ndarray: The time array.
-    """
-    dt = h.dt
-    t0 = h.t0
-    time_array = np.arrange(t0, t0 + len(data)*dt, dt)

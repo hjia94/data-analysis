@@ -209,14 +209,8 @@ def read_digitizer_config(f):
 		else:
 			print('SIS configuration not found?')
 
-	attributes = grp.attrs
-	for attr_name in attributes:
-		if 'board types' in attr_name:
-			bt_ls = attributes[attr_name]
-		if 'config indices' in attr_name:
-			ci_ls = attributes[attr_name]
-
 	digi_dict = {}
+	adc = None
 	for k in grp.keys():
 		if 'configurations' in k:
 			if '3302' in k:
@@ -234,6 +228,13 @@ def read_digitizer_config(f):
 					ch_des = grp[k].attrs['Data type '+ str(i)]
 					print('Channel %i -- active: %s -- description: %s' % (i, enabled, ch_des.decode('utf-8')))
 
+	if adc is None:
+		raise NotImplementedError(
+			"read_digitizer_config only supports SIS 3302; no SIS 3302 "
+			"configuration was found in '/Raw data + config/SIS crate'. "
+			"This crate likely uses a different ADC, which is not yet implemented."
+		)
+
 	return adc, digi_dict
 
 def read_data(f, board_num, chan_num, index_arr=None, adc='SIS 3302', control=None):
@@ -250,7 +251,7 @@ def read_data(f, board_num, chan_num, index_arr=None, adc='SIS 3302', control=No
 	else:
 		print('More than one configuration found. The first one has been selected.')
 
-	if index_arr == None:
+	if index_arr is None:
 		data = f.read_data(board_num,chan_num, add_controls=control, digitizer=digitizer, adc=adc, config_name=config_name)
 	else:
 		data = f.read_data(board_num,chan_num, index=index_arr, add_controls=control, digitizer=digitizer, adc=adc, config_name=config_name)
