@@ -23,6 +23,7 @@ sys.path = [repo_root, f"{repo_root}/read", f"{repo_root}/object_tracking"] + sy
 
 from object_tracking.generate_tracking import count_y_passes  # noqa: E402
 from data_analysis.plasma.photons import counts_per_bin  # noqa: E402
+from data_analysis.io.paths import output_path as resolve_output_path  # noqa: E402
 from tracking_utils import (  # noqa: E402
     analysis_key_for_basename,
     evaluate_y_cm,
@@ -281,7 +282,8 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
         return
 
     if save_mp4:
-        return _save_xray_animation(points, os.path.join(base_dir, output_filename), fps)
+        out = resolve_output_path("movies", os.path.basename(base_dir), output_filename)
+        return _save_xray_animation(points, str(out), fps)
     _show_xray_animation(points)
 
 
@@ -391,7 +393,8 @@ def plot_trajectory_coverage(base_dir, frame_step_ms=1.0, y_min=-50, y_max=50,
                                    y_bin_width, t_min, t_max)
 
     if save_mp4:
-        return _save_coverage_animation(grid, os.path.join(base_dir, output_filename), fps)
+        out = resolve_output_path("movies", os.path.basename(base_dir), output_filename)
+        return _save_coverage_animation(grid, str(out), fps)
     _show_coverage_animation(grid)
 
 

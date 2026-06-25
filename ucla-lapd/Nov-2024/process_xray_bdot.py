@@ -26,6 +26,7 @@ sys.path.append(os.path.join(_REPO_ROOT, "object_tracking"))
 
 
 from data_analysis.io.scope import read_trc_data
+from data_analysis.io.paths import output_path
 from data_analysis.signal.core import calculate_stft
 from data_analysis.plasma.photons import Photons, counts_per_bin
 from data_analysis.viz.plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
@@ -670,8 +671,7 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
     plt.tight_layout()
     
     # Save the figure as PNG
-    ifn = r"C:\Users\hjia9\Documents\lapd\e-ring\diagnostic_fig"
-    output_filename = os.path.join(ifn, "averaged_bdot_stft.png")
+    output_filename = output_path("figures", "bdot", "averaged_bdot_stft.png")
     fig.savefig(output_filename, dpi=300, bbox_inches='tight')
     print(f"Saved averaged Bdot STFT plot to: {output_filename}")
     
