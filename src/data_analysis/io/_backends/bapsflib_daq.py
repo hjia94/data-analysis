@@ -40,7 +40,10 @@ def read_probe_motion_6k(f):
 
 	# Check number of probes
 	if len(pr_ls) == 0:
-		print('No probe found.')
+		raise ValueError(
+			"No 6K Compumotor probe found in this file; cannot read probe "
+			"motion."
+		)
 	elif len(pr_ls) == 1:
 		print('One probe found.')
 	elif len(pr_ls) == 2:
@@ -130,7 +133,10 @@ def read_probe_motion_bmotion(f):
 
     # Check number of probes
     if len(unique_probes) == 0:
-        print('No probe found.')
+        raise ValueError(
+            "bmotion group is present but contains no probes; cannot read "
+            "probe motion."
+        )
     elif len(unique_probes) == 1:
         print('One probe found.')
     elif len(unique_probes) == 2:
