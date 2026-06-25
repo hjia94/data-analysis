@@ -14,9 +14,14 @@ the trajectory of a tungsten ball falling through the chamber.
 
 ## Typical workflow
 
+> **Note:** these modules have moved into the package. The reader is now
+> `data_analysis.io.cine` and the tracking analysis is `data_analysis.tracking.*`.
+> The old `read_cine` / `track_object` import names still work via back-compat
+> shims during the transition; new code should import the canonical paths below.
+
 ```python
-from read_cine import read_cine, overlay_motion_frames
-from track_object import track_object
+from data_analysis.io.cine import read_cine, overlay_motion_frames
+from data_analysis.tracking.track_object import track_object_per_frame
 
 cine_path = "path/to/movie.cine"
 avi_path  = cine_path.replace(".cine", ".avi")
@@ -25,7 +30,7 @@ avi_path  = cine_path.replace(".cine", ".avi")
 tarr, frarr, dt = read_cine(cine_path)
 
 # 2. Track the ball across the whole video (chamber is hardcoded; see below)
-result = track_object(avi_path)
+result = track_object_per_frame(avi_path)
 positions, frame_numbers, min_ydiff_frame = result   # tuple-unpackable
 
 # 3. Visualize the trail around any frame

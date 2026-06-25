@@ -31,7 +31,82 @@ from data_analysis.signal.core import calculate_stft
 from data_analysis.plasma.photons import Photons, counts_per_bin
 from data_analysis.viz.plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
 from read_cine import read_cine, convert_cine_to_avi
-from track_object import track_object, get_chamber, get_vel_freefall, get_pos_freefall
+from track_object import track_object_per_frame, get_chamber
+from scipy.constants import g
+
+#===========================================================================================================
+# Analytic free-fall position model. These helpers used to live in
+# track_object.py but were removed in ea3641f (replaced there by the
+# measured-trajectory get_ball_position_at_time). This Nov-2024 analysis still
+# uses the original g*t^2 kinematic model, so they are restored verbatim here,
+# local to their only consumer, rather than resurrected in the package.
+
+def get_vel_freefall(h=1):
+    '''Return magnitude of velocity (m/s) after free falling from rest through height h (m).
+
+    Uses v = sqrt(2 * g * h). Direction (sign) is handled by caller.
+    '''
+    return np.sqrt(2 * g * h)
+
+def get_pos_freefall(t, t0, height=0.5, chamber_radius=None, enforce_bounds=False):
+    '''Return vertical position relative to chamber center with physically correct kinematics.
+
+    Coordinate system:
+        - Upward is positive.
+        - y = 0 when the ball passes the chamber center at time t0.
+        - y > 0 above center; y < 0 below center.
+
+    Parameter height:
+        Distance (m) the ball has ALREADY fallen before reaching the center.
+        Therefore the release-from-rest position was at y = +height at time
+        t_release = t0 - fall_time, where fall_time = sqrt(2*height/g).
+
+    Piecewise model implemented:
+        if t < t_release: y = height (still at rest prior to drop)
+        else:            y = -0.5 * g * dt * (dt + 2*fall_time)
+
+    Optional bounds:
+        If chamber_radius is provided and enforce_bounds is True, y is clipped to
+        [-chamber_radius, chamber_radius]. No bounce dynamics are modeled.
+
+    Args:
+        t (float | array-like): Evaluation time(s) [s].
+        t0 (float): Time of center crossing [s].
+        height (float): Distance already fallen before center [m] (>=0).
+        chamber_radius (float | None): Physical radius of chamber [m] for validation.
+        enforce_bounds (bool): Clip output to physical bounds if chamber_radius given.
+
+    Returns:
+        float or np.ndarray: Position(s) y relative to center.
+    '''
+    # Basic validation (minimal per project guideline)
+    if height < 0:
+        raise ValueError("height must be non-negative")
+    if chamber_radius is not None and height > chamber_radius:
+        raise ValueError("height exceeds chamber_radius; inconsistent initial condition")
+
+    t_arr = np.asarray(t, dtype=float)
+    if height == 0:
+        # Degenerate case: ball at center at t0 with zero prior fall.
+        y = np.zeros_like(t_arr)
+        if np.isscalar(t):
+            return float(y)
+        return y
+
+    v0 = get_vel_freefall(height)  # sqrt(2*g*height)
+    fall_time = v0 / g             # sqrt(2*height/g)
+    dt = t_arr - t0
+    # Motion-phase formula
+    y_motion = -0.5 * g * dt * (dt + 2 * fall_time)
+    # Prior to release: constant height
+    y = np.where(dt < -fall_time, height, y_motion)
+
+    if chamber_radius is not None and enforce_bounds:
+        y = np.clip(y, -chamber_radius, chamber_radius)
+
+    if np.isscalar(t):
+        return float(y)
+    return y
 
 #===========================================================================================================
 plt.rcParams.update({'font.size': 18})
@@ -244,7 +319,11 @@ def process_video(file_number, base_dir):
             convert_cine_to_avi(frarr, avi_path)
 
         print(f"Tracking object in {avi_path}")
-        parr, frarr, cf = track_object(avi_path)
+        # track_object(avi) was renamed to track_object_per_frame() and now returns a
+        # TrackingResult; the old return's center-crossing frame index `cf` is its
+        # `min_ydiff_frame` (frame where the ball is vertically closest to center).
+        tracking_result = track_object_per_frame(avi_path)
+        cf = tracking_result.min_ydiff_frame
         ct = tarr[cf]
         
         # Add new result to the dictionary and save

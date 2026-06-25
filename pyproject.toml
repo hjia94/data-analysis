@@ -24,6 +24,11 @@ scope = ["lapd-daq @ git+https://github.com/hjia94/LAPD_DAQ.git"]
 # plot_shots_grid) need screeninfo for multi-monitor figure placement. Pure
 # plotting works without it; install the `gui` extra for the display helpers.
 gui = ["screeninfo"]
+# Object tracking and .cine video reading (data_analysis.tracking.track_object,
+# data_analysis.io.cine) import cv2 at module load. Headless OpenCV is used since
+# no cv2 GUI calls (imshow/waitKey) are made. Install the `tracking` extra to use
+# those modules: `pip install ".[tracking]"`.
+tracking = ["opencv-python-headless"]
 
 [tool.setuptools.dynamic]
 version = { attr = "data_analysis.__version__" }
