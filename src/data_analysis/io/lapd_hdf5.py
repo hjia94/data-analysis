@@ -25,12 +25,25 @@ time (the read-and-analyze / process-and-discard pattern); ``shots()`` lists the
 available shot numbers. The pydaq backend supports these natively via
 ``scope_io``; the bapsflib backend maps ``shots`` onto its ``index`` argument;
 the legacy 2018 layout has no per-shot concept and raises ``NotImplementedError``.
+
+Output normalization (Step 3b)
+------------------------------
+``channel()`` and ``time_array()`` return a single schema regardless of
+provenance, so cross-provenance analysis code no longer branches on
+``.backend``: ``channel()`` -> ``(stack, tarr)`` with ``stack`` a
+``(nshot, nsamples)`` float array and ``tarr`` the 1-D time axis; ``time_array()``
+-> ``tarr`` for every backend. Each backend's native reader output is adapted at
+the seam (the readers themselves are unchanged from Step 3 -- wrap, don't
+rewrite). ``positions()`` and ``info()`` remain backend-native: the three
+position layouts share no clean common schema, so a forced unification would be
+lossy; see ``positions()``.
 """
 
 import os
 from contextlib import contextmanager
 
 import h5py
+import numpy as np
 
 # Backend modules and scope_io are imported lazily inside the methods that need
 # them (see _backend_module / _open_pydaq_scope): bapsflib_daq pulls in bapsflib
@@ -100,10 +113,11 @@ def open_lapd(path):
 class LapdRun:
     """A single LAPD data run behind one interface, regardless of provenance.
 
-    Construct via :func:`open_lapd`. Methods delegate to the selected backend and
-    return that backend's native output (documented per method); where a backend
-    lacks a concept the method raises ``NotImplementedError``. No HDF5 handle is
-    held between calls.
+    Construct via :func:`open_lapd`. ``channel()`` and ``time_array()`` return a
+    normalized schema for every backend (see the module docstring);
+    ``positions()`` and ``info()`` return each backend's native output (documented
+    per method). Where a backend lacks a concept the method raises
+    ``NotImplementedError``. No HDF5 handle is held between calls.
     """
 
     def __init__(self, path, backend):
@@ -239,29 +253,39 @@ class LapdRun:
     # ----------------------------------------------------------------------- #
     # channel data
     # ----------------------------------------------------------------------- #
-    def channel(self, name, shots=None, scope_name=None, **kwargs):
-        """Read channel data.
+    @staticmethod
+    def _tarr(nsamples, dt, t0):
+        """Build the uniform 1-D time axis from sample count + sampling (dt, t0)."""
+        return np.arange(nsamples) * dt + t0
 
-        Backend-specific ``name``/return (native, preserved from the old readers):
+    def channel(self, name, shots=None, scope_name=None, **kwargs):
+        """Read channel data, normalized to ``(stack, tarr)`` for every backend.
+
+        ``stack`` is a ``(nshot, nsamples)`` float array (one row per shot) and
+        ``tarr`` is the matching 1-D time axis. The backend reader output is
+        adapted to this schema at the seam; ``name`` is still backend-specific:
 
         - pydaq: ``name`` is the scope channel name (e.g. ``'C2'``). ``shots`` may
           be ``None`` (all shots in the scope group), an int (one shot), or a
-          sequence/slice (that subset). Returns ``(stack, dt, t0)`` where ``stack``
-          is ``(nshot, nsamples)`` float64 (one row per shot; NaN rows for
-          unreadable shots), via ``scope.read_hdf5_scope_channel_shots``.
+          sequence/slice (that subset). The reader returns ``(stack, dt, t0)``
+          (``stack`` is ``(nshot, nsamples)`` float64, NaN rows for unreadable
+          shots); ``tarr`` is built from ``dt``/``t0``.
         - bapsflib: ``name`` must be ``(board_num, chan_num)``; ``shots`` maps to
-          the digitizer ``index`` argument (None = all). Returns ``(data, tarr)``
-          from ``read_data`` (``data`` is a bapsflib structured array).
+          the digitizer ``index`` argument (None = all). The reader returns
+          ``(data, tarr)`` with ``data['signal']`` the ``(nshot, nsamples)`` stack.
         - legacy: ``name`` is the channel number; ``shots`` is not supported (the
-          2018 layout stores a single trace per channel). Returns the channel
-          ndarray from ``read_channel_data``.
+          2018 layout stores one trace per channel). The single trace is returned
+          as a 1-row stack with ``tarr`` built from the channel header.
         """
         if self._backend == "pydaq":
             with self._open_pydaq_scope(scope_name) as (f, scope_name, scope):
                 shot_numbers = self._pydaq_shot_list(f, scope_name, shots, scope)
-                return scope.read_hdf5_scope_channel_shots(
+                stack, dt, t0 = scope.read_hdf5_scope_channel_shots(
                     f, scope_name, name, shot_numbers, **kwargs
                 )
+            if stack is None:
+                return None, None
+            return stack, self._tarr(stack.shape[1], dt, t0)
 
         if self._backend == "bapsflib":
             bapsflib_daq = self._bapsflib_daq()
@@ -272,11 +296,12 @@ class LapdRun:
                     "bapsflib channel() expects name=(board_num, chan_num); "
                     f"got {name!r}."
                 )
-            return self._with_bapsflib_file(
+            data, tarr = self._with_bapsflib_file(
                 lambda f: bapsflib_daq.read_data(
                     f, board_num, chan_num, index_arr=shots, **kwargs
                 )
             )
+            return data["signal"], tarr
 
         # legacy
         if shots is not None:
@@ -284,24 +309,36 @@ class LapdRun:
                 "shot selection is not available for legacy 2018 files (one trace "
                 "per channel); call channel(name) without shots."
             )
-        return self._legacy_2018().read_channel_data(self.path, name, **kwargs)
+        legacy = self._legacy_2018()
+        trace = legacy.read_channel_data(self.path, name, **kwargs)
+        if trace is None:
+            return None, None
+        stack = np.atleast_2d(trace)
+        header = legacy.get_header(self.path)
+        return stack, self._tarr(stack.shape[1], header.dt, header.t0)
 
     def iter_shots(self, name, shots=None, scope_name=None):
         """Yield one shot of ``name`` at a time (LAPD_DAQ pydaq files only).
 
         For the process-and-discard pattern on large runs: each iteration yields
-        ``(shot_number, data, dt, t0)`` for one shot via
-        ``scope.read_hdf5_scope_data``, without loading the whole run. The HDF5
-        handle is held only for the duration of iteration and closed when the
-        generator is exhausted or closed.
+        ``(shot_number, data, tarr)`` for one shot via ``scope.read_hdf5_scope_data``,
+        without loading the whole run. ``data`` is the 1-D trace and ``tarr`` the
+        matching time axis (built from the shot's ``dt``/``t0``), consistent with
+        :meth:`channel`. The HDF5 handle is held only for the duration of
+        iteration and closed when the generator is exhausted or closed.
 
         Raises ``NotImplementedError`` for bapsflib/legacy files.
         """
         self._require_pydaq("iter_shots()")
+        tarr = None
         with self._open_pydaq_scope(scope_name) as (f, scope_name, scope):
             for s in self._pydaq_shot_list(f, scope_name, shots, scope):
                 data, dt, t0 = scope.read_hdf5_scope_data(f, scope_name, name, s)
-                yield s, data, dt, t0
+                # dt/t0/length are the same for every shot; build tarr once and
+                # reuse it (only rebuild if a shot's length differs).
+                if tarr is None or len(tarr) != len(data):
+                    tarr = self._tarr(len(data), dt, t0)
+                yield s, data, tarr
 
     @staticmethod
     def _pydaq_shot_list(f, scope_name, shots, scope):
@@ -317,19 +354,28 @@ class LapdRun:
     # ----------------------------------------------------------------------- #
     # time array
     # ----------------------------------------------------------------------- #
-    def time_array(self, scope_name=None):
-        """Return the time array for the run.
+    def time_array(self, name=None, scope_name=None):
+        """Return the 1-D time axis ``tarr`` for the run (uniform across backends).
 
-        - pydaq: ``scope.read_hdf5_scope_tarr(f, scope_name)``
-        - bapsflib / legacy: not derivable without a channel read; raises
-          ``NotImplementedError`` (use ``channel()``, which returns the time array
-          or the scaling needed to build it, preserving the old readers' behavior).
+        - pydaq: read directly from the scope group via
+          ``scope.read_hdf5_scope_tarr`` -- ``name`` is not needed.
+        - bapsflib / legacy: the axis length comes from a channel, so pass
+          ``name`` (bapsflib ``(board_num, chan_num)``, legacy channel number).
+          This reads a single shot via :meth:`channel` (not the whole run) and
+          returns just its ``tarr``.
         """
         if self._backend == "pydaq":
             with self._open_pydaq_scope(scope_name) as (f, scope_name, scope):
                 return scope.read_hdf5_scope_tarr(f, scope_name)
-        raise NotImplementedError(
-            f"time_array() requires a channel read for {self._backend!r} files; "
-            f"the time array comes back from channel() (bapsflib: (data, tarr); "
-            f"legacy: build from get_header())."
-        )
+        if name is None:
+            raise TypeError(
+                f"time_array() needs a channel name for {self._backend!r} files "
+                "(the axis length comes from a channel read); pass name= "
+                "(bapsflib: (board_num, chan_num); legacy: channel number)."
+            )
+        # Read only the first shot: the time axis is shot-independent, so there's
+        # no need to pull the whole (nshot, nsamples) stack just to discard it.
+        # (legacy ignores shots -- one trace per channel -- so this is a no-op there.)
+        shots = None if self._backend == "legacy" else 0
+        _, tarr = self.channel(name, shots=shots)
+        return tarr
