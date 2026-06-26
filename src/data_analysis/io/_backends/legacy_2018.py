@@ -6,8 +6,8 @@ Reads the 2018-2020 process-plasma LAPD HDF5 layout (Acquisition/LeCroy_scope).
 Moved here unchanged in Step 3 of the reorg (wrap, don't rewrite) except the
 LeCroy_Scope_Header import, which is now the in-package relative import; the
 unified ``open_lapd``/``LapdRun`` dispatcher in ``data_analysis.io.lapd_hdf5``
-delegates to these functions. ``ucla-processing/read_hdf5.py`` is now a thin
-re-export shim over this module so existing imports keep working.
+delegates to these functions. Reached only through ``open_lapd``; not a public
+import.
 
 File Description:
 This file contains the implementation of functions for reading and processing data from an HDF5 file.

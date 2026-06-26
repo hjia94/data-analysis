@@ -3,9 +3,7 @@
 
 Moved here in Step 2 of the reorg (wrap, don't rewrite): a file reader belongs
 under ``data_analysis.io``, grouped by data shape. The body is unchanged; only
-intra-repo callers' import path changes. ``object_tracking/read_cine.py`` is now
-a thin re-export shim so existing ``from read_cine import ...`` code keeps working
-during the transition.
+callers' import path changed, to ``from data_analysis.io.cine import ...``.
 """
 
 import cv2

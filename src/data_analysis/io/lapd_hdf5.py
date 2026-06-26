@@ -4,9 +4,8 @@ Three provenances of LAPD HDF5 file are parsed by three backends under
 :mod:`data_analysis.io._backends` (moved near-verbatim from the old readers in
 Step 3 of the reorg). :func:`open_lapd` sniffs the file's group signatures,
 picks a backend, and returns a :class:`LapdRun` that delegates to that backend's
-existing functions. Behavior is preserved (wrap, don't rewrite); the old reader
-module names still resolve through thin shims, so existing experiment code is
-unaffected.
+existing functions. Behavior is preserved (wrap, don't rewrite); experiment code
+imports the readers from :mod:`data_analysis.io`.
 
 Handle lifecycle
 ----------------
