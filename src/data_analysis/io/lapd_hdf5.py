@@ -50,7 +50,7 @@ import numpy as np
 # + matplotlib, so importing them eagerly would load those heavy deps even when
 # opening a pydaq/legacy file. Matches the lazy-import convention in io/scope.py.
 
-__all__ = ["open_lapd", "LapdRun", "detect_backend"]
+__all__ = ["open_lapd", "LapdRun", "LapdSession", "detect_backend"]
 
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +93,18 @@ def _has_shot_groups(item):
     return isinstance(item, h5py.Group) and any(
         name.startswith("shot_") for name in item
     )
+
+
+def _read_bapsflib_positions(f, bapsflib_daq):
+    """Probe motion from an open bapsflib ``lapd.File``: bmotion, else 6K.
+
+    Shared by ``LapdRun.positions()`` (which opens/closes the file around it) and
+    ``LapdSession.positions()`` (which already holds the file open).
+    """
+    result = bapsflib_daq.read_probe_motion_bmotion(f)
+    if result is None:
+        result = bapsflib_daq.read_probe_motion_6k(f)
+    return result
 
 
 def open_lapd(path):
@@ -148,12 +160,41 @@ class LapdRun:
         from ._backends import legacy_2018
         return legacy_2018
 
-    # -- bapsflib needs an open lapd.File; open/close it around a callback ---- #
-    def _with_bapsflib_file(self, fn):
+    # ----------------------------------------------------------------------- #
+    # held-handle session (bapsflib): one open file, many reads
+    # ----------------------------------------------------------------------- #
+    @contextmanager
+    def session(self):
+        """Yield a :class:`LapdSession` holding one open handle for many reads.
+
+        This is the single bapsflib open/close path: the per-call ``LapdRun``
+        methods (``info``/``digitizer_config``/``positions``/``channel``) each open
+        a fresh one-read session and close it (the no-lingering-handle rule). Some
+        experiment routines instead open the file once and make several reads
+        against that one handle -- read the digitizer config, the probe motion,
+        then a handful of channels -- which is what calling ``session()`` directly
+        gives them, without leaking a handle: the file is open only for the
+        ``with`` body and closed on exit. ::
+
+            with open_lapd(path).session() as sess:
+                adc, digi = sess.digitizer_config()
+                pos, *_ = sess.positions()
+                data, tarr = sess.read_data(4, 5, index_arr=slice(0, n), adc=adc)
+
+        Only the bapsflib backend holds a handle (its ``lapd.File`` is the
+        expensive open); pydaq/legacy reads are per-path and cheap, so calling
+        ``session()`` on those backends raises ``NotImplementedError`` -- use the
+        :class:`LapdRun` methods directly.
+        """
+        if self._backend != "bapsflib":
+            raise NotImplementedError(
+                f"session() holds one open bapsflib handle; the {self._backend!r} "
+                "backend reads per-path, so call the LapdRun methods directly."
+            )
         from bapsflib import lapd
         f = lapd.File(self.path)
         try:
-            return fn(f)
+            yield LapdSession(f, self._bapsflib_daq())
         finally:
             f.close()
 
@@ -181,10 +222,38 @@ class LapdRun:
         original readers.
         """
         if self._backend == "bapsflib":
-            return self._with_bapsflib_file(self._bapsflib_daq().show_info)
+            with self.session() as sess:
+                return sess.info()
         if self._backend == "pydaq":
             return self._pydaq().print_info(self.path)
         return self._legacy_2018().print_data_objects(self.path)
+
+    def digitizer_config(self):
+        """Read the digitizer configuration (bapsflib files only).
+
+        Delegates to ``read_digitizer_config`` -> ``(adc, digi_dict)`` where
+        ``adc`` is the ADC name (e.g. ``'SIS 3302'``) and ``digi_dict`` maps board
+        number to the list of enabled channels. Pass the returned ``adc`` to
+        :meth:`channel` (``adc=``) to read from that digitizer. Raises
+        ``NotImplementedError`` for the pydaq/legacy backends, which have no SIS
+        crate config.
+        """
+        if self._backend != "bapsflib":
+            raise NotImplementedError(
+                f"digitizer_config() reads a bapsflib SIS-crate config; this is a "
+                f"{self._backend!r} file."
+            )
+        with self.session() as sess:
+            return sess.digitizer_config()
+
+    def scope_channels(self, scope_name):
+        """Print channel descriptions for a scope group (pydaq files only).
+
+        Delegates to ``print_scope_channels(path, scope_name)``. Raises
+        ``NotImplementedError`` for bapsflib/legacy files.
+        """
+        self._require_pydaq("scope_channels()")
+        return self._pydaq().print_scope_channels(self.path, scope_name)
 
     # ----------------------------------------------------------------------- #
     # positions
@@ -202,13 +271,8 @@ class LapdRun:
         - legacy: ``read_position_data(path)`` -> ``(pos_array, xpos, ypos, zpos)``
         """
         if self._backend == "bapsflib":
-            bapsflib_daq = self._bapsflib_daq()
-            def _read(f):
-                result = bapsflib_daq.read_probe_motion_bmotion(f)
-                if result is None:
-                    result = bapsflib_daq.read_probe_motion_6k(f)
-                return result
-            return self._with_bapsflib_file(_read)
+            with self.session() as sess:
+                return sess.positions()
         if self._backend == "pydaq":
             return self._pydaq().read_positions(self.path, **kwargs)
         return self._legacy_2018().read_position_data(self.path)
@@ -288,7 +352,6 @@ class LapdRun:
             return stack, self._tarr(stack.shape[1], dt, t0)
 
         if self._backend == "bapsflib":
-            bapsflib_daq = self._bapsflib_daq()
             try:
                 board_num, chan_num = name
             except (TypeError, ValueError):
@@ -296,11 +359,10 @@ class LapdRun:
                     "bapsflib channel() expects name=(board_num, chan_num); "
                     f"got {name!r}."
                 )
-            data, tarr = self._with_bapsflib_file(
-                lambda f: bapsflib_daq.read_data(
-                    f, board_num, chan_num, index_arr=shots, **kwargs
+            with self.session() as sess:
+                data, tarr = sess.read_data(
+                    board_num, chan_num, index_arr=shots, **kwargs
                 )
-            )
             return data["signal"], tarr
 
         # legacy
@@ -379,3 +441,71 @@ class LapdRun:
         shots = None if self._backend == "legacy" else 0
         _, tarr = self.channel(name, shots=shots)
         return tarr
+
+
+# --------------------------------------------------------------------------- #
+# held-handle session (bapsflib only)
+# --------------------------------------------------------------------------- #
+class LapdSession:
+    """One open bapsflib ``lapd.File`` exposing the per-handle reads as methods.
+
+    Obtained from :meth:`LapdRun.session`; valid only inside that ``with`` block
+    (the handle is closed on exit). The methods mirror the bapsflib backend
+    functions with the ``f`` argument dropped, and return each reader's **native**
+    output unchanged (not the normalized ``(stack, tarr)`` of
+    :meth:`LapdRun.channel`) so routines that open the file once and make several
+    reads against that handle migrate with no behavior change::
+
+        rh.read_data(f, board, chan, ...)  ->  sess.read_data(board, chan, ...)
+    """
+
+    def __init__(self, f, bapsflib_daq):
+        self._f = f
+        self._b = bapsflib_daq
+
+    @property
+    def file(self):
+        """The held ``bapsflib.lapd.File`` -- escape hatch for raw bapsflib calls
+        (e.g. ``sess.file.read_msi('Discharge')``) the wrapper methods don't cover.
+        Valid only inside the ``session()`` ``with`` block."""
+        return self._f
+
+    def info(self):
+        """``show_info(f)`` -- print a human-readable overview."""
+        return self._b.show_info(self._f)
+
+    def digitizer_config(self):
+        """``read_digitizer_config(f)`` -> ``(adc, digi_dict)``."""
+        return self._b.read_digitizer_config(self._f)
+
+    def positions(self):
+        """Probe motion via ``read_probe_motion_bmotion`` (falls back to
+        ``read_probe_motion_6k`` if there is no bmotion group) ->
+        ``(pos_array, xpos, ypos, zpos, npos, nshot)``."""
+        return _read_bapsflib_positions(self._f, self._b)
+
+    def positions_6k(self):
+        """``read_probe_motion_6k(f)`` -- force the 6K reader (no bmotion fallback)."""
+        return self._b.read_probe_motion_6k(self._f)
+
+    def read_data(self, board_num, chan_num, index_arr=None, adc="SIS 3302",
+                  control=None):
+        """``read_data(f, ...)`` -> native ``(data, tarr)`` (``data['signal']`` is
+        the ``(nshot, nsamples)`` stack). ``index_arr``/``adc``/``control`` are
+        passed through unchanged."""
+        return self._b.read_data(
+            self._f, board_num, chan_num, index_arr=index_arr, adc=adc,
+            control=control,
+        )
+
+    def datarun_sequence(self):
+        """``unpack_datarun_sequence(f)`` -> ``(messages, statuses, timestamps)``."""
+        return self._b.unpack_datarun_sequence(self._f)
+
+    def magnetic_field(self):
+        """``read_magnetic_field(f)`` -> ``(Bdata, port_ls)``."""
+        return self._b.read_magnetic_field(self._f)
+
+    def interferometer_old(self):
+        """``read_interferometer_old(f)`` -> ``(int_arr, int_tarr, den_factor)``."""
+        return self._b.read_interferometer_old(self._f)

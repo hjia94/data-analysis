@@ -43,12 +43,11 @@ from scipy import signal, ndimage, interpolate
 from scipy.fft import next_fast_len
 from tqdm import tqdm
 
-from bapsflib import lapd
-from data_analysis.io._backends import bapsflib_daq as rh
+from data_analysis.io import open_lapd
 from data_analysis.signal.core import butter_bandpass
 
 
-def get_mach_data(f, adc, npos, nshot):
+def get_mach_data(sess, adc, npos, nshot):
     """
     Extract Mach probe voltage data from HDF5 file.
     
@@ -61,8 +60,8 @@ def get_mach_data(f, adc, npos, nshot):
     
     Parameters
     ----------
-    f : bapsflib.lapd.File
-        Open HDF5 file object
+    sess : data_analysis.io.LapdSession
+        Open LAPD session (held bapsflib handle)
     adc : str
         ADC identifier for the digitizer
     npos : int
@@ -85,19 +84,19 @@ def get_mach_data(f, adc, npos, nshot):
             Y- component voltage array, shape (npos, nshot, n_time_samples)
     """
     # Board 1, Channel 1: Vx+ component
-    data, tarr = rh.read_data(f, 1, 1, index_arr=slice(npos * nshot), adc=adc)
+    data, tarr = sess.read_data(1, 1, index_arr=slice(npos * nshot), adc=adc)
     Vxp_arr = data['signal'].reshape((npos, nshot, -1))
-    
+
     # Board 1, Channel 2: Vx- component
-    data, tarr = rh.read_data(f, 1, 2, index_arr=slice(npos * nshot), adc=adc)
+    data, tarr = sess.read_data(1, 2, index_arr=slice(npos * nshot), adc=adc)
     Vxm_arr = data['signal'].reshape((npos, nshot, -1))
-    
+
     # Board 4, Channel 6: Vy component
-    data, tarr = rh.read_data(f, 4, 6, index_arr=slice(npos * nshot), adc=adc)
+    data, tarr = sess.read_data(4, 6, index_arr=slice(npos * nshot), adc=adc)
     Vyp_arr = data['signal'].reshape((npos, nshot, -1))
-    
+
     # Board 4, Channel 7: Vy- component
-    data, tarr = rh.read_data(f, 4, 7, index_arr=slice(npos * nshot), adc=adc)
+    data, tarr = sess.read_data(4, 7, index_arr=slice(npos * nshot), adc=adc)
     Vym_arr = data['signal'].reshape((npos, nshot, -1))
     
     return tarr, Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr
@@ -118,13 +117,13 @@ def save_mach_data(ifn, save_path):
     save_path : str
         Output NPZ file path where data will be saved
     """
-    with lapd.File(ifn) as f:
-        adc, digi_dict = rh.read_digitizer_config(f)
-        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_bmotion(f)
+    with open_lapd(ifn).session() as sess:
+        adc, digi_dict = sess.digitizer_config()
+        pos_dict, xpos, ypos, zpos, npos, nshot = sess.positions()
         key = list(pos_dict.keys())[0]
         pos_array = pos_dict[key]
-        
-        tarr, Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr = get_mach_data(f, adc, npos, nshot)
+
+        tarr, Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr = get_mach_data(sess, adc, npos, nshot)
         print('Applying Gaussian smoothing to raw data')
         for i in tqdm(range(npos), desc="Smoothing (Gaussian)"):
             Vxp_arr[i] = ndimage.gaussian_filter1d(Vxp_arr[i], sigma=50, axis=-1)

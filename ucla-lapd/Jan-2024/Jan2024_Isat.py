@@ -2,10 +2,9 @@ import os
 import math
 import numpy as np
 import h5py
-from bapsflib import lapd
 import matplotlib.pyplot as plt
 
-from data_analysis.io._backends import bapsflib_daq as rh
+from data_analysis.io import open_lapd
 from data_analysis.plasma.langmuir import analyze_IV, derivative
 
 from scipy.ndimage import gaussian_filter1d, gaussian_filter
@@ -15,11 +14,11 @@ from scipy.signal import find_peaks, savgol_filter
 colors = ['r', 'g', 'b', 'c', 'm', 'y', 'k']
 #===============================================================================================================================================
 def init_read(ifn):
-    with lapd.File(ifn) as f:
-        adc, digi_dict = rh.read_digitizer_config(f)
-        pos_array, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_6k(f)
-        Bdata, port_ls = rh.read_magnetic_field(f)
-        int_arr, int_tarr, d_phi = rh.read_interferometer_old(f)
+    with open_lapd(ifn).session() as sess:
+        adc, digi_dict = sess.digitizer_config()
+        pos_array, xpos, ypos, zpos, npos, nshot = sess.positions_6k()
+        Bdata, port_ls = sess.magnetic_field()
+        int_arr, int_tarr, d_phi = sess.interferometer_old()
 
         plt.figure(figsize=(10, 5))
         plt.plot(port_ls, Bdata)
@@ -43,7 +42,7 @@ def init_read(ifn):
     return adc, digi_dict, pos_array, xpos, ypos, zpos, npos, nshot, int_arr, int_tarr
 
 
-def get_Isat_ratio(f, adc, digi_dict, npos, nshot, area, chL=1, chR=2, R=[10,10], bg_tind=60000):
+def get_Isat_ratio(sess, adc, digi_dict, npos, nshot, area, chL=1, chR=2, R=[10,10], bg_tind=60000):
     '''
     Inputs:
     npos    -- number of positions
@@ -70,12 +69,12 @@ def get_Isat_ratio(f, adc, digi_dict, npos, nshot, area, chL=1, chR=2, R=[10,10]
             st_ind = npos*nshot
             A = area['M1']
 
-        data, tarr = rh.read_data(f, bd, chL, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=control)
+        data, tarr = sess.read_data(bd, chL, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=control)
         Isat_UL = data['signal'].reshape((npos, nshot, -1)) / (R[bd-1] * A[0])
         Isat_UL = Isat_UL - np.mean(Isat_UL[:,:,bg_tind:], axis=-1, keepdims=True) # subtract background
         Isat_UL = gaussian_filter1d(Isat_UL, 25, axis=-1)
 
-        data, tarr = rh.read_data(f, bd, chR, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=control)
+        data, tarr = sess.read_data(bd, chR, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=control)
         Isat_UR = data['signal'].reshape((npos, nshot, -1)) / (R[bd-1] * A[1])
         Isat_UR = Isat_UR - np.mean(Isat_UR[:,:,bg_tind:], axis=-1, keepdims=True) # subtract background
         Isat_UR = gaussian_filter1d(Isat_UR, 25, axis=-1)
@@ -86,12 +85,12 @@ def get_Isat_ratio(f, adc, digi_dict, npos, nshot, area, chL=1, chR=2, R=[10,10]
 
     return tarr, Isat_UL_dic, Isat_UR_dic, I_ratio
 #===============================================================================================================================================
-def get_IV(f, adc, npos, nshot, area, cal_fac = [1, 1]):
+def get_IV(sess, adc, npos, nshot, area, cal_fac = [1, 1]):
 
     IsweepL_dic = {}
     IsweepR_dic = {}
-    
-    data, tarr = rh.read_data(f, 1, 7, index_arr=slice(0,npos*nshot), adc=adc, control=[('6K Compumotor', 1)])
+
+    data, tarr = sess.read_data(1, 7, index_arr=slice(0,npos*nshot), adc=adc, control=[('6K Compumotor', 1)])
     Vsweep = data['signal'].reshape((npos, nshot, -1)) * 100 # X50 probe
     Vsweep = np.mean(Vsweep, axis=1)
 
@@ -103,9 +102,9 @@ def get_IV(f, adc, npos, nshot, area, cal_fac = [1, 1]):
             st_ind = npos*nshot
             A = area['M1']
 
-        data, tarr = rh.read_data(f, bd, 3, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=[('6K Compumotor', 1)])
+        data, tarr = sess.read_data(bd, 3, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=[('6K Compumotor', 1)])
         IsweepL_dic[bd] = data['signal'].reshape((npos, nshot, -1)) * cal_fac[bd-1] / A[2]
-        data, tarr = rh.read_data(f, bd, 4, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=[('6K Compumotor', 1)])
+        data, tarr = sess.read_data(bd, 4, index_arr=slice(st_ind,st_ind+npos*nshot), adc=adc, control=[('6K Compumotor', 1)])
         IsweepR_dic[bd] = data['signal'].reshape((npos, nshot, -1)) * cal_fac[bd-1] / A[3]
 
     return tarr, Vsweep, IsweepL_dic, IsweepR_dic
@@ -215,8 +214,8 @@ if __name__ == '__main__':
     
     adc, xpos, ypos, zpos, npos, nshot, int_arr, int_tarr = init_read(ifn)
 
-    with lapd.File(ifn) as f:
-        tarr, Vsweep, Isweep_UL_dic, Isweep_UR_dic = get_IV(f, adc, npos, nshot, pr_area, cal_fac = [2, 1])
+    with open_lapd(ifn).session() as sess:
+        tarr, Vsweep, Isweep_UL_dic, Isweep_UR_dic = get_IV(sess, adc, npos, nshot, pr_area, cal_fac = [2, 1])
 
     plt.figure()
     plt.plot(Vsweep[10])

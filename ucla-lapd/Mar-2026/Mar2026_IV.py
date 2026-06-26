@@ -4,10 +4,9 @@ import os
 import copy
 import numpy as np
 import h5py
-from bapsflib import lapd
 import matplotlib.pyplot as plt
 
-from data_analysis.io._backends import bapsflib_daq as rh
+from data_analysis.io import open_lapd
 from data_analysis.plasma.langmuir import find_sweep_indices, reshape_IV, analyze_IV_safe
 
 from scipy.ndimage import gaussian_filter1d
@@ -16,22 +15,22 @@ Aprobe = 2e-3 # 2X1mm probe, in cm^2
 cal_fac = [1, 1] # Ratio between L and R side of probe
 #===============================================================================================================================================
 
-def get_IV_arr(f, adc, npos, nshot):
-    
+def get_IV_arr(sess, adc, npos, nshot):
+
     '''
     Board 4:
-    Chan4:LP I, p32 L 
+    Chan4:LP I, p32 L
     Chan5:LP V, p32 L
     Chan6:LP I, p32 R
     Chan7:LP V, p32 R
     '''
-    data, tarr = rh.read_data(f, 4, 5, index_arr=slice(0,npos*nshot), adc=adc)
+    data, tarr = sess.read_data(4, 5, index_arr=slice(0,npos*nshot), adc=adc)
     Vsweep = data['signal'].reshape((npos, nshot, -1)) * 100 # X50 probe
     Vsweep = np.mean(Vsweep, axis=1)
 
-    data, tarr = rh.read_data(f, 4, 4, index_arr=slice(npos*nshot), adc=adc)
+    data, tarr = sess.read_data(4, 4, index_arr=slice(npos*nshot), adc=adc)
     IsweepL_arr = data['signal'].reshape((npos, nshot, -1)) / (7.2 * Aprobe) # number is resistor value
-    data, tarr = rh.read_data(f, 4, 6, index_arr=slice(npos*nshot), adc=adc)
+    data, tarr = sess.read_data(4, 6, index_arr=slice(npos*nshot), adc=adc)
     IsweepR_arr = data['signal'].reshape((npos, nshot, -1)) / (25 * Aprobe) # number is resistor value
 
     return tarr, Vsweep, IsweepL_arr, IsweepR_arr
@@ -45,14 +44,14 @@ def get_IV_arr(f, adc, npos, nshot):
 
 def save_IV_data(ifn, save_path):
 
-    with lapd.File(ifn) as f:
-        
-        adc, digi_dict = rh.read_digitizer_config(f)
+    with open_lapd(ifn).session() as sess:
+
+        adc, digi_dict = sess.digitizer_config()
         # read probe motion into arrays
-        pos_array, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_bmotion(f)
+        pos_array, xpos, ypos, zpos, npos, nshot = sess.positions()
 
         # read probe signal into arrays
-        tarr, Vswp_arr, IswpL_arr, IswpR_arr = get_IV_arr(f, adc, npos, nshot)
+        tarr, Vswp_arr, IswpL_arr, IswpR_arr = get_IV_arr(sess, adc, npos, nshot)
 
         # Reshape arrays to include swept traces only
         start_t_ls, stop_t_ls = find_sweep_indices(Vswp_arr[0], padding=10)
@@ -378,8 +377,8 @@ if __name__ == '__main__':
     Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls = load_data(data_dir, run_num)
     
     # Plot result
-    with lapd.File(ifn) as f:
-        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_bmotion(f)
+    with open_lapd(ifn).session() as sess:
+        pos_dict, xpos, ypos, zpos, npos, nshot = sess.positions()
 
     # plot_result(ne_arr, xpos, ypos, t_ls)
     tndx_list = [0, 7, 15, 20]

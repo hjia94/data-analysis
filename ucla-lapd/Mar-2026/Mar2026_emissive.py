@@ -28,12 +28,11 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import copy
-from bapsflib import lapd
 
-from data_analysis.io._backends import bapsflib_daq as rh
+from data_analysis.io import open_lapd
 
 
-def get_emissive_data(f, adc, npos, nshot):
+def get_emissive_data(sess, adc, npos, nshot):
     """
     Extract emissive probe voltage data from HDF5 file.
     
@@ -42,8 +41,8 @@ def get_emissive_data(f, adc, npos, nshot):
     
     Parameters
     ----------
-    f : bapsflib.lapd.File
-        Open HDF5 file object
+    sess : data_analysis.io.LapdSession
+        Open LAPD session (held bapsflib handle)
     adc : str
         ADC identifier for the digitizer
     npos : int
@@ -62,7 +61,7 @@ def get_emissive_data(f, adc, npos, nshot):
     """
     # Board 4, Channel 8: Emissive probe voltage signal
     # Raw ADC counts are scaled by 40 to convert to voltage
-    data, tarr = rh.read_data(f, 4, 8, index_arr=slice(npos*nshot), adc=adc)
+    data, tarr = sess.read_data(4, 8, index_arr=slice(npos*nshot), adc=adc)
     Vp_arr = data['signal'].reshape((npos, nshot, -1)) * 40  # Scale factor: 40
     
     return tarr, Vp_arr
@@ -83,20 +82,20 @@ def save_emissive_data(ifn, save_path):
     save_path : str
         Output NPZ file path where data will be saved
     """
-    with lapd.File(ifn) as f:
+    with open_lapd(ifn).session() as sess:
         # Display file information
-        rh.show_info(f)
-        
+        sess.info()
+
         # Read digitizer configuration
-        adc, digi_dict = rh.read_digitizer_config(f)
-        
+        adc, digi_dict = sess.digitizer_config()
+
         # Read probe motion (spatial positions)
-        pos_dict, xpos, ypos, zpos, npos, nshot = rh.read_probe_motion_bmotion(f)
+        pos_dict, xpos, ypos, zpos, npos, nshot = sess.positions()
         key = list(pos_dict.keys())[0]
         pos_array = pos_dict[key]
-        
+
         # Read emissive probe voltage data
-        tarr, Vp_arr = get_emissive_data(f, adc, npos, nshot)
+        tarr, Vp_arr = get_emissive_data(sess, adc, npos, nshot)
     
     # Save all data to NPZ file for later use
     np.savez(save_path, Vp_arr=Vp_arr, tarr=tarr, xpos=xpos, ypos=ypos, 
