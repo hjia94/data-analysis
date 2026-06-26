@@ -2,18 +2,13 @@
 
 import os
 import re
-import sys
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-# object_tracking is not yet packaged; keep it on sys.path until Step 3 moves it.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(os.path.join(_REPO_ROOT, "object_tracking"))
-
 from data_analysis.io.scope import read_trc_data
-from read_cine import read_cine, convert_cine_to_avi, overlay_motion_frames
-from track_object import track_object_per_frame, get_chamber
+from data_analysis.io.cine import read_cine, convert_cine_to_avi, overlay_motion_frames
+from data_analysis.tracking.track_object import track_object_per_frame, get_chamber
 
 
 PATH_A = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30\background\C3--E-ring-p30-z13-x200-xray--00003.trc"

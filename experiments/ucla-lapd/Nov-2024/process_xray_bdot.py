@@ -9,7 +9,6 @@ Each figure will contain 4 subplots:
 """
 
 import os
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
@@ -20,18 +19,14 @@ import cv2
 import re
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
-# object_tracking is not yet packaged; keep it on sys.path until Step 3 moves it.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(os.path.join(_REPO_ROOT, "object_tracking"))
-
 
 from data_analysis.io.scope import read_trc_data
 from data_analysis.io.paths import output_path
 from data_analysis.signal.core import calculate_stft
 from data_analysis.plasma.photons import Photons, counts_per_bin
 from data_analysis.viz.plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
-from read_cine import read_cine, convert_cine_to_avi
-from track_object import track_object_per_frame, get_chamber
+from data_analysis.io.cine import read_cine, convert_cine_to_avi
+from data_analysis.tracking.track_object import track_object_per_frame, get_chamber
 from scipy.constants import g
 
 #===========================================================================================================

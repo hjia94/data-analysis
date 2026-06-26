@@ -79,3 +79,6 @@ temp/
 *plan.md
 *PLAN.md
 *Plan.md
+
+# Local bapsflib clone (vendored for testing only, never committed)
+bapsflib/

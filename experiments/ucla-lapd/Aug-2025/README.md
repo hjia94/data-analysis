@@ -14,7 +14,7 @@ position-resolved count maps.
 
 | File | Purpose |
 |------|---------|
-| [lapd_io.py](lapd_io.py)             | Shared HDF5 readers, `log()` helper, and `sys.path` bootstrap so `read/` and `data_analysis_utils.py` resolve from the repo root. |
+| [lapd_io.py](lapd_io.py)             | Shared scope-data helpers and `log()` for the Aug-2025 scripts; reads come from the installed `data_analysis` package. |
 | [process_xray.py](process_xray.py)   | Per-shot X-ray pulse detection across every shot in an HDF5 file (or every file in a directory); persists to `analysis_results.npy`. |
 | [process_bdot.py](process_bdot.py)   | Per-shot STFT of every Bdot channel and shot-average across the file. |
 | [plot_bdot.py](plot_bdot.py)         | Plots the shot-averaged STFT spectrograms (LogNorm, `jet`, one panel per channel). |
@@ -52,9 +52,8 @@ single HDF5 file — it is independent of the X-ray / camera pipeline.
 | `get_xray_data(result, scope_name='xrayscope')` | Return `(tarr, C2)` for the X-ray scope. |
 | `get_bdot_data(f, result, scope_name='bdotscope')` | Return `(tarr, channels_dict, descriptions_dict)`. |
 
-Importing the module also rewrites `sys.path` so `read.read_scope_data`
-and `data_analysis_utils` import without a manual `sys.path.append` in the
-caller.
+Scope channel descriptions are read via `data_analysis.io.scope` from the
+installed `data_analysis` package, so no `sys.path` manipulation is needed.
 
 ## `process_xray.py`
 

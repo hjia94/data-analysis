@@ -9,8 +9,6 @@ Interactive animation of X-ray counts vs position using bar charts.
 
 # Standard libs
 import os
-import sys
-
 
 # Third-party
 import numpy as np
@@ -18,13 +16,10 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 from matplotlib.animation import FuncAnimation
 
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__ if '__file__' in globals() else os.getcwd()), '../..'))
-sys.path = [repo_root, f"{repo_root}/read", f"{repo_root}/object_tracking"] + sys.path
-
-from object_tracking.generate_tracking import count_y_passes  # noqa: E402
-from data_analysis.plasma.photons import counts_per_bin  # noqa: E402
-from data_analysis.io.paths import output_path as resolve_output_path  # noqa: E402
-from tracking_utils import (  # noqa: E402
+from data_analysis.tracking.generate_tracking import count_y_passes
+from data_analysis.plasma.photons import counts_per_bin
+from data_analysis.io.paths import output_path as resolve_output_path
+from tracking_utils import (
     analysis_key_for_basename,
     evaluate_y_cm,
     iter_valid_tracking,
@@ -263,7 +258,7 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
     Interactive animation of counts vs position over time.
     - X-axis: position r_arr (cm)  — distance below chamber centre, evaluated
       from the per-shot line fit saved by
-      object_tracking/generate_tracking.py:track_shots (sparse tracker).
+      data_analysis.tracking.generate_tracking:track_shots (sparse tracker).
     - Y-axis: X-ray counts
     - Frames: time slices defined by bin_centers (ms)
     - frame_step_ms: time step between frames (default: 1.0 ms)
@@ -273,7 +268,7 @@ def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
 
     Inputs (npy files): analysis_results.npy and tracking_result.npy must
     already exist in base_dir — produced by process_xray.py and
-    object_tracking/generate_tracking.py respectively. The tracking entries
+    data_analysis.tracking.generate_tracking respectively. The tracking entries
     carry their own cm_per_px so no calibration file is loaded here.
     """
     points = _assemble_xray_points(base_dir, uw_start, frame_step_ms)
