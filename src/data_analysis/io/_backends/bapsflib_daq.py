@@ -325,7 +325,14 @@ def read_magnetic_field(f):
 
 def read_interferometer_old(f):
 	'''
-	TODO: need to fix returned density factor
+	Read the legacy MSI 'Interferometer array' group.
+
+	CAVEAT (reorg item B4, unresolved): the returned ``den_factor`` (line-
+	averaged density scaling, ``n_bar_L * 1e-2``) has NOT been physics-verified
+	-- the shape/units of the density factor are suspect and need a domain
+	review before this is treated as a calibrated reader. Use ``int_arr`` /
+	``int_tarr`` as-is, but do not rely on ``den_factor`` for absolute density
+	without checking it against a known shot first.
 	'''
 	int_data = f.read_msi('Interferometer array')
 	int_dic = int_data.info

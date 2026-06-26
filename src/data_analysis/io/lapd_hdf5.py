@@ -507,5 +507,10 @@ class LapdSession:
         return self._b.read_magnetic_field(self._f)
 
     def interferometer_old(self):
-        """``read_interferometer_old(f)`` -> ``(int_arr, int_tarr, den_factor)``."""
+        """``read_interferometer_old(f)`` -> ``(int_arr, int_tarr, den_factor)``.
+
+        CAVEAT (reorg item B4, unresolved): ``den_factor`` is not physics-verified
+        -- treat it as provisional, not a calibrated density scaling. See the
+        backend function's docstring.
+        """
         return self._b.read_interferometer_old(self._f)
