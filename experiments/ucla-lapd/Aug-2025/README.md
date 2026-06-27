@@ -7,17 +7,20 @@ P21 / P23 / P24.
 
 These scripts process the per-shot scope HDF5 files (one file per port-day)
 and combine the X-ray pulse train with the high-speed-camera trajectory
-fits produced by [object_tracking](../../object_tracking/) into time- and
-position-resolved count maps.
+fits produced by `data_analysis.tracking` into time- and position-resolved
+count maps.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | [lapd_io.py](lapd_io.py)             | Shared scope-data helpers and `log()` for the Aug-2025 scripts; reads come from the installed `data_analysis` package. |
+| [tracking_utils.py](tracking_utils.py) | Shared tracking-dict helpers (`analysis_key`, validity checks, `y_cm` evaluation) used by the X-ray scripts. |
 | [process_xray.py](process_xray.py)   | Per-shot X-ray pulse detection across every shot in an HDF5 file (or every file in a directory); persists to `analysis_results.npy`. |
+| [export_xray_npz.py](export_xray_npz.py) | Export filtered, baseline-subtracted per-shot X-ray traces joined with ball y-position to `.npz` bundles for external sharing. |
 | [process_bdot.py](process_bdot.py)   | Per-shot STFT of every Bdot channel and shot-average across the file. |
 | [plot_bdot.py](plot_bdot.py)         | Plots the shot-averaged STFT spectrograms (LogNorm, `jet`, one panel per channel). |
+| [compare_bdot_groups.py](compare_bdot_groups.py) | Compare averaged Bdot STFT between tracked-vs-untracked shot groups in P24. |
 | [movie_maker.py](movie_maker.py)     | Interactive / MP4 animation of normalized X-ray counts vs. y-position over time, plus a trajectory-coverage diagnostic movie. |
 | [lp.ipynb](lp.ipynb)                 | Working notebook for the XY-plane Langmuir probe sweep (`lpscope` C1 / C2 → averaged Isat profiles). |
 | [test.ipynb](test.ipynb)             | Single-shot sandbox for tuning the X-ray `Photons` detector parameters. |
@@ -30,7 +33,7 @@ position-resolved count maps.
 from process_xray import batch_process_xray
 batch_process_xray(r"E:\AUG2025\P23")
 
-# 2. Run the camera tracker (in object_tracking/) to produce
+# 2. Run the camera tracker (data_analysis.tracking) to produce
 #    tracking_result.npy alongside analysis_results.npy. The tracker stores
 #    the per-shot sparse line fit (y_intercept, y_slope) and cm_per_px.
 #    See ../../object_tracking/README.md.
@@ -59,7 +62,7 @@ installed `data_analysis` package, so no `sys.path` manipulation is needed.
 
 | Function | Description |
 |----------|-------------|
-| `process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False)` | Run `data_analysis_utils.Photons` on a single shot; return `(pulse_times, pulse_amplitudes)`. |
+| `process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False)` | Run `data_analysis.plasma.photons.Photons` on a single shot; return `(pulse_times, pulse_amplitudes)`. |
 | `xray_wt_cam(base_dir, fn)` | Process every shot in one HDF5 file. Skips shots already present in `analysis_results.npy` so the call is incremental. Default detector params: `threshold=[10, 80]`, `min_ts=0.8e-6 s`, `distance_mult=0.1`. |
 | `batch_process_xray(base_dir)` | Run `xray_wt_cam` on every `.hdf5` in `base_dir`. |
 
@@ -75,7 +78,7 @@ where `file_prefix` is the leading two characters of the HDF5 filename
 
 | Function | Description |
 |----------|-------------|
-| `calculate_bdot_stft(tarr, bdot_data, freq_bins=1000, overlap_fraction=0.05, freq_min=200e6, freq_max=2000e6)` | Hanning-windowed STFT (via `data_analysis_utils.calculate_stft`) for each channel; returns `(stft_time, freq, {channel: matrix})`. |
+| `calculate_bdot_stft(tarr, bdot_data, freq_bins=1000, overlap_fraction=0.05, freq_min=200e6, freq_max=2000e6)` | Hanning-windowed STFT (via `data_analysis.signal.core.calculate_stft`) for each channel; returns `(stft_time, freq, {channel: matrix})`. |
 | `process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq_max=1000e6, plot=True)` | Iterate every shot in the file, compute per-shot STFT, then average across shots per channel. Plots when `plot=True`. |
 | `plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr)` | One LogNorm `jet` panel per channel, x in ms, y in MHz. |
 | `_floor_for_lognorm(matrix)` | Replace non-positive entries with the smallest positive value so `LogNorm` does not blow up. |
@@ -91,7 +94,7 @@ the camera trajectory fits.
 
 | Function | Description |
 |----------|-------------|
-| `plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output_filename='animation.mp4', fps=10)` | Read `analysis_results.npy` and `tracking_result.npy` from `base_dir`, normalize each shot's counts by the number of valid trajectories crossing the same `(y, t)` bin (`object_tracking.generate_tracking.count_y_passes`), and animate the bar chart. Interactive (slider + Play/Pause) by default; saves an MP4 when `save_mp4=True`. |
+| `plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output_filename='animation.mp4', fps=10)` | Read `analysis_results.npy` and `tracking_result.npy` from `base_dir`, normalize each shot's counts by the number of valid trajectories crossing the same `(y, t)` bin (`data_analysis.tracking.generate_tracking.count_y_passes`), and animate the bar chart. Interactive (slider + Play/Pause) by default; saves an MP4 when `save_mp4=True`. |
 | `plot_trajectory_coverage(base_dir, frame_step_ms=1.0, y_min=-50, y_max=50, y_bin_width=0.5, t_min=0, t_max=45, save_mp4=False, ...)` | Coverage diagnostic — animates valid-trajectory crossings per `(y, t)` bin without using any X-ray data. Useful for spotting under-sampled regions before interpreting `plot_result`. |
 | `draw_frame`, `draw_coverage_frame`, `Player` | Internal helpers for the two animations. |
 
@@ -100,7 +103,7 @@ the camera trajectory fits.
 | File | Producer |
 |------|----------|
 | `analysis_results.npy` | [process_xray.py](process_xray.py) — per-shot pulse train. |
-| `tracking_result.npy`  | [object_tracking/generate_tracking.py](../../object_tracking/generate_tracking.py) — sparse line fit `y_px(t)` per shot, plus `cm_per_px`. |
+| `tracking_result.npy`  | `data_analysis.tracking.generate_tracking` — sparse line fit `y_px(t)` per shot, plus `cm_per_px`. |
 
 The two files must live in the same `base_dir`. The tracking entries
 carry their own `cm_per_px`, so no calibration file is loaded here.
@@ -123,7 +126,7 @@ matches the August 2025 timing.
 
 If a `tracking_result.npy` predates the sparse-fit schema (`y_slope` /
 `y_intercept` / `n_points`), the loader raises `TypeError` rather than
-silently falling back. Re-run `object_tracking/generate_tracking.py` to
+silently falling back. Re-run `data_analysis.tracking.generate_tracking` to
 rebuild it.
 
 ## `lp.ipynb`
@@ -157,14 +160,19 @@ Set the path in cell 2 (`ifn = ...`) before running.
 ## Dependencies
 
 Beyond the standard scientific stack (`numpy`, `scipy`, `matplotlib`,
-`h5py`), this folder pulls in three sibling modules from the repo root:
+`h5py`), these scripts import from the installed `data_analysis` package:
 
-- [read/read_scope_data.py](../../read/read_scope_data.py) — HDF5 scope
-  readers.
-- [data_analysis_utils.py](../../data_analysis_utils.py) — `Photons`,
-  `calculate_stft`, `counts_per_bin`.
-- [object_tracking/generate_tracking.py](../../object_tracking/generate_tracking.py)
-  — `count_y_passes` and the producer of `tracking_result.npy`.
+- `data_analysis.io.scope` — `read_hdf5_all_scopes_channels`,
+  `read_scope_channel_descriptions` (HDF5 scope readers).
+- `data_analysis.plasma.photons` — `Photons`, `counts_per_bin`.
+- `data_analysis.signal.core` — `calculate_stft`.
+- `data_analysis.tracking.generate_tracking` — `count_y_passes` and the
+  producer of `tracking_result.npy`.
+- `data_analysis.io.paths` — `output_path` for figure/output locations.
+
+Install the package in editable mode (`pip install -e .` from the repo root)
+so these imports resolve. The same-dir helpers `lapd_io.py` and
+`tracking_utils.py` are imported directly by their Aug-2025 siblings.
 
 Saving an MP4 from `movie_maker.py` additionally requires `ffmpeg` on
 `PATH`.

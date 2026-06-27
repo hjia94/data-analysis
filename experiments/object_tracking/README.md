@@ -1,27 +1,32 @@
 # object_tracking
 
-Tools for reading high-speed camera (.cine / .avi) recordings and tracking
-the trajectory of a tungsten ball falling through the chamber.
+High-speed-camera analysis for the falling-tungsten-ball experiment: read a
+`.cine` / `.avi` recording and track the ball's trajectory through the chamber.
 
-## Files
+The code now lives in the installed `data_analysis` package — this folder keeps
+only the working notebook:
 
 | File | Purpose |
 |------|---------|
-| `read_cine.py`        | Parse `.cine` binary files, convert to `.avi`, and visualize motion. |
-| `track_object.py`     | Track the ball through a video using a hardcoded chamber location. |
-| `evaluate_freefall_accuracy.py` | Per-shot gravity-fit calibration and the cross-port chamber/gravity ratio plot. |
-| `fastcam_test.ipynb`  | Working notebook with end-to-end examples. |
+| `fastcam_test.ipynb` | End-to-end examples: load frames, track the ball, overlay motion, calibrate. |
+
+## Where the code moved
+
+| Old flat module | Canonical import |
+|-----------------|------------------|
+| `read_cine.py` | `data_analysis.io.cine` |
+| `track_object.py` | `data_analysis.tracking.track_object` |
+| `generate_tracking.py` | `data_analysis.tracking.generate_tracking` |
+| `evaluate_freefall_accuracy.py` | `data_analysis.tracking.evaluate_freefall_accuracy` |
+
+The old top-level import names (`from read_cine import ...`, etc.) were retired
+in the package reorg — import from the canonical paths above.
 
 ## Typical workflow
 
-> **Note:** these modules have moved into the package. The reader is now
-> `data_analysis.io.cine` and the tracking analysis is `data_analysis.tracking.*`.
-> The old `read_cine` / `track_object` import names still work via back-compat
-> shims during the transition; new code should import the canonical paths below.
-
 ```python
 from data_analysis.io.cine import read_cine, overlay_motion_frames
-from data_analysis.tracking.track_object import track_object_per_frame
+from data_analysis.tracking.track_object import track_object
 
 cine_path = "path/to/movie.cine"
 avi_path  = cine_path.replace(".cine", ".avi")
@@ -30,14 +35,14 @@ avi_path  = cine_path.replace(".cine", ".avi")
 tarr, frarr, dt = read_cine(cine_path)
 
 # 2. Track the ball across the whole video (chamber is hardcoded; see below)
-result = track_object_per_frame(avi_path)
-positions, frame_numbers, min_ydiff_frame = result   # tuple-unpackable
+result = track_object(avi_path)
+positions, frame_numbers, min_ydiff_frame = result   # TrackingResult is tuple-unpackable
 
 # 3. Visualize the trail around any frame
 overlay_motion_frames(frarr, center_frame=min_ydiff_frame, n_frames=30, mode="min")
 ```
 
-## `read_cine.py`
+## `data_analysis.io.cine`
 
 | Function | Description |
 |----------|-------------|
@@ -46,7 +51,7 @@ overlay_motion_frames(frarr, center_frame=min_ydiff_frame, n_frames=30, mode="mi
 | `batch_convert_cine_to_avi(base_path)` | Convert every `.cine` in a directory; skips files that already have an `.avi`. |
 | `overlay_motion_frames(frame_arr, center_frame, n_frames, mode="min", step=1, ax=None, ...)` | Stack frames in `[center-n, center+n]` into one image. `mode="min"` for dark objects on bright background, `"max"` for the inverse. `step>1` samples every Nth frame anchored on `center_frame`. Returns `(ax, overlay)`. |
 
-## `track_object.py`
+## `data_analysis.tracking.track_object`
 
 ### Chamber
 
@@ -57,7 +62,7 @@ Override only if the camera is physically remounted.
 | Function | Description |
 |----------|-------------|
 | `get_chamber()` | Returns `(CHAMBER_CX, CHAMBER_CY, CHAMBER_RADIUS) = (1121, 1113, 609)`. |
-| `chamber_cm_per_px(radius_px=CHAMBER_RADIUS)` | `18 cm / radius_px`. Lies on the chamber back-wall plane, so it does NOT equal the per-port gravity-fit cm/px (see `evaluate_freefall_accuracy.py --port-ratio`). |
+| `chamber_cm_per_px(radius_px=CHAMBER_RADIUS)` | `18 cm / radius_px`. Lies on the chamber back-wall plane, so it does NOT equal the per-port gravity-fit cm/px (see `data_analysis.tracking.evaluate_freefall_accuracy --port-ratio`). |
 
 ### Tracking
 
@@ -98,7 +103,8 @@ Used to compare tracked trajectories against ideal kinematics.
 ## Tunable parameters
 
 Detection thresholds live as module-level constants at the top of
-`track_object.py` — edit there rather than in function bodies:
+`data_analysis/tracking/track_object.py` — edit there rather than in function
+bodies:
 
 - `CHAMBER_CX`, `CHAMBER_CY`, `CHAMBER_RADIUS`, `CHAMBER_DIAMETER_CM`
 - `BALL_RADIUS_PX_RANGE`, `BALL_HOUGH_PARAMS`,
@@ -118,7 +124,7 @@ logging.basicConfig(level=logging.INFO)
 
 - **Chamber circle is in the wrong place.** The hardcoded `(1121, 1113, 609)`
   is for the current 2048×2048 camera mount. If the camera was repositioned,
-  edit the constants at the top of `track_object.py`.
+  edit the constants at the top of `data_analysis/tracking/track_object.py`.
 - **`overlay_motion_frames` chamber circle appears flipped.** The function
   uses `origin="lower"`; pass `(cx, H - cy)` for circle/scatter overlays, or
   call `ax.invert_yaxis()` and use `cy` directly.
