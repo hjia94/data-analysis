@@ -72,8 +72,9 @@ Thumbs.db
 # Files in temp directory
 temp/
 
-# Claude Code local settings / skills
+# Claude Code local settings / skills / project config
 .claude/
+CLAUDE.md
 
 # Planning docs are kept local-only (any *plan.md, case-insensitive)
 *plan.md

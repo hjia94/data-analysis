@@ -84,6 +84,32 @@ per-path and cheaply, so calling `session()` on them raises `NotImplementedError
 (e.g. per-shot reads on the 2018 layout), the method raises `NotImplementedError`
 rather than guessing.
 
+## Run-description parser & diff (pydaq)
+
+LAPD pydaq files carry a hand-written `description` root attribute (purpose prose
+→ `Operator:` → a `Setup:` block of indented bullets: plasma condition, magnetic
+field, bias, probe). Across a run series the operator usually changes **one**
+setting and re-runs, but the text drifts cosmetically (`800G` vs `800 G`, tabs vs
+spaces, `(NOT USED)` markers, typos). `_backends/run_description.py` parses that
+text into a structured, drift-tolerant form and diffs two of them.
+
+```python
+from data_analysis.io import open_lapd, compare_runs
+
+desc = open_lapd(path).description()      # -> RunDescription (sections/items)
+diff = compare_runs(path_a, path_b)       # -> RunDiff
+print(diff.summary())                     # "B-field 800G->600G"
+diff.summary(arrow="→")                   # real arrow for plot titles
+diff.changed                              # [(path, raw_a, raw_b), ...]
+```
+
+The diff compares a **normalized** form (so formatting drift is *not* a
+difference) but reports the **raw** text. `summary()` lists changed settings
+compactly, ranked most-significant first (B-field, gas, bias, density, …), and
+collapses reworded prose into a trailing `(+N/-M other)` count. `description()` /
+`compare_runs` are pydaq-only (bapsflib/legacy store metadata differently and
+raise `NotImplementedError`).
+
 ## Conventions
 
 - **Import readers from `data_analysis.io.*`** — never from a flat top-level

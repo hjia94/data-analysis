@@ -49,7 +49,7 @@ import numpy as np
 # + matplotlib, so importing them eagerly would load those heavy deps even when
 # opening a pydaq/legacy file. Matches the lazy-import convention in io/scope.py.
 
-__all__ = ["open_lapd", "LapdRun", "LapdSession", "detect_backend"]
+__all__ = ["open_lapd", "LapdRun", "LapdSession", "detect_backend", "compare_runs"]
 
 
 # --------------------------------------------------------------------------- #
@@ -116,6 +116,31 @@ def open_lapd(path):
         raise FileNotFoundError(f"LAPD HDF5 file not found: {path!r}")
     backend = detect_backend(path)
     return LapdRun(path, backend)
+
+
+def compare_runs(path_a, path_b):
+    """Diff the run descriptions of two pydaq files -> a ``run_description.RunDiff``.
+
+    Convenience for the common "what changed between these two runs?" question:
+    opens both, parses each ``description`` attribute, and classifies every setting
+    as changed / added / removed (tolerant of formatting drift -- ``800G`` and
+    ``800 G`` are *not* a difference). ``RunDiff.summary()`` renders all changes on
+    one line for a plot title or banner; ``RunDiff.changed`` is the list of
+    ``(path, raw_a, raw_b)`` tuples. The two paths' basenames are attached as the
+    diff's ``label_a``/``label_b``.
+
+    Both files must be LAPD_DAQ (pydaq) layout; a non-pydaq file raises
+    ``NotImplementedError`` (via :meth:`LapdRun.description`).
+    """
+    from ._backends import run_description
+
+    desc_a = open_lapd(path_a).description()
+    desc_b = open_lapd(path_b).description()
+    return run_description.diff_descriptions(
+        desc_a, desc_b,
+        label_a=os.path.basename(path_a),
+        label_b=os.path.basename(path_b),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -253,6 +278,20 @@ class LapdRun:
         """
         self._require_pydaq("scope_channels()")
         return self._pydaq().print_scope_channels(self.path, scope_name)
+
+    def description(self):
+        """Parse the run's ``description`` attribute (LAPD_DAQ pydaq files only).
+
+        Delegates to ``pydaq.parse_description`` -> a
+        ``run_description.RunDescription``: the hand-written description text
+        (plasma / magnetic-field / bias / probe settings) structured into sections
+        and items, tolerant of the run-to-run formatting drift. Use
+        :func:`compare_runs` to diff two of them. Raises ``NotImplementedError``
+        for bapsflib/legacy files, which store run metadata differently (read those
+        via :meth:`info`).
+        """
+        self._require_pydaq("description()")
+        return self._pydaq().parse_description(self.path)
 
     # ----------------------------------------------------------------------- #
     # positions

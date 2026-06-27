@@ -15,6 +15,7 @@ import h5py
 
 __all__ = [
 	'print_info',
+	'parse_description',
 	'print_scope_channels',
 	'read_positions',
 	'map_structure_to_text',
@@ -168,6 +169,21 @@ def print_info(ifn):
 		print("\nGroups in file:")
 		for group in f.keys():
 			print(f"  {group}")
+
+def parse_description(ifn):
+	"""Parse the file's ``description`` attribute into a ``RunDescription``.
+
+	Reads the raw text via the same ``_find_description_attribute`` path used by
+	``print_info``, then hands it to the tolerant parser in ``run_description``
+	(structured, formatting-drift-robust). Returns a
+	``run_description.RunDescription`` (empty header/sections if the file has no
+	description attribute). Imported lazily to keep the regex-heavy parser off the
+	import path of code that only reads channel data.
+	"""
+	from . import run_description
+	with h5py.File(ifn, 'r') as f:
+		_, description = _find_description_attribute(f.attrs)
+	return run_description.parse_description(description or "")
 
 def print_scope_channels(hdf5_filename, scope_name):
 	"""
