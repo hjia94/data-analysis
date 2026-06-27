@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-analysis"
+dynamic = ["version"]
+description = "LAPD data analysis library: readers organized by data shape, shared signal/plasma/viz utilities."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "h5py",
+]
+
+[project.optional-dependencies]
+# HDF5 scope reading is delegated to `scope_io` in the sibling LAPD_DAQ repo
+# (single source of truth). LAPD_DAQ now ships scope_io in its package, so this
+# extra makes the dependency explicit. For local co-development, prefer an
+# editable sibling install: `pip install -e ../LAPD_DAQ` (points at your checkout).
+scope = ["lapd-daq @ git+https://github.com/hjia94/LAPD_DAQ.git"]
+# GUI/monitor helpers in data_analysis.viz.plot_utils (select_monitor,
+# plot_shots_grid) need screeninfo for multi-monitor figure placement. Pure
+# plotting works without it; install the `gui` extra for the display helpers.
+gui = ["screeninfo"]
+# Object tracking and .cine video reading (data_analysis.tracking.track_object,
+# data_analysis.io.cine) import cv2 at module load. Headless OpenCV is used since
+# no cv2 GUI calls (imshow/waitKey) are made. Install the `tracking` extra to use
+# those modules: `pip install ".[tracking]"`.
+tracking = ["opencv-python-headless"]
+
+[tool.setuptools.dynamic]
+version = { attr = "data_analysis.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["data_analysis*"]
