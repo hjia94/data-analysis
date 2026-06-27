@@ -556,9 +556,9 @@ def plot_result_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=Non
 
     ``save_fig`` -- a path to write the figure to (PNG); ``None`` skips saving.
     ``show`` -- call ``plt.show()`` (set False for headless/batch saving only).
-    ``title`` -- figure title; ``None`` uses a generic default.  (Placeholder: the
-    caller currently passes ``run_num``; a later step will parse the experiment
-    description for a descriptive title.)
+    ``title`` -- figure title; the caller passes the run's gas-puff label (run
+    number + the puff setting, e.g. ``"01-Puff voltage 75V for 25ms"``).  ``None``
+    uses a generic default.
     """
     fig, axs = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
 
@@ -579,9 +579,11 @@ def plot_result_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=Non
         axs[2].plot(xpos, ne_arr[:, t_idx], "^-", color=color, label=label,
                     linewidth=2, markersize=5)
 
-    base_title = "Plasma Parameters along LP line scan (y = 0)"
-    axs[0].set_title(f"{title} — {base_title}" if title else base_title,
-                     fontsize=12, fontweight="bold")
+    # Title is the experiment-difference string from the caller (run number +
+    # the one changed setting vs the baseline, e.g. "01: puff voltage 75V for
+    # 25ms"); fall back to a generic label when no difference was resolved.
+    base_title = title or "Plasma Parameters along LP line scan (y = 0)"
+    axs[0].set_title(base_title, fontsize=12, fontweight="bold")
     axs[0].set_ylabel("Vp [V]", fontsize=11)
     axs[1].set_ylabel("Te [eV]", fontsize=11)
     axs[2].set_ylabel("ne [cm$^{-3}$]", fontsize=11)
@@ -611,13 +613,46 @@ def _fig_path(run_num, tip):
     return output_path("figures", "Jun2026_IV", f"{run_num}{tag}-line.png")
 
 
-def _plot_tip(data_dir, run_num, tip, tndx_list=None, save_fig=True, show=True):
+# The gas-puff setting the operator writes into the run ``description`` -- e.g.
+# "Helium backside pressure 40 Psi, Puff voltage 75V for 25ms West+East".  We
+# title each plot with the "Puff voltage ... ms" span of that line; it is the
+# knob that varies run to run.
+_PUFF_RE = re.compile(r"puff voltage.*?\d+\s*ms", re.IGNORECASE)
+
+
+def _run_title(ifn, run_num):
+    """Plot title for a run: ``"<run_num>-<puff voltage ... ms>"``.
+
+    Reads this run's own hand-written ``description`` and pulls the gas-puff span
+    (``"Puff voltage 75V for 25ms"``) -- the setting that changes run to run -- so
+    e.g. run 01 titles as ``"01-Puff voltage 75V for 25ms"``.  Returns just the
+    run number when the description has no recognizable puff line, and ``None``
+    when the file can't be read / isn't pydaq, so the plot falls back to its
+    generic title rather than being blocked by a description hiccup.
+    """
+    try:
+        desc = open_lapd(ifn).description()
+    except (OSError, ValueError, NotImplementedError, KeyError) as e:
+        print(f"  (title: could not read run description -- {e})")
+        return None
+    for sec in desc.sections.values():
+        for it in sec.items:
+            m = _PUFF_RE.search(it.raw)
+            if m:
+                return f"{run_num}-{m.group(0)}"
+    return run_num
+1
+
+def _plot_tip(data_dir, run_num, tip, ifn=None, tndx_list=None, save_fig=True,
+              show=True):
     """Load one tip's saved arrays and draw the line-scan plot (no reprocessing).
 
     Shared by :func:`process_run` and :func:`replot_run`.  ``tip`` is the
     discovered tip label, or ``"override"``/``None`` for the un-tagged single-tip
-    files.  ``save_fig`` True routes the PNG through :func:`_fig_path`; pass a path
-    to override, or False to skip saving.
+    files.  ``ifn`` (the run's HDF5 path) drives the descriptive title (just the
+    changed setting vs the baseline) via :func:`_run_title`; pass ``None`` for the
+    plot's generic title.  ``save_fig`` True routes the PNG through
+    :func:`_fig_path`; pass a path to override, or False to skip saving.
     """
     load_tip = None if tip in (None, "override") else tip
     Vp_arr, Te_arr, ne_arr, *_errs, t_ls = load_data(data_dir, run_num, tip=load_tip)
@@ -626,11 +661,10 @@ def _plot_tip(data_dir, run_num, tip, tndx_list=None, save_fig=True, show=True):
     ndx = tndx_list if tndx_list is not None else list(
         range(0, Vp_arr.shape[1], max(1, Vp_arr.shape[1] // 4)))
 
-    # Placeholder title: run_num (+ tip) so the two probes' plots are
-    # distinguishable.  A later step will swap in a parsed experiment-description
-    # title.
-    tip_lbl = "" if tip in (None, "override") else f" tip {tip}"
-    title = f"{run_num}{tip_lbl}"
+    # Title = "<run_num>-<puff voltage ... ms>" from this run's description (e.g.
+    # "01-Puff voltage 75V for 25ms"); no tip.  None -> the plot's generic
+    # default.  (Output filenames still carry run_num + tip, via _fig_path.)
+    title = _run_title(ifn, run_num) if ifn is not None else None
 
     fig_path = _fig_path(run_num, tip) if save_fig is True else (save_fig or None)
     plot_result_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, ndx,
@@ -658,7 +692,7 @@ def replot_run(ifn, tndx_list=None, save_fig=True, show=True):
 
     for tip in tips:
         print(f"Re-plotting tip {tip} from saved data...")
-        _plot_tip(data_dir, run_num, tip, tndx_list=tndx_list,
+        _plot_tip(data_dir, run_num, tip, ifn=ifn, tndx_list=tndx_list,
                   save_fig=save_fig, show=show)
 
 
@@ -705,7 +739,7 @@ def process_run(ifn, plot=True, tndx_list=None):
         process_and_save(Vswp_arr_rs, Iswp_arr_rs, plasma_path)
 
         if plot:
-            _plot_tip(data_dir, run_num, tip, tndx_list=tndx_list)
+            _plot_tip(data_dir, run_num, tip, ifn=ifn, tndx_list=tndx_list)
 
         results[tip] = (sweep_path, plasma_path)
 
@@ -716,28 +750,17 @@ def process_run(ifn, plot=True, tndx_list=None):
 #===========================================================================================================
 
 if __name__ == '__main__':
-    # ---------------------------------------------------------------------- #
-    # NOTE: the current working stage is EXPLORATION via the notebook
-    # ``Jun2026_IV_explore.ipynb`` (one position at a time).  The batch
-    # save/analyse/plot pipeline below is written but intentionally NOT run yet
-    # -- run it only after the per-position traces look correct in the notebook.
-    # ---------------------------------------------------------------------- #
 
-    # >>> SET THIS to the run you want to process <<<
-    ifn = r"D:\data\LAPD\jun2026-jia\00-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
+    ifn = r"D:\data\LAPD\jun2026-jia\02-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
     
     if not ifn:
         raise SystemExit(
             "Set `ifn` to a run file first (or use Jun2026_IV_explore.ipynb to "
             "inspect one position before running the batch pipeline).")
 
-    # process_run does all three stages (sweep-save -> batch analyze -> plot) for
-    # EVERY complete-pair tip, saving each probe to its own -tip<T>- files and the
-    # figure under $DATA_ANALYSIS_OUTPUT/figures/Jun2026_IV/.
-    # Current sign comes from the module-level I_SIGN (-1 for this experiment).
-    process_run(ifn, plot=True)
+
 
     # To revisit the plot later WITHOUT reprocessing (reads only the saved .npz):
-    #     replot_run(ifn)                       # show + re-save the figure(s)
-    #     replot_run(ifn, save_fig=False)       # just show, don't overwrite
-    #     replot_run(ifn, tndx_list=[0, 3, 6])  # pick which sweep indices to draw
+    # replot_run(ifn)                       # show + re-save the figure(s)
+    replot_run(ifn, save_fig=False, tndx_list=[-9,-7,-5,-3,-1])       # just show, don't overwrite
+
