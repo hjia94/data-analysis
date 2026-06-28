@@ -17,9 +17,10 @@ via ``run.channel(name, scope_name=...)``.  Positions come from
 shot, so there is no sweep detection / reshape -- we read the raw per-shot
 signal at one position and FFT it.
 
-Current scaling reuses the ``RESISTOR`` / ``Aprobe`` / ``I_SIGN`` knobs from
-``Jun2026_IV`` so a value here matches the IV pipeline; for fluctuation work the
-*shape* of the spectrum is what matters, not the absolute scaling.
+Current scaling reuses the ``RESISTOR`` / ``Aprobe`` knobs from ``Jun2026_IV``;
+for fluctuation work the *shape* of the spectrum is what matters, not the
+absolute scaling.  The IV pipeline's ``I_SIGN`` is irrelevant to Isat (a sign
+flip doesn't change the fluctuation spectrum), so it is not applied here.
 """
 
 import numpy as np
@@ -84,11 +85,12 @@ def get_isat_at_position(run, scope_name, chan, npos, nshot, pos_index):
     Reads only that position's ``nshot`` shots off disk (a positional shot slice,
     same ordering as ``Jun2026_IV._read_reshaped``).  Returns ``(tarr, Iarr)``
     where ``Iarr`` is ``(nshot, nsamples)`` scaled current density (via
-    ``jiv.I_SIGN`` / ``jiv.RESISTOR`` / ``jiv.Aprobe``).
+    ``jiv.RESISTOR`` / ``jiv.Aprobe``).  No sign flip is applied -- it doesn't
+    matter for Isat fluctuations.
     """
     shots = slice(pos_index * nshot, (pos_index + 1) * nshot)
     Istack, tarr = run.channel(chan, scope_name=scope_name, shots=shots)
-    Iarr = Istack[:nshot] * jiv.I_SIGN / (jiv.RESISTOR * jiv.Aprobe)
+    Iarr = Istack[:nshot] / (jiv.RESISTOR * jiv.Aprobe)
     return tarr, Iarr
 
 
