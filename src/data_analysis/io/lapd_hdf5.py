@@ -398,9 +398,11 @@ class LapdRun:
 
         - pydaq: ``name`` is the scope channel name (e.g. ``'C2'``). ``shots`` may
           be ``None`` (all shots in the scope group), an int (one shot), or a
-          sequence/slice (that subset). The reader returns ``(stack, dt, t0)``
-          (``stack`` is ``(nshot, nsamples)`` float64, NaN rows for unreadable
-          shots); ``tarr`` is built from ``dt``/``t0``.
+          sequence/slice (that subset). The reader returns the ``(nshot, nsamples)``
+          float64 ``stack`` (NaN rows for unreadable shots); ``tarr`` is the scope
+          group's stored ``time_array`` -- the ground truth shared by every channel
+          on that scope -- read directly, not rebuilt from per-channel header
+          ``dt``/``t0``.
         - bapsflib: ``name`` must be ``(board_num, chan_num)``; ``shots`` maps to
           the digitizer ``index`` argument (None = all). The reader returns
           ``(data, tarr)`` with ``data['signal']`` the ``(nshot, nsamples)`` stack.
@@ -411,12 +413,16 @@ class LapdRun:
         if self._backend == "pydaq":
             with self._open_pydaq_scope(scope_name) as (f, scope_name, scope):
                 shot_numbers = self._pydaq_shot_list(f, scope_name, shots, scope)
-                stack, dt, t0 = scope.read_hdf5_scope_channel_shots(
+                stack, _dt, _t0 = scope.read_hdf5_scope_channel_shots(
                     f, scope_name, name, shot_numbers, **kwargs
                 )
-            if stack is None:
-                return None, None
-            return stack, self._tarr(stack.shape[1], dt, t0)
+                if stack is None:
+                    return None, None
+                # The scope group stores one time_array shared by all its
+                # channels -- read it as ground truth rather than reconstructing
+                # the axis from the channel header's dt/t0.
+                tarr = scope.read_hdf5_scope_tarr(f, scope_name)
+            return stack, tarr
 
         if self._backend == "bapsflib":
             try:
@@ -452,21 +458,18 @@ class LapdRun:
         For the process-and-discard pattern on large runs: each iteration yields
         ``(shot_number, data, tarr)`` for one shot via ``scope.read_hdf5_scope_data``,
         without loading the whole run. ``data`` is the 1-D trace and ``tarr`` the
-        matching time axis (built from the shot's ``dt``/``t0``), consistent with
-        :meth:`channel`. The HDF5 handle is held only for the duration of
-        iteration and closed when the generator is exhausted or closed.
+        scope group's stored ``time_array`` (the ground truth shared by every
+        channel, read once), consistent with :meth:`channel`. The HDF5 handle is
+        held only for the duration of iteration and closed when the generator is
+        exhausted or closed.
 
         Raises ``NotImplementedError`` for bapsflib/legacy files.
         """
         self._require_pydaq("iter_shots()")
-        tarr = None
         with self._open_pydaq_scope(scope_name) as (f, scope_name, scope):
+            tarr = scope.read_hdf5_scope_tarr(f, scope_name)
             for s in self._pydaq_shot_list(f, scope_name, shots, scope):
-                data, dt, t0 = scope.read_hdf5_scope_data(f, scope_name, name, s)
-                # dt/t0/length are the same for every shot; build tarr once and
-                # reuse it (only rebuild if a shot's length differs).
-                if tarr is None or len(tarr) != len(data):
-                    tarr = self._tarr(len(data), dt, t0)
+                data, _dt, _t0 = scope.read_hdf5_scope_data(f, scope_name, name, s)
                 yield s, data, tarr
 
     @staticmethod
