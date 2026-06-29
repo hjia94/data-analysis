@@ -51,6 +51,13 @@ from .LeCroy_Scope_Header import LeCroy_Scope_Header
 #======================================================================================
 # scope_io locator
 #======================================================================================
+# Manual override for where the sibling LAPD_DAQ repo lives, used only if a plain
+# `import scope_io` fails (i.e. LAPD_DAQ is not pip-installed).  Leave as None to
+# rely on installed `scope_io` / the sibling-clone fallback; set it to the
+# LAPD_DAQ repo root (e.g. r"C:\Users\hjia9\Documents\GitHub\LAPD_DAQ") to point
+# at a clone elsewhere.
+LAPD_DAQ_PATH = None
+
 # The HDF5 scope readers below are thin wrappers over the `scope_io` package that
 # lives in the sibling LAPD_DAQ repo (single source of truth for LAPD_DAQ HDF5
 # decoding). `scope_io` ships with the `lapd-daq` package, so the normal path is a
@@ -67,9 +74,10 @@ def _import_scope_io():
 
 	Resolution order:
 	  1. installed `scope_io` (from `pip install -e ../LAPD_DAQ`) -- the normal path
-	  2. fallback: sibling-clone discovery via the LAPD_DAQ_PATH env var, else
-	     `../../LAPD_DAQ` relative to this file (data-analysis and LAPD_DAQ as
-	     sibling clones), put on sys.path -- for checkouts run without an install.
+	  2. fallback: sibling-clone discovery via the module-level LAPD_DAQ_PATH
+	     constant (edit it at the top of this file), else `../../LAPD_DAQ` relative
+	     to this file (data-analysis and LAPD_DAQ as sibling clones), put on
+	     sys.path -- for checkouts run without an install.
 
 	Raises a clear ImportError if neither resolves. Cached so the lookup runs at
 	most once per process.
@@ -82,9 +90,8 @@ def _import_scope_io():
 
 	# Fallback: discover a sibling LAPD_DAQ clone and put it on sys.path.
 	candidates = []
-	env_path = os.environ.get('LAPD_DAQ_PATH')
-	if env_path:
-		candidates.append(env_path)
+	if LAPD_DAQ_PATH:
+		candidates.append(LAPD_DAQ_PATH)
 	# src/data_analysis/io/scope_reader.py -> data_analysis -> src -> data-analysis -> GitHub -> LAPD_DAQ
 	candidates.append(os.path.abspath(os.path.join(
 		os.path.dirname(__file__), '..', '..', '..', '..', 'LAPD_DAQ')))
@@ -101,7 +108,7 @@ def _import_scope_io():
 			"Could not import 'scope_io': install LAPD_DAQ (`pip install -e "
 			"../LAPD_DAQ`, the `scope` extra), or clone LAPD_DAQ beside "
 			"data-analysis (as a sibling folder), or set the LAPD_DAQ_PATH "
-			"environment variable to the LAPD_DAQ repo root.")
+			"constant at the top of scope_reader.py to the LAPD_DAQ repo root.")
 
 #======================================================================================
 
