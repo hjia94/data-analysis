@@ -17,10 +17,12 @@ via ``run.channel(name, scope_name=...)``.  Positions come from
 shot, so there is no sweep detection / reshape -- we read the raw per-shot
 signal at one position and FFT it.
 
-Current scaling reuses the ``RESISTOR`` / ``Aprobe`` knobs from ``Jun2026_IV``;
-for fluctuation work the *shape* of the spectrum is what matters, not the
-absolute scaling.  The IV pipeline's ``I_SIGN`` is irrelevant to Isat (a sign
-flip doesn't change the fluctuation spectrum), so it is not applied here.
+Current scaling (the ``RESISTOR`` / ``Aprobe`` knobs from ``Jun2026_IV``) is
+currently left OFF -- the signal is kept raw (volts).  For fluctuation work the
+*shape* of the spectrum is what matters, not the absolute scaling; the scaling
+lines are commented in place (search ``RESISTOR``) to re-enable later.  The IV
+pipeline's ``I_SIGN`` is likewise irrelevant to Isat (a sign flip doesn't change
+the fluctuation spectrum), so it is not applied here.
 """
 
 import glob
@@ -34,7 +36,7 @@ from data_analysis.io import open_lapd
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
 from data_analysis.signal import avg_amplitude_spectrum
 
-import Jun2026_IV as jiv
+import Jun2026_IV as jiv   # noqa: F401  (kept for the commented current-scaling lines)
 
 # Scope groups that may hold probe signals.  ``Configuration`` / ``Control`` are
 # never scopes; everything else is a scope group.
@@ -99,17 +101,19 @@ def print_run_description(fn):
 
 
 def get_isat_at_position(run, scope_name, chan, npos, nshot, pos_index):
-    """Read the scaled Isat signal for ONE probe position.
+    """Read the raw Isat signal for ONE probe position.
 
     Reads only that position's ``nshot`` shots off disk (a positional shot slice,
     same ordering as ``Jun2026_IV._read_reshaped``).  Returns ``(tarr, Iarr)``
-    where ``Iarr`` is ``(nshot, nsamples)`` scaled current density (via
-    ``jiv.RESISTOR`` / ``jiv.Aprobe``).  No sign flip is applied -- it doesn't
-    matter for Isat fluctuations.
+    where ``Iarr`` is the ``(nshot, nsamples)`` raw signal (volts).  Current
+    scaling (``jiv.RESISTOR`` / ``jiv.Aprobe``) is left out for now -- the
+    fluctuation *shape* is what matters, not the absolute scaling.  No sign flip
+    either -- it doesn't matter for Isat fluctuations.
     """
     shots = slice(pos_index * nshot, (pos_index + 1) * nshot)
     Istack, tarr = run.channel(chan, scope_name=scope_name, shots=shots)
-    Iarr = Istack[:nshot] / (jiv.RESISTOR * jiv.Aprobe)
+    Iarr = Istack[:nshot]
+    # Iarr = Istack[:nshot] / (jiv.RESISTOR * jiv.Aprobe)   # current scaling (off)
     return tarr, Iarr
 
 
