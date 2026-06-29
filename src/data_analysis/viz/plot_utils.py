@@ -22,7 +22,7 @@ Each function includes detailed documentation of its parameters and returns.
 '''
 import matplotlib.pyplot as plt
 from typing import Callable, Optional
-from data_analysis.io.scope import read_trc_data
+from data_analysis.io.scope_reader import read_trc_data
 import gc  # For garbage collection
 import numpy as np
 

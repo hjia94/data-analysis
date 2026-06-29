@@ -55,7 +55,7 @@ single HDF5 file — it is independent of the X-ray / camera pipeline.
 | `get_xray_data(result, scope_name='xrayscope')` | Return `(tarr, C2)` for the X-ray scope. |
 | `get_bdot_data(f, result, scope_name='bdotscope')` | Return `(tarr, channels_dict, descriptions_dict)`. |
 
-Scope channel descriptions are read via `data_analysis.io.scope` from the
+Scope channel descriptions are read via `data_analysis.io.scope_reader` from the
 installed `data_analysis` package, so no `sys.path` manipulation is needed.
 
 ## `process_xray.py`
@@ -162,7 +162,7 @@ Set the path in cell 2 (`ifn = ...`) before running.
 Beyond the standard scientific stack (`numpy`, `scipy`, `matplotlib`,
 `h5py`), these scripts import from the installed `data_analysis` package:
 
-- `data_analysis.io.scope` — `read_hdf5_all_scopes_channels`,
+- `data_analysis.io.scope_reader` — `read_hdf5_all_scopes_channels`,
   `read_scope_channel_descriptions` (HDF5 scope readers).
 - `data_analysis.plasma.photons` — `Photons`, `counts_per_bin`.
 - `data_analysis.signal.core` — `calculate_stft`.

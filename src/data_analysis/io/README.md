@@ -9,10 +9,10 @@ imports readers from here and never re-implements parsing.
 | Module | What it reads / does |
 |--------|----------------------|
 | `lapd_hdf5.py` | Unified LAPD HDF5 reader — `open_lapd()`, `LapdRun`, `LapdSession`. |
-| `scope.py` | Oscilloscope traces: LeCroy `.trc`, `.txt`, and scope groups inside HDF5. Optional `scope_io` (from the sibling `LAPD_DAQ` repo) is discovered lazily. |
+| `scope_reader.py` | Reads oscilloscope traces: LeCroy `.trc`, `.txt`, and scope groups inside HDF5. Optional `scope_io` (from the sibling `LAPD_DAQ` repo) is discovered lazily. |
 | `cine.py` | Phantom high-speed-camera `.cine` movies (+ AVI conversion, motion overlays). |
 | `network_analyzer.py` | Vector network-analyzer CSV exports (`read_NA_data`). |
-| `LeCroy_Scope_Header.py` | LeCroy binary trace header parsing (used by `scope.py`). |
+| `LeCroy_Scope_Header.py` | LeCroy binary trace header parsing (used by `scope_reader.py`). |
 | `paths.py` | Central output-location resolver (`output_path`) so writers don't hard-code paths. |
 | `_backends/` | **Private.** Per-provenance LAPD HDF5 parsers behind `lapd_hdf5`. Not a public import. |
 
@@ -114,9 +114,10 @@ raise `NotImplementedError`).
 
 - **Import readers from `data_analysis.io.*`** — never from a flat top-level
   module or a `sys.path` hack. (The reorg-era back-compat shims are gone.)
-- **`scope_io` is optional.** `scope.py` first tries a normal import, then a
-  `LAPD_DAQ_PATH` env var, then a sibling `LAPD_DAQ` clone. If none resolve it
-  raises a message pointing at the `scope` extra (`pip install -e ../LAPD_DAQ`).
+- **`scope_io` is optional.** `scope_reader.py` first tries a normal import, then the
+  `LAPD_DAQ_PATH` constant at the top of that file, then a sibling `LAPD_DAQ`
+  clone. If none resolve it raises a message pointing at the `scope` extra
+  (`pip install -e ../LAPD_DAQ`).
 - **Heavy backends import lazily.** `lapd_hdf5` imports `bapsflib`/`matplotlib`
   only inside the methods that need them, so opening a `pydaq`/`legacy` file does
   not pull in bapsflib.

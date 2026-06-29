@@ -6,7 +6,7 @@ import re
 import numpy as np
 import matplotlib.pyplot as plt
 
-from data_analysis.io.scope import read_trc_data
+from data_analysis.io.scope_reader import read_trc_data
 from data_analysis.io.cine import read_cine, convert_cine_to_avi, overlay_motion_frames
 from data_analysis.tracking.track_object import track_object_per_frame, get_chamber
 

@@ -20,7 +20,7 @@ import re
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
 
-from data_analysis.io.scope import read_trc_data
+from data_analysis.io.scope_reader import read_trc_data
 from data_analysis.io.paths import output_path
 from data_analysis.signal.core import calculate_stft
 from data_analysis.plasma.photons import Photons, counts_per_bin

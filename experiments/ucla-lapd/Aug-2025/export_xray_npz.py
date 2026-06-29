@@ -24,7 +24,7 @@ import numpy as np
 import h5py
 
 from lapd_io import log, get_xray_data
-from data_analysis.io.scope import read_hdf5_all_scopes_channels
+from data_analysis.io.scope_reader import read_hdf5_all_scopes_channels
 from data_analysis.plasma.photons import Photons
 from tracking_utils import (
 	evaluate_y_cm,

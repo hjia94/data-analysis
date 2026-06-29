@@ -85,7 +85,7 @@ def _import_scope_io():
 	env_path = os.environ.get('LAPD_DAQ_PATH')
 	if env_path:
 		candidates.append(env_path)
-	# src/data_analysis/io/scope.py -> data_analysis -> src -> data-analysis -> GitHub -> LAPD_DAQ
+	# src/data_analysis/io/scope_reader.py -> data_analysis -> src -> data-analysis -> GitHub -> LAPD_DAQ
 	candidates.append(os.path.abspath(os.path.join(
 		os.path.dirname(__file__), '..', '..', '..', '..', 'LAPD_DAQ')))
 

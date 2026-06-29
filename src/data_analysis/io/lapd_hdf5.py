@@ -47,7 +47,7 @@ import numpy as np
 # Backend modules and scope_io are imported lazily inside the methods that need
 # them (see _backend_module / _open_pydaq_scope): bapsflib_daq pulls in bapsflib
 # + matplotlib, so importing them eagerly would load those heavy deps even when
-# opening a pydaq/legacy file. Matches the lazy-import convention in io/scope.py.
+# opening a pydaq/legacy file. Matches the lazy-import convention in io/scope_reader.py.
 
 __all__ = ["open_lapd", "LapdRun", "LapdSession", "detect_backend", "compare_runs"]
 
@@ -227,11 +227,11 @@ class LapdRun:
     def _open_pydaq_scope(self, scope_name):
         """Yield ``(f, resolved_scope_name, scope)`` for a pydaq read.
 
-        Centralizes the open + scope-group resolution + ``data_analysis.io.scope``
+        Centralizes the open + scope-group resolution + ``data_analysis.io.scope_reader``
         import that every pydaq method otherwise repeats. The HDF5 handle is open
         only for the ``with`` body (and across yields, so generators stay valid).
         """
-        from . import scope
+        from . import scope_reader as scope
         with h5py.File(self.path, "r") as f:
             yield f, self._resolve_scope_name(f, scope_name), scope
 

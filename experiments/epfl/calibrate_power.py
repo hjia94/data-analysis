@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 import numpy as np
 import data_analysis.utils as utils
-from data_analysis.io.scope import read_trc_data
+from data_analysis.io.scope_reader import read_trc_data
 
 #======================================================================================
 '''

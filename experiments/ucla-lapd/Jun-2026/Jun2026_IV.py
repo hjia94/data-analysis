@@ -64,7 +64,7 @@ import numpy as np
 import h5py
 
 from data_analysis.io import open_lapd
-from data_analysis.io.scope import read_scope_channel_descriptions
+from data_analysis.io.scope_reader import read_scope_channel_descriptions
 from data_analysis.plasma.langmuir import find_sweep_indices, reshape_IV, analyze_IV_safe
 
 from scipy.ndimage import gaussian_filter1d

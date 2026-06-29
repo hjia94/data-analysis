@@ -2,7 +2,7 @@ import numpy as np
 import time
 import os
 
-from data_analysis.io.scope import read_trc_data_simplified
+from data_analysis.io.scope_reader import read_trc_data_simplified
 
 
 #===============================================================================================================================================

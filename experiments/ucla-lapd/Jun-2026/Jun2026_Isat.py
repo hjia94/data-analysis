@@ -27,7 +27,7 @@ import numpy as np
 import h5py
 
 from data_analysis.io import open_lapd
-from data_analysis.io.scope import read_scope_channel_descriptions
+from data_analysis.io.scope_reader import read_scope_channel_descriptions
 
 import Jun2026_IV as jiv
 

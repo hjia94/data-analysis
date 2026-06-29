@@ -3,14 +3,14 @@
 
 Experiment-local glue (logger + scope-data helpers) reused across the Aug-2025
 analysis scripts. Scope reading is provided by the installed ``data_analysis``
-package (``data_analysis.io.scope``).
+package (``data_analysis.io.scope_reader``).
 """
 
 import re
 
 from scipy import ndimage
 
-from data_analysis.io.scope import read_scope_channel_descriptions
+from data_analysis.io.scope_reader import read_scope_channel_descriptions
 
 
 def log(tag, msg):
