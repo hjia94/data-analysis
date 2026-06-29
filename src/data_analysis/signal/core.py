@@ -403,38 +403,34 @@ def amplitude_spectrum(x, dt, detrend=True, drop_dc=True):
     return freq, amp
 
 
-def avg_amplitude_spectrum(stack, tarr, tmin=None, tmax=None,
-                           detrend=True, drop_dc=True):
-    """Incoherent average of per-row amplitude spectra over a time window.
+def avg_amplitude_spectrum(stack, dt, detrend=True, drop_dc=True):
+    """Incoherent average of per-row amplitude spectra.
 
-    ``stack`` is an ``(nrow, nsamples)`` array of traces sharing the time axis
-    ``tarr`` (seconds, ascending, uniform). Each row is windowed to
-    ``[tmin, tmax]`` (seconds; ``None`` = open end), FFT'd, and the single-sided
-    amplitude spectra are averaged across rows. The average is *incoherent*
-    (amplitudes, not complex): random row-to-row phase does not cancel, so
-    broadband fluctuation power survives -- the right average for shot ensembles.
+    ``stack`` is an ``(nrow, nsamples)`` array of traces sampled every ``dt``
+    seconds. Each row is FFT'd and the single-sided amplitude spectra are
+    averaged across rows. The average is *incoherent* (amplitudes, not complex):
+    random row-to-row phase does not cancel, so broadband fluctuation power
+    survives -- the right average for shot ensembles.
 
-    Rows with any non-finite sample in the window are skipped. Returns
-    ``(freq, amp_mean, n_used)``. Raises ``ValueError`` if the window selects
-    fewer than 2 samples or no finite rows remain.
+    Trim ``stack`` to the time window of interest *before* calling -- this
+    function FFTs whatever it is given. ``dt`` comes from the trace's time axis
+    (e.g. ``tarr[1] - tarr[0]``).
+
+    Rows with any non-finite sample are skipped. Returns
+    ``(freq, amp_mean, n_used)``. Raises ``ValueError`` if fewer than 2 samples
+    are given or no finite rows remain.
     """
     stack = np.asarray(stack, float)
-    tarr = np.asarray(tarr, float)
+    dt = float(dt)
 
-    lo = tarr[0] if tmin is None else tmin
-    hi = tarr[-1] if tmax is None else tmax
-    i0, i1 = np.searchsorted(tarr, [lo, hi])
-    if i1 - i0 < 2:
-        raise ValueError(
-            f"window [{tmin}, {tmax}] s selects < 2 samples (i0={i0}, i1={i1})")
+    if stack.shape[1] < 2:
+        raise ValueError(f"need >= 2 samples, got {stack.shape[1]}")
 
-    win = stack[:, i0:i1]
-    good = np.all(np.isfinite(win), axis=1)
-    win = win[good]
+    good = np.all(np.isfinite(stack), axis=1)
+    win = stack[good]
     if win.shape[0] == 0:
-        raise ValueError("no finite rows in the selected window")
+        raise ValueError("no finite rows in stack")
 
-    dt = float(np.mean(np.diff(tarr[i0:i1])))
     if detrend:
         win = win - win.mean(axis=1, keepdims=True)
     n = win.shape[1]

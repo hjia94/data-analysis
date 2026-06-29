@@ -28,10 +28,11 @@ import os
 
 import numpy as np
 import h5py
+from tqdm import tqdm
 
 from data_analysis.io import open_lapd
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
-from data_analysis.signal import amplitude_spectrum, avg_amplitude_spectrum
+from data_analysis.signal import avg_amplitude_spectrum
 
 import Jun2026_IV as jiv
 
@@ -112,23 +113,6 @@ def get_isat_at_position(run, scope_name, chan, npos, nshot, pos_index):
     return tarr, Iarr
 
 
-def isat_fft(I, tarr, detrend=True):
-    """Single-sided amplitude spectrum of an Isat trace.
-
-    ``I`` is a 1-D trace (e.g. one shot, or the shot mean); ``tarr`` its time
-    axis (seconds, uniform sampling).  Returns ``(freq, amp)`` with ``freq`` in
-    Hz and ``amp`` the single-sided amplitude (DC bin dropped).  ``detrend``
-    removes the mean first so the DC level doesn't swamp the fluctuation
-    spectrum.
-
-    Thin wrapper over the generic ``data_analysis.signal.amplitude_spectrum`` --
-    the spectrum math is shared DSP; this just supplies ``dt`` from the trace's
-    time axis.
-    """
-    dt = float(np.mean(np.diff(tarr)))
-    return amplitude_spectrum(I, dt, detrend=detrend)
-
-
 def run_avg_fft(fn, scope_name=SCOPE_NAME, chan=CHAN,
                 tmin_ms=FFT_TMIN_MS, tmax_ms=FFT_TMAX_MS):
     """Average the Isat FFT over ALL shots in one run file.
@@ -145,13 +129,17 @@ def run_avg_fft(fn, scope_name=SCOPE_NAME, chan=CHAN,
     run = open_lapd(fn)
     Istack, tarr = run.channel(chan, scope_name=scope_name)   # shots=None -> all
 
-    # Window + per-shot FFT + incoherent average is generic DSP (shared helper).
-    freq, amp_mean, n_shots = avg_amplitude_spectrum(
-        Istack, tarr, tmin=tmin_ms * 1e-3, tmax=tmax_ms * 1e-3)
-    # Current scaling is a linear constant, so it doesn't change the spectrum
-    # shape -- apply it once to the averaged result rather than to the whole
-    # multi-GB stack.
-    amp_mean = amp_mean / (jiv.RESISTOR * jiv.Aprobe)
+    # Trim to the FFT window here, then hand the trimmed stack + dt to the
+    # shared helper (per-shot FFT + incoherent average is generic DSP).
+    dt = tarr[1] - tarr[0]
+    i0, i1 = np.searchsorted(tarr, [tmin_ms * 1e-3, tmax_ms * 1e-3])
+    if i1 - i0 < 2:
+        raise ValueError(
+            f"window {tmin_ms}-{tmax_ms} ms selects < 2 samples "
+            f"(i0={i0}, i1={i1})")
+    freq, amp_mean, n_shots = avg_amplitude_spectrum(Istack[:, i0:i1], dt)
+
+    # amp_mean = amp_mean / (jiv.RESISTOR * jiv.Aprobe)
     return freq, amp_mean, n_shots
 
 
@@ -176,7 +164,10 @@ def batch_fft(data_dir=DATA_DIR, run_glob=RUN_GLOB, out_npz=OUT_NPZ,
 
     arrays = {}
     runs, nshots = [], []
-    for fn in files:
+    # One bar over the run files; %, elapsed, ETA, rate.  Per-run messages go
+    # through pbar.write so they don't tear the bar.
+    pbar = tqdm(files, desc="FFT", unit="run")
+    for fn in pbar:
         key = os.path.splitext(os.path.basename(fn))[0]
         freq, amp, n = run_avg_fft(fn, scope_name, chan, tmin_ms, tmax_ms)
         # Same window + sampling rate across runs -> one shared freq axis.
@@ -187,7 +178,7 @@ def batch_fft(data_dir=DATA_DIR, run_glob=RUN_GLOB, out_npz=OUT_NPZ,
         arrays[f"{key}__amp"] = amp
         runs.append(key)
         nshots.append(n)
-        print(f"  {key}: averaged {n} shots, {freq.size} freq bins")
+        pbar.write(f"  {key}: averaged {n} shots, {freq.size} freq bins")
 
     arrays["runs"] = np.array(runs)
     arrays["nshots"] = np.array(nshots)
