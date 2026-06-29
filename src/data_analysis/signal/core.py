@@ -138,6 +138,66 @@ def hl_envelopes_idx(s, dmin=1, dmax=1, split=False):
     return lmin,lmax
 
 
+def downsample_stride(t, x, q):
+    """Keep every ``q``-th sample (no filtering; aliases).
+
+    Cheapest downsample.  Fluctuations above the new Nyquist fold back into the
+    band, so it's fine for a quick look at the slow envelope but misleading for
+    spectral content.  Returns ``(t_ds, x_ds)``.
+    """
+    return t[::q], x[::q]
+
+
+def downsample_blockmean(t, x, q):
+    """Mean of each non-overlapping block of ``q`` samples (boxcar LPF + decimate).
+
+    A crude boxcar low-pass then decimate: anti-aliases somewhat and is robust,
+    so it tracks the mean level / slow structure well, but the boxcar has poor
+    stopband rejection.  Returns ``(t_ds, x_ds)``.
+    """
+    n = (x.size // q) * q
+    xb = x[:n].reshape(-1, q).mean(axis=1)
+    tb = t[:n:q][: xb.size]   # uniform time axis -- stride lines up with the blocks
+    return tb, xb
+
+
+def downsample_decimate(t, x, q):
+    """scipy polyphase FIR-filtered decimation (anti-aliased).
+
+    Proper anti-aliasing filter then downsample -- the principled choice when the
+    downsampled trace will be FFT'd; preserves in-band fluctuations without
+    aliasing.  ``scipy.signal.decimate`` caps the factor per call (FIR order
+    grows with ``q``), so a large ``q`` is split into a chain of smaller steps.
+    Returns ``(t_ds, x_ds)``.
+    """
+    xq = x
+    for step in _decimate_factor_chain(q):
+        xq = signal.decimate(xq, step, ftype="fir", zero_phase=True)
+    return t[::q][: xq.size], xq
+
+
+def _decimate_factor_chain(q, cap=12):
+    """Split a large decimation factor into steps each <= ``cap`` (decimate FIR limit)."""
+    steps = []
+    while q > cap:
+        f = next((d for d in range(cap, 1, -1) if q % d == 0), cap)
+        steps.append(f)
+        q //= f
+    if q > 1:
+        steps.append(q)
+    return steps
+
+
+# Generic downsamplers keyed by display name, so callers can iterate over all
+# methods (e.g. to overlay them for comparison).  Colors / labels for plotting
+# are a display choice and belong at the call site, not here.
+DOWNSAMPLE_METHODS = {
+    "stride": downsample_stride,
+    "block mean": downsample_blockmean,
+    "decimate(FIR)": downsample_decimate,
+}
+
+
 def analyze_downsample_options(data, tarr, filtered_data, min_timescale_ms=1e-3, verbose=False):
     """
     Analyze different downsample rates and their effect on filtered data.
@@ -169,7 +229,7 @@ def analyze_downsample_options(data, tarr, filtered_data, min_timescale_ms=1e-3,
             continue
 
         # Downsample filtered data
-        filtered_down = filtered_data[::rate]
+        _, filtered_down = downsample_stride(tarr, filtered_data, rate)
 
         # Interpolate back to original size for comparison
         filtered_up = np.interp(np.arange(len(data)),

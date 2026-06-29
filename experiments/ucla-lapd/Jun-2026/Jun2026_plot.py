@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 
 from data_analysis.io import open_lapd
 from data_analysis.io.paths import output_path
+from data_analysis.signal.core import downsample_blockmean
 
 import Jun2026_IV as jiv
 
@@ -271,10 +272,9 @@ def _read_isat_trace(run, npos, nshot):
         print(f"  (Isat panel: channel '{ISAT_SCOPE}'/{ISAT_CHAN} unavailable -- {e})")
         return None
     I = Istack[0]
-    q = ISAT_DS_Q
-    n = (I.size // q) * q                     # drop the ragged tail
-    I_ds = I[:n].reshape(-1, q).mean(axis=1)  # block-mean downsample the current
-    t_ds = tarr[:n:q][:I_ds.size]             # stride downsample the time axis
+    # block-mean downsample the current (anti-aliases as it shrinks the trace);
+    # the time axis rides along on the same blocks.
+    t_ds, I_ds = downsample_blockmean(tarr, I, ISAT_DS_Q)
     return t_ds, I_ds
 
 
