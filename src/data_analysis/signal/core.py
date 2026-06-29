@@ -381,3 +381,66 @@ def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, wi
     print(f"Generated {len(stft_time)} time points for {stft_matrix.shape[0]} FFT segments")
 
     return freq, stft_matrix, stft_time
+
+
+def amplitude_spectrum(x, dt, detrend=True, drop_dc=True):
+    """Single-sided amplitude spectrum of a 1-D trace.
+
+    ``x`` is a 1-D signal sampled every ``dt`` seconds. Returns ``(freq, amp)``
+    with ``freq`` in Hz and ``amp`` the single-sided amplitude (``2/n`` scaled).
+    ``detrend`` subtracts the mean first so the DC level doesn't swamp the
+    fluctuation spectrum; ``drop_dc`` drops the ``freq == 0`` bin (meaningless
+    after detrend, distracting on a log plot).
+    """
+    x = np.asarray(x, float)
+    if detrend:
+        x = x - np.mean(x)
+    n = x.size
+    freq = np.fft.rfftfreq(n, d=dt)
+    amp = np.abs(np.fft.rfft(x)) * (2.0 / n)
+    if drop_dc:
+        return freq[1:], amp[1:]
+    return freq, amp
+
+
+def avg_amplitude_spectrum(stack, tarr, tmin=None, tmax=None,
+                           detrend=True, drop_dc=True):
+    """Incoherent average of per-row amplitude spectra over a time window.
+
+    ``stack`` is an ``(nrow, nsamples)`` array of traces sharing the time axis
+    ``tarr`` (seconds, ascending, uniform). Each row is windowed to
+    ``[tmin, tmax]`` (seconds; ``None`` = open end), FFT'd, and the single-sided
+    amplitude spectra are averaged across rows. The average is *incoherent*
+    (amplitudes, not complex): random row-to-row phase does not cancel, so
+    broadband fluctuation power survives -- the right average for shot ensembles.
+
+    Rows with any non-finite sample in the window are skipped. Returns
+    ``(freq, amp_mean, n_used)``. Raises ``ValueError`` if the window selects
+    fewer than 2 samples or no finite rows remain.
+    """
+    stack = np.asarray(stack, float)
+    tarr = np.asarray(tarr, float)
+
+    lo = tarr[0] if tmin is None else tmin
+    hi = tarr[-1] if tmax is None else tmax
+    i0, i1 = np.searchsorted(tarr, [lo, hi])
+    if i1 - i0 < 2:
+        raise ValueError(
+            f"window [{tmin}, {tmax}] s selects < 2 samples (i0={i0}, i1={i1})")
+
+    win = stack[:, i0:i1]
+    good = np.all(np.isfinite(win), axis=1)
+    win = win[good]
+    if win.shape[0] == 0:
+        raise ValueError("no finite rows in the selected window")
+
+    dt = float(np.mean(np.diff(tarr[i0:i1])))
+    if detrend:
+        win = win - win.mean(axis=1, keepdims=True)
+    n = win.shape[1]
+    freq = np.fft.rfftfreq(n, d=dt)
+    amp = np.abs(np.fft.rfft(win, axis=1)) * (2.0 / n)
+    amp_mean = amp.mean(axis=0)
+    if drop_dc:
+        return freq[1:], amp_mean[1:], int(win.shape[0])
+    return freq, amp_mean, int(win.shape[0])

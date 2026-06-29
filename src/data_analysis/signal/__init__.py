@@ -6,6 +6,8 @@ from data_analysis.signal.core import (
     downsample_decimate,
     DOWNSAMPLE_METHODS,
     analyze_downsample_options,
+    amplitude_spectrum,
+    avg_amplitude_spectrum,
 )
 
 __all__ = [
@@ -14,4 +16,6 @@ __all__ = [
     "downsample_decimate",
     "DOWNSAMPLE_METHODS",
     "analyze_downsample_options",
+    "amplitude_spectrum",
+    "avg_amplitude_spectrum",
 ]

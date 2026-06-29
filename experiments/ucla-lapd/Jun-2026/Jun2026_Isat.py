@@ -23,17 +23,35 @@ absolute scaling.  The IV pipeline's ``I_SIGN`` is irrelevant to Isat (a sign
 flip doesn't change the fluctuation spectrum), so it is not applied here.
 """
 
+import glob
+import os
+
 import numpy as np
 import h5py
 
 from data_analysis.io import open_lapd
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
+from data_analysis.signal import amplitude_spectrum, avg_amplitude_spectrum
 
 import Jun2026_IV as jiv
 
 # Scope groups that may hold probe signals.  ``Configuration`` / ``Control`` are
 # never scopes; everything else is a scope group.
 _NON_SCOPE_GROUPS = {"Configuration", "Control"}
+
+# --- Batch FFT configuration (runs 00-06) -----------------------------------
+# Runs 00-06 share a fixed (stationary) Isat probe, so the averaged spectrum is
+# taken over EVERY shot in the file (no per-position split).  Set the scope +
+# channel and the FFT time window here, then call ``batch_fft()``.
+DATA_DIR    = r"D:\data\LAPD\jun2026-jia"
+RUN_GLOB    = "0[0-6]-*.hdf5"          # runs 00..06
+OUT_NPZ     = "isat_fft_00-06.npz"     # written into DATA_DIR
+
+SCOPE_NAME  = "machscope"              # scope group holding the Isat channel
+CHAN        = "C2"                     # Isat channel within that scope
+
+FFT_TMIN_MS = 1.5                      # FFT time window start (ms)
+FFT_TMAX_MS = 5.0                      # FFT time window stop  (ms)
 
 
 def list_all_channels(fn):
@@ -102,13 +120,84 @@ def isat_fft(I, tarr, detrend=True):
     Hz and ``amp`` the single-sided amplitude (DC bin dropped).  ``detrend``
     removes the mean first so the DC level doesn't swamp the fluctuation
     spectrum.
+
+    Thin wrapper over the generic ``data_analysis.signal.amplitude_spectrum`` --
+    the spectrum math is shared DSP; this just supplies ``dt`` from the trace's
+    time axis.
     """
-    I = np.asarray(I, float)
-    if detrend:
-        I = I - np.mean(I)
-    n = I.size
     dt = float(np.mean(np.diff(tarr)))
-    freq = np.fft.rfftfreq(n, d=dt)
-    amp = np.abs(np.fft.rfft(I)) * (2.0 / n)
-    # Drop the DC bin (freq == 0); meaningless after detrend, distracting on a log plot.
-    return freq[1:], amp[1:]
+    return amplitude_spectrum(I, dt, detrend=detrend)
+
+
+def run_avg_fft(fn, scope_name=SCOPE_NAME, chan=CHAN,
+                tmin_ms=FFT_TMIN_MS, tmax_ms=FFT_TMAX_MS):
+    """Average the Isat FFT over ALL shots in one run file.
+
+    The Isat probe in runs 00-06 is stationary, so every shot in the file is a
+    repeat at the same position -- we read them all and incoherently average the
+    per-shot amplitude spectra (random shot-to-shot phase cancels in a coherent
+    average but not here, so broadband fluctuation power survives).
+
+    Returns ``(freq, amp_mean, n_shots)`` -- ``freq`` in Hz, ``amp_mean`` the
+    shot-averaged single-sided amplitude (DC dropped), ``n_shots`` the number of
+    shots that contributed (NaN/unreadable shots are skipped).
+    """
+    run = open_lapd(fn)
+    Istack, tarr = run.channel(chan, scope_name=scope_name)   # shots=None -> all
+
+    # Window + per-shot FFT + incoherent average is generic DSP (shared helper).
+    freq, amp_mean, n_shots = avg_amplitude_spectrum(
+        Istack, tarr, tmin=tmin_ms * 1e-3, tmax=tmax_ms * 1e-3)
+    # Current scaling is a linear constant, so it doesn't change the spectrum
+    # shape -- apply it once to the averaged result rather than to the whole
+    # multi-GB stack.
+    amp_mean = amp_mean / (jiv.RESISTOR * jiv.Aprobe)
+    return freq, amp_mean, n_shots
+
+
+def batch_fft(data_dir=DATA_DIR, run_glob=RUN_GLOB, out_npz=OUT_NPZ,
+              scope_name=SCOPE_NAME, chan=CHAN,
+              tmin_ms=FFT_TMIN_MS, tmax_ms=FFT_TMAX_MS):
+    """Average the Isat FFT over all shots for each run, save to one npz.
+
+    Loops the files matched by ``run_glob`` in ``data_dir`` (runs 00-06),
+    computes the all-shot-averaged amplitude spectrum for each via
+    :func:`run_avg_fft`, and writes a single npz into ``data_dir``.
+
+    All runs share one window + sampling rate, so the npz holds a single
+    ``freq`` array (Hz) plus one ``<run>__amp`` (shot-averaged amplitude) per
+    run, keyed by the run's base name (without ``.hdf5``).  A ``runs`` array
+    lists the run keys (in order) and ``nshots`` the matching shot counts.
+    Reload with ``np.load(path)``: ``d["freq"]`` and ``d[f"{run}__amp"]``.
+    """
+    files = sorted(glob.glob(os.path.join(data_dir, run_glob)))
+    if not files:
+        raise FileNotFoundError(f"no files match {run_glob!r} in {data_dir!r}")
+
+    arrays = {}
+    runs, nshots = [], []
+    for fn in files:
+        key = os.path.splitext(os.path.basename(fn))[0]
+        freq, amp, n = run_avg_fft(fn, scope_name, chan, tmin_ms, tmax_ms)
+        # Same window + sampling rate across runs -> one shared freq axis.
+        if "freq" not in arrays:
+            arrays["freq"] = freq
+        elif not np.array_equal(freq, arrays["freq"]):
+            raise ValueError(f"{key}: freq axis differs from earlier runs")
+        arrays[f"{key}__amp"] = amp
+        runs.append(key)
+        nshots.append(n)
+        print(f"  {key}: averaged {n} shots, {freq.size} freq bins")
+
+    arrays["runs"] = np.array(runs)
+    arrays["nshots"] = np.array(nshots)
+
+    out_path = os.path.join(data_dir, out_npz)
+    np.savez(out_path, **arrays)
+    print(f"\nWrote {out_path} ({len(runs)} runs, "
+          f"window {tmin_ms}-{tmax_ms} ms, scope '{scope_name}' {chan})")
+    return out_path
+
+
+if __name__ == "__main__":
+    batch_fft()
