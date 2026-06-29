@@ -110,6 +110,24 @@ collapses reworded prose into a trailing `(+N/-M other)` count. `description()` 
 `compare_runs` are pydaq-only (bapsflib/legacy store metadata differently and
 raise `NotImplementedError`).
 
+### Extracting one setting: `gas_puff`
+
+To *group* runs by a single setting (rather than diff two), pull that setting
+straight out of the description. `gas_puff(path)` reads the operator's free-text
+plasma-condition bullet (`"… Puff voltage 75V for 24ms West+East"`) and returns
+`(puff_v, puff_t)` in (volts, ms), or `None` when no puff line is present:
+
+```python
+from data_analysis.io import gas_puff
+
+puff = gas_puff(path)          # (75.0, 24.0) or None
+```
+
+The LAPD-specific phrasing rule lives in `lapd_hdf5.py` (next to `compare_runs`),
+not in the format-agnostic `run_description` parser. See
+[experiments/ucla-lapd/Jun-2026/group_by_gas_puff.py](../../../experiments/ucla-lapd/Jun-2026/group_by_gas_puff.py)
+for a batch-grouping example.
+
 ## Conventions
 
 - **Import readers from `data_analysis.io.*`** — never from a flat top-level

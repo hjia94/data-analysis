@@ -39,6 +39,7 @@ lossy; see ``positions()``.
 """
 
 import os
+import re
 from contextlib import contextmanager
 
 import h5py
@@ -141,6 +142,34 @@ def compare_runs(path_a, path_b):
         label_a=os.path.basename(path_a),
         label_b=os.path.basename(path_b),
     )
+
+
+# Operator's gas-puff bullet: "Puff voltage 75V for 24ms ..." -> (volts, ms).
+# This is a LAPD-specific phrasing rule, so it lives here rather than in the
+# format-agnostic run_description parser.
+_PUFF_RE = re.compile(
+    r"puff\s*voltage\s*([\d.]+)\s*v\s*for\s*([\d.]+)\s*ms",
+    re.IGNORECASE,
+)
+
+
+def gas_puff(path):
+    """Read a run's gas-puff setting -> ``(puff_v, puff_t)`` in (volts, ms).
+
+    Convenience wrapper for the common "group runs by gas puff" question: opens
+    the file and pulls the puff voltage/duration out of the free-text
+    plasma-condition bullet of its ``description`` (the operator writes it as
+    ``"... Puff voltage 75V for 24ms West+East"``, no clean ``key: value``).
+    Tolerant of spacing/casing drift; returns ``None`` when the run has no puff
+    line.
+
+    LAPD_DAQ (pydaq) layout only; a non-pydaq file raises ``NotImplementedError``
+    (via :meth:`LapdRun.description`).
+    """
+    m = _PUFF_RE.search(open_lapd(path).description().raw or "")
+    if not m:
+        return None
+    return float(m.group(1)), float(m.group(2))
 
 
 # --------------------------------------------------------------------------- #

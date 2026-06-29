@@ -11,17 +11,19 @@ The `compute_B` package contains two main modules:
 
 ## Installation
 
-Since this is part of the LAPD_DAQ repository, you can import it directly:
+`compute_B` is a standalone tool at the root of the **data-analysis** repository
+(outside the installable `data_analysis` package). Import it by running from the
+repo root, where `compute_B/` is on the path:
 
 ```python
 import compute_B
 ```
 
-Or if you're in a different directory:
+Or, from another directory, add the repo root to the path first:
 
 ```python
 import sys
-sys.path.append('/path/to/LAPD_DAQ')
+sys.path.append('/path/to/data-analysis')
 import compute_B
 ```
 

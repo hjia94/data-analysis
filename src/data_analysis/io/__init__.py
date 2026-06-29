@@ -9,6 +9,6 @@ and returns a :class:`~data_analysis.io.lapd_hdf5.LapdRun`; the per-provenance
 backends under :mod:`data_analysis.io._backends` are private implementation detail.
 """
 
-from .lapd_hdf5 import open_lapd, LapdRun, LapdSession, compare_runs
+from .lapd_hdf5 import open_lapd, LapdRun, LapdSession, compare_runs, gas_puff
 
-__all__ = ["open_lapd", "LapdRun", "LapdSession", "compare_runs"]
+__all__ = ["open_lapd", "LapdRun", "LapdSession", "compare_runs", "gas_puff"]
