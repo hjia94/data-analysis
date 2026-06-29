@@ -5,10 +5,7 @@ The **plotting** home for the Jun-2026 LAPD analyses.  The processing modules
 to ``.npz``; this module reads those saved arrays back and draws the figures.
 It does **no** processing of its own.
 
-Keeping plotting separate means the (interactive, possibly blocking) ``plt.show``
-path never runs inside a batch loop -- you process once, then plot / re-plot as
-many times as you like from the saved ``.npz`` without touching the raw HDF5
-(apart from small reference reads like the Isat trace).
+TODO: Show plot not working
 
 Layout
 ------
@@ -34,7 +31,7 @@ from data_analysis.io.paths import output_path
 import Jun2026_IV as jiv
 
 # Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/ for Jun-2026 figures.
-FIG_SUBDIR = "Jun2026_IV"
+FIG_SUBDIR = "Jun2026"
 
 # Isat reference panel (4th panel of the IV line-scan figure).  A fixed-bias
 # ion-saturation tip on a *stationary* probe -- every position is essentially
@@ -57,13 +54,8 @@ ISAT_TMAX_MS = 10.0        # x-axis upper limit for the Isat panel, ms
 #  Shared helpers -- reuse these in every figure section below.
 # =========================================================================== #
 
-def finalize_figure(fig, save_fig=None, show=True):
+def finalize_figure(fig, save_fig=None):
     """Save and/or show a finished figure, then release it.
-
-    The common tail of every ``plot_*`` function: ``tight_layout`` -> optional
-    save (PNG at 150 dpi) -> optional ``plt.show`` -> close when not shown (so
-    headless/batch runs don't leak figures).  Centralised here so save/show
-    behaviour stays identical across all Jun-2026 figures.
 
     ``save_fig`` -- path to write the PNG to; ``None`` skips saving.
     ``show``     -- call ``plt.show()`` (set False for headless/batch saving).
@@ -72,10 +64,7 @@ def finalize_figure(fig, save_fig=None, show=True):
     if save_fig is not None:
         fig.savefig(save_fig, dpi=150, bbox_inches="tight")
         print(f"Figure saved to: {save_fig}")
-    if show:
-        plt.show(block=True)
-    else:
-        plt.close(fig)
+    plt.close(fig)
 
 
 def fig_path(name, subdir=FIG_SUBDIR):
@@ -217,7 +206,7 @@ def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
 
     _draw_isat_panel(axs[3], isat, marked_times)
 
-    finalize_figure(fig, save_fig=save_fig, show=show)
+    finalize_figure(fig, save_fig=save_fig)
 
 
 def _draw_isat_panel(ax, isat, marked_times):
@@ -325,7 +314,7 @@ def _plot_iv_line_tip(data_dir, run_num, tip, ifn=None, tndx_list=None,
     name = f"{run_num}{jiv._tip_tag(load_tip)}-line"
     save_path = fig_path(name) if save_fig is True else (save_fig or None)
     plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, ndx,
-                 save_fig=save_path, show=show, title=title, isat=isat)
+                 save_fig=save_path, title=title, isat=isat)
 
 
 def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=True):
@@ -344,7 +333,7 @@ def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=True):
     for tip in discover_tips(ifn):
         print(f"Plotting IV line-scan for tip {tip} from saved data...")
         _plot_iv_line_tip(data_dir, run_num, tip, ifn=ifn, tndx_list=tndx_list,
-                          save_fig=save_fig, show=show)
+                          save_fig=save_fig)
 
 
 # =========================================================================== #
@@ -356,7 +345,7 @@ def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=True):
 
 if __name__ == '__main__':
 
-    ifn = r"D:\data\LAPD\jun2026-jia\02-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
+    ifn = r"D:\data\LAPD\jun2026-jia\05-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
 
     if not ifn:
         raise SystemExit("Set `ifn` to a run file whose .npz has been produced "
@@ -364,4 +353,4 @@ if __name__ == '__main__':
 
     # Plot from the saved .npz (run Jun2026_IV.process_run first to create them).
     # save_fig=True -> write the PNG via fig_path; save_fig=False -> just show.
-    plot_iv_line_run(ifn, save_fig=False, tndx_list=[-9, -7, -5, -3, -1]) 
+    plot_iv_line_run(ifn, tndx_list=[-7, -5, -3, -1], save_fig=True)

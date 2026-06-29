@@ -339,37 +339,36 @@ def find_sweep_indices(V, padding=10):
 
 def reshape_IV(Vsweep_arr, Isweep_arr, start_t_ls, stop_t_ls, trim_percent=1.0):
     """
-    Slices raw arrays into individual sweeps, standardizes their length, 
-    and trims a percentage off the edges to remove switching noise.
+    Slices the raw arrays into individual sweeps and trims a percentage off each
+    edge to remove switching noise.
+
+    All voltage pulses have the same length, so a sweep that comes out
+    significantly shorter than the rest is a partial ramp at the edge of the
+    record (the digitizer started or stopped mid-pulse); it is dropped.  The
+    remaining sweeps are sliced to a common length so they stack into one array.
     """
-    # 1. Calculate the lengths of all detected sweeps
-    lengths = [stop - start for start, stop in zip(start_t_ls, stop_t_ls)]
-    
-    # 2. Find the raw minimum length
-    min_len = min(lengths)
-    
-    # 3. Calculate how many points equal the requested percentage
-    trim_points = int(min_len * (trim_percent / 100.0))
-    final_len = min_len - (2 * trim_points)
-    
-    print(f"Standardizing raw sweep length: {min_len} points.")
-    print(f"Trimming {trim_percent}% ({trim_points} points) from both the start and end.")
+    lengths = np.array([stop - start for start, stop in zip(start_t_ls, stop_t_ls)])
+
+    # Drop partial sweeps (much shorter than a full pulse); keep the rest.
+    keep = lengths >= 0.5 * lengths.max()
+    sweep_len = int(lengths[keep].min())
+    trim_points = int(sweep_len * (trim_percent / 100.0))
+    final_len = sweep_len - (2 * trim_points)
+
+    print(f"Sweep length: {sweep_len} points "
+          f"({(~keep).sum()} partial sweep(s) dropped).")
+    print(f"Trimming {trim_percent}% ({trim_points} points) from each end.")
     print(f"Final sweep length stacked: {final_len} points.")
 
-    # Initialize an empty list to store the chunks
     I_chunks = []
     V_chunks = []
-
-    # 4. Loop through the starts, applying the trim and the uniform final length
-    for start in start_t_ls:
-        # Shift the start index forward by the trim amount
-        actual_start = start + trim_points
-        
-        # Ensure the chunk is exactly the final_len to avoid dimension mismatch
-        actual_stop = actual_start + final_len
-
-        I_chunks.append(Isweep_arr[:, :, actual_start:actual_stop])
-        V_chunks.append(Vsweep_arr[:, actual_start:actual_stop])
+    for start, kept in zip(start_t_ls, keep):
+        if not kept:
+            continue
+        a = start + trim_points
+        b = a + final_len
+        I_chunks.append(Isweep_arr[:, :, a:b])
+        V_chunks.append(Vsweep_arr[:, a:b])
 
     # Stack the list of chunks into a new array
     Isweep_reshaped = np.stack(I_chunks, axis=2)

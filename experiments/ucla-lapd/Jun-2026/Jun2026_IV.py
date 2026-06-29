@@ -394,7 +394,7 @@ def save_IV_data(ifn, save_path, tip=None):
     data_timestamp = tarr[mid_indices]
     print(f"Number of sweeps: {len(data_timestamp)}")
 
-    Vswp_arr_rs, Iswp_arr_rs = reshape_IV(Vswp_arr, Iswp_arr, start_t_ls, stop_t_ls, 5)
+    Vswp_arr_rs, Iswp_arr_rs = reshape_IV(Vswp_arr, Iswp_arr, start_t_ls, stop_t_ls, 10)
 
     print("Applying smoothing to current array...")
     Iswp_arr_rs = gaussian_filter1d(Iswp_arr_rs, 10, axis=-1)
@@ -604,7 +604,7 @@ def process_run(ifn):
 
 if __name__ == '__main__':
 
-    ifn = r"D:\data\LAPD\jun2026-jia\02-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
+    ifn = r"D:\data\LAPD\jun2026-jia\25-He-800G-bias40V-LP-p29-line_2026-06-12.hdf5"
 
     if not ifn:
         raise SystemExit(
