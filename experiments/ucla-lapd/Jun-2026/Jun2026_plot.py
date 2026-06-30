@@ -30,6 +30,7 @@ from data_analysis.io.paths import output_path
 from data_analysis.signal.core import downsample_blockmean
 
 import Jun2026_IV as jiv
+import Jun2026_Isat as jis
 
 # Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/ for Jun-2026 figures.
 FIG_SUBDIR = "Jun2026"
@@ -55,17 +56,27 @@ ISAT_TMAX_MS = 10.0        # x-axis upper limit for the Isat panel, ms
 #  Shared helpers -- reuse these in every figure section below.
 # =========================================================================== #
 
-def finalize_figure(fig, save_fig=None):
+def finalize_figure(fig, save_fig=None, show=False, compact_axes=None):
     """Save and/or show a finished figure, then release it.
 
     ``save_fig`` -- path to write the PNG to; ``None`` skips saving.
-    ``show``     -- call ``plt.show()`` (set False for headless/batch saving).
+    ``show``     -- call ``plt.show()`` (the interactive window owns the figure
+                    until closed); otherwise the figure is closed immediately
+                    (headless/batch saving).
+    ``compact_axes`` -- optional group of shared-x axes to pack tight *after*
+                    ``tight_layout`` (which would otherwise re-space them); see
+                    :func:`_pack_shared_x`.
     """
     fig.tight_layout()
+    if compact_axes is not None:
+        _pack_shared_x(compact_axes)
     if save_fig is not None:
         fig.savefig(save_fig, dpi=150, bbox_inches="tight")
         print(f"Figure saved to: {save_fig}")
-    plt.close(fig)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def fig_path(name, subdir=FIG_SUBDIR):
@@ -143,6 +154,83 @@ def discover_tips(ifn):
 #  Figure: IV line-scan (Vp / Te / ne vs x + Isat reference)
 # =========================================================================== #
 
+def _pack_shared_x(axes, gap=0.012):
+    """Stack ``axes`` so they abut vertically with only ``gap`` between them.
+
+    For a group of panels that share one x-axis the default ``subplots`` spacing
+    leaves wasted blank rows between them.  This repositions the panels to fill
+    their *current* combined top->bottom extent, split into equal heights with a
+    thin ``gap`` (figure fraction) between neighbours.  Only the passed ``axes``
+    move, so any other panels on the same figure (e.g. a trailing Isat/FFT block)
+    keep their original positions and stay visually separated.
+    """
+    boxes = [ax.get_position() for ax in axes]
+    top = max(b.y1 for b in boxes)
+    bottom = min(b.y0 for b in boxes)
+    left = boxes[0].x0
+    width = boxes[0].width
+    n = len(axes)
+    h = (top - bottom - gap * (n - 1)) / n
+    for i, ax in enumerate(axes):
+        y0 = top - (i + 1) * h - i * gap
+        ax.set_position([left, y0, width, h])
+
+
+def _draw_iv_panels(axs4, Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, title):
+    """Draw the Vp / Te / ne / Te*ne vs x panels at the selected sweep times.
+
+    ``axs4`` is the four axes to draw into (Vp, Te, ne, Te*ne, top to bottom).
+    The fourth panel is the pressure-like product Te*ne derived from the Te and
+    ne arrays (panels 2 and 3).  Each ``tndx_list`` time index is plotted in a
+    rainbow colour across all four panels; the title goes on the top panel and
+    the x-label on the bottom one.  Returns ``marked_times`` -- the
+    ``(colour, time_ms)`` of each drawn time, so a caller (the IV line-scan's
+    Isat panel) can mark the same instants elsewhere.  Shared by
+    :func:`plot_iv_line` and :func:`plot_iv_isat_combined` so the line-scan
+    styling lives in one place.
+    """
+    colors = plt.cm.rainbow(np.linspace(0, 1, len(tndx_list)))
+    Tene_arr = Te_arr * ne_arr   # pressure-like product, derived from panels 2-3
+    panels = [(axs4[0], Vp_arr, "Vp [V]", "o-"),
+              (axs4[1], Te_arr, "Te [eV]", "s-"),
+              (axs4[2], ne_arr, "ne [cm$^{-3}$]", "^-"),
+              (axs4[3], Tene_arr, "Te*ne [eV cm$^{-3}$]", "D-")]
+
+    marked_times = []
+    for color, t_idx in zip(colors, tndx_list):
+        if t_idx >= Vp_arr.shape[1]:
+            print(f"Warning: time index {t_idx} exceeds array size {Vp_arr.shape[1]}")
+            continue
+        t_val = t_ls[t_idx] * 1e3  # Convert to ms
+        label = f"t = {t_val:.2f} ms"
+        marked_times.append((color, t_val))
+        for ax, arr, _, marker in panels:
+            ax.plot(xpos, arr[:, t_idx], marker, color=color, label=label,
+                    linewidth=2, markersize=5)
+
+    axs4[0].set_title(title or "Plasma Parameters along LP line scan (y = 0)",
+                      fontsize=12, fontweight="bold", pad=30)
+    for ax, _, ylabel, _ in panels:
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.sharex(axs4[0])
+    # Panels share one x-axis: hide the redundant tick labels on all but the
+    # bottom panel so only it carries the X-position ticks and label.
+    for ax in axs4[:-1]:
+        ax.tick_params(labelbottom=False)
+    axs4[-1].set_xlabel("X Position [cm]", fontsize=11)
+    # (Panels 1-4 share the x-axis, so the gaps between them are dead space; the
+    # caller passes these axes to finalize_figure(compact_axes=...) to pack them
+    # tight *after* tight_layout, leaving any trailing Isat/FFT panels alone.)
+    # Panels share identical time labels, so draw one legend (taken from the top
+    # panel's handles) horizontally above panel 1, tucked between it and the
+    # figure title (the title ``pad`` above leaves room so they don't overlap).
+    handles, labels = axs4[0].get_legend_handles_labels()
+    axs4[0].legend(handles, labels, fontsize=9, loc="lower center",
+                   bbox_to_anchor=(0.5, 1.01), ncol=len(labels))
+    return marked_times
+
+
 def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
                  show=True, title=None, isat=None):
     """
@@ -168,46 +256,18 @@ def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
     number + the puff setting, e.g. ``"01-Puff voltage 75V for 25ms"``).  ``None``
     uses a generic default.
     """
-    fig, axs = plt.subplots(4, 1, figsize=(12, 13))
+    fig, axs = plt.subplots(5, 1, figsize=(12, 15))
 
-    colors = plt.cm.rainbow(np.linspace(0, 1, len(tndx_list)))
+    # Title is the experiment-difference string from the caller (run number + the
+    # one changed setting vs the baseline, e.g. "01: puff voltage 75V for 25ms").
+    # The Isat panel marks the same instants the Vp/Te/ne/Te*ne panels show.
+    marked_times = _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls,
+                                   tndx_list, title)
+    _draw_isat_panel(axs[4], isat, marked_times)
 
-    # Track the (colour, time-in-ms) of each IV result time so the Isat panel can
-    # mark the same instants the Vp/Te/ne panels show.
-    marked_times = []
-    for color, t_idx in zip(colors, tndx_list):
-        if t_idx >= Vp_arr.shape[1]:
-            print(f"Warning: time index {t_idx} exceeds array size {Vp_arr.shape[1]}")
-            continue
-
-        t_val = t_ls[t_idx] * 1e3  # Convert to ms
-        label = f"t = {t_val:.2f} ms"
-        marked_times.append((color, t_val))
-
-        axs[0].plot(xpos, Vp_arr[:, t_idx], "o-", color=color, label=label,
-                    linewidth=2, markersize=5)
-        axs[1].plot(xpos, Te_arr[:, t_idx], "s-", color=color, label=label,
-                    linewidth=2, markersize=5)
-        axs[2].plot(xpos, ne_arr[:, t_idx], "^-", color=color, label=label,
-                    linewidth=2, markersize=5)
-
-    # Title is the experiment-difference string from the caller (run number +
-    # the one changed setting vs the baseline, e.g. "01: puff voltage 75V for
-    # 25ms"); fall back to a generic label when no difference was resolved.
-    base_title = title or "Plasma Parameters along LP line scan (y = 0)"
-    axs[0].set_title(base_title, fontsize=12, fontweight="bold")
-    axs[0].set_ylabel("Vp [V]", fontsize=11)
-    axs[1].set_ylabel("Te [eV]", fontsize=11)
-    axs[2].set_ylabel("ne [cm$^{-3}$]", fontsize=11)
-    axs[2].set_xlabel("X Position [cm]", fontsize=11)
-    for ax in axs[:3]:
-        ax.legend(fontsize=9, loc="best")
-        ax.grid(True, alpha=0.3)
-        ax.sharex(axs[0])
-
-    _draw_isat_panel(axs[3], isat, marked_times)
-
-    finalize_figure(fig, save_fig=save_fig)
+    # `show` is currently a no-op for this section (the batch drivers save
+    # headlessly); kept in the signature for symmetry with the combined figure.
+    finalize_figure(fig, save_fig=save_fig, compact_axes=axs[:4])
 
 
 def _draw_isat_panel(ax, isat, marked_times):
@@ -337,6 +397,110 @@ def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=True):
 
 
 # =========================================================================== #
+#  Figure: combined IV line-scan (one run) + Isat raw/FFT (another run)
+#
+#  Five panels on one figure for comparing a swept-tip line scan against the
+#  fixed-bias Isat fluctuations -- typically a different run for each:
+#    1-3. Vp / Te / ne vs x at selected sweep times, from the IV run's saved .npz.
+#    4.   The Isat run's raw fixed-bias trace, first `isat_nshot` shots averaged,
+#         over 0..isat_tmax_ms ms (read with Jun2026_Isat.get_isat_at_position).
+#    5.   That channel's all-shot-averaged FFT for the Isat run, loaded from the
+#         batch npz (Jun2026_Isat.OUT_NPZ), limited to < fft_fmax_khz.
+#  Reuses the IV loaders (jiv.load_data / load_sweep_data), the Isat reader (jis)
+#  and run_title -- no read/FFT logic is re-implemented here.
+# =========================================================================== #
+
+def puff_title(ifn, run=None):
+    """The gas-puff span of a run's description (``"Puff voltage 75V for 30ms"``).
+
+    Reuses :func:`run_title` (which pulls the puff span via ``_PUFF_RE``) and
+    strips its leading ``"<run_num>-"`` so the result is just the puff
+    voltage/time setting -- used as the combined figure's title.  Returns
+    ``None`` when no description / puff line is available.
+    """
+    title = run_title(ifn, run_num_of(ifn), run=run)
+    if not title:
+        return None
+    m = _PUFF_RE.search(title)
+    return m.group(0) if m else title
+
+
+def _read_isat_avg(run, scope_name, chan, isat_nshot):
+    """Run's raw Isat trace averaged over the first ``isat_nshot`` shots.
+
+    Reads just the first ``isat_nshot`` shots off disk (a positional shot slice
+    -- the probe is stationary, so the leading shots are repeats at one position)
+    and averages them.  ``run`` is the already-open run.  Returns
+    ``(tarr, I_avg, n_used)`` in (seconds, signal, shot count).
+    """
+    Istack, tarr = run.channel(chan, scope_name=scope_name,
+                               shots=slice(0, isat_nshot))
+    return tarr, Istack.mean(axis=0), Istack.shape[0]
+
+
+def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
+                          isat_scope=jis.SCOPE_NAME, isat_chan=jis.CHAN,
+                          isat_nshot=10, isat_tmax_ms=6.0,
+                          fft_npz=None, fft_fmax_khz=80.0,
+                          save_fig=False, show=True):
+    """Draw the combined 5-panel IV-line-scan + Isat figure (see section header).
+
+    ``iv_ifn`` / ``isat_ifn`` are the run HDF5 paths for the IV line scan
+    (panels 1-3, loaded from its saved .npz) and the Isat trace/FFT (panels 4-5).
+    ``iv_tip`` selects the tip whose .npz to load (e.g. ``"L"``).  ``fft_npz``
+    defaults to ``<isat dir>/Jun2026_Isat.OUT_NPZ``; the Isat run must be one of
+    the runs in that batch npz.  The figure title is the gas-puff
+    voltage/time from the IV run's description.  ``save_fig`` False -> don't save;
+    ``show`` True pops the interactive window (set False for headless saving).
+    """
+    data_dir = os.path.dirname(iv_ifn)
+    run_num = run_num_of(iv_ifn)
+    isat_run_num = run_num_of(isat_ifn)
+    tndx_list = tndx_list if tndx_list is not None else [-7, -5, -3, -1]
+    if fft_npz is None:
+        fft_npz = os.path.join(os.path.dirname(isat_ifn), jis.OUT_NPZ)
+
+    # Panels 1-3: IV arrays + axes from the IV run's saved .npz.
+    Vp_arr, Te_arr, ne_arr, *_errs, t_ls = jiv.load_data(data_dir, run_num, tip=iv_tip)
+    _, _, _, xpos, _, _, _ = jiv.load_sweep_data(data_dir, run_num, tip=iv_tip)
+
+    # Panels 4-5: raw Isat (shot-averaged) + the all-shot-averaged FFT from npz.
+    isat_run = open_lapd(isat_ifn)
+    t_isat, I_avg, n_avg = _read_isat_avg(isat_run, isat_scope, isat_chan, isat_nshot)
+    fft = np.load(fft_npz)
+    fft_run_key = os.path.splitext(os.path.basename(isat_ifn))[0]
+    freq_khz = fft["freq"] * 1e-3
+    fft_amp = fft[f"{fft_run_key}__amp"]
+
+    fig, axs = plt.subplots(6, 1, figsize=(12, 18))
+
+    # Panels 1-4 share the IV line-scan drawing with plot_iv_line (Vp/Te/ne and
+    # the Te*ne product). Title = the gas-puff voltage/time from the IV run's
+    # description.
+    _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list,
+                    puff_title(iv_ifn))
+
+    # Panel 5: Isat raw, shot-averaged, 0..isat_tmax_ms; y starts at 0.
+    axs[4].plot(t_isat * 1e3, I_avg, "k", linewidth=0.8)
+    axs[4].set_xlim(0, isat_tmax_ms)
+    axs[4].set_ylim(0,1)
+    axs[4].set_ylabel("Isat [a.u.]", fontsize=11)
+    axs[4].set_xlabel("t [ms]", fontsize=11)
+    axs[4].grid(True, alpha=0.3)
+
+    # Panel 6: all-shot-averaged FFT for the Isat run, < fft_fmax_khz.
+    axs[5].semilogy(freq_khz, fft_amp, "k", linewidth=0.9)
+    axs[5].set_xlim(0, fft_fmax_khz)
+    axs[5].set_ylabel("Isat amplitude [a.u.]", fontsize=11)
+    axs[5].set_xlabel("frequency [kHz]", fontsize=11)
+    axs[5].grid(True, which="both", alpha=0.3)
+
+    name = f"{run_num}{jiv._tip_tag(iv_tip)}-{isat_run_num}-combined"
+    save_path = fig_path(name) if save_fig is True else (save_fig or None)
+    finalize_figure(fig, save_fig=save_path, show=show, compact_axes=axs[:4])
+
+
+# =========================================================================== #
 #  Add further Jun-2026 figure sections below, each following the IV pattern:
 #    plot_<fig>(...)            -- draw one figure, ending in finalize_figure()
 #    plot_<fig>_run(ifn, ...)   -- load the saved .npz and call plot_<fig>
@@ -345,12 +509,10 @@ def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=True):
 
 if __name__ == '__main__':
 
-    ifn = r"D:\data\LAPD\jun2026-jia\05-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
+    iv_ifn=r"D:\data\LAPD\jun2026-jia\25-He-800G-bias40V-LP-p29-line_2026-06-12.hdf5"
+    isat_ifn=r"D:\data\LAPD\jun2026-jia\05-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
+    
+    # plot_iv_line_run(iv_ifn, tndx_list=[-7, -5, -3, -1], save_fig=True)
 
-    if not ifn:
-        raise SystemExit("Set `ifn` to a run file whose .npz has been produced "
-                         "by Jun2026_IV.process_run first.")
-
-    # Plot from the saved .npz (run Jun2026_IV.process_run first to create them).
-    # save_fig=True -> write the PNG via fig_path; save_fig=False -> just show.
-    plot_iv_line_run(ifn, tndx_list=[-7, -5, -3, -1], save_fig=True)
+    # Combined IV (run 23, tip L) + Isat raw/FFT (run 01) on one figure.
+    plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip="R", tndx_list=[-20, -15, -10, -6], show=False, save_fig=True)
