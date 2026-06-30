@@ -235,16 +235,12 @@ def read_lp_positions(fn, motion_group_name=None):
     xpos = np.unique(np.round(setup["x"], 3))
     ypos = np.unique(np.round(setup["y"], 3))
 
-    # nshot = number of contiguous shots at the first position.
+    # nshot = number of leading shots at the first position (first row where the
+    # position changes; whole run if it never does).
     x = np.round(pos_array["x"], 2)
     y = np.round(pos_array["y"], 2)
-    x0, y0 = x[0], y[0]
-    nshot = 0
-    for i in range(len(pos_array)):
-        if x[i] == x0 and y[i] == y0:
-            nshot += 1
-        else:
-            break
+    same = (x == x[0]) & (y == y[0])
+    nshot = len(same) if same.all() else int(np.argmin(same))
 
     print(f"Positions: {npos} unique (x: {len(xpos)}, y: {len(ypos)}), "
           f"{nshot} shots/position, {len(pos_array)} total shots.")
@@ -273,19 +269,19 @@ def _read_reshaped(run, scope_name, I_chan, V_chan, npos, nshot, pos_index=None)
       path exactly.
     """
     if pos_index is None:
-        shots = None
+        # Read only the npos*nshot used shots off disk (any trailing shots are
+        # dropped anyway), so the reshape consumes the whole read.
+        shots = slice(0, npos * nshot)
         out_npos = npos
-        keep = slice(0, npos * nshot)
     else:
         shots = slice(pos_index * nshot, (pos_index + 1) * nshot)
         out_npos = 1
-        keep = slice(0, nshot)          # the channel read already returns just these
 
     Vstack, tarr = run.channel(V_chan, scope_name=scope_name, shots=shots)
     Istack, _ = run.channel(I_chan, scope_name=scope_name, shots=shots)
 
-    V3d = Vstack[keep].reshape((out_npos, nshot, -1))
-    I3d = Istack[keep].reshape((out_npos, nshot, -1)) * I_SIGN / (RESISTOR * Aprobe)
+    V3d = Vstack.reshape((out_npos, nshot, -1))
+    I3d = Istack.reshape((out_npos, nshot, -1)) * I_SIGN / (RESISTOR * Aprobe)
     return tarr, V3d, I3d
 
 
@@ -382,7 +378,7 @@ def save_IV_data(ifn, save_path, tip=None):
 
     scope_name, I_chan, V_chan = resolve_iv_channels(ifn, tip=tip)
 
-    pos_array, xpos, ypos, npos, nshot = read_lp_positions(ifn)
+    _, xpos, ypos, npos, nshot = read_lp_positions(ifn)
 
     tarr, Vswp_arr, Iswp_arr = get_IV_arr(run, scope_name, I_chan, V_chan, npos, nshot)
 
@@ -403,6 +399,20 @@ def save_IV_data(ifn, save_path, tip=None):
              data_timestamp=data_timestamp, xpos=xpos, ypos=ypos,
              npos=npos, nshot=nshot, I_chan=I_chan, V_chan=V_chan)
     print(f"Saved to: {save_path}")
+
+
+def _mean_sem(vals):
+    """Mean and standard error of the valid (non-NaN) entries of ``vals``.
+
+    Returns ``(nan, nan)`` when nothing is valid and a ``nan`` SEM for a single
+    sample (no spread to estimate).  Shared by the Vp/Te/ne averaging in
+    :func:`process_and_save` so the three quantities are reduced identically.
+    """
+    vals = [v for v in vals if not np.isnan(v)]
+    if not vals:
+        return np.nan, np.nan
+    sem = np.std(vals, ddof=1) / np.sqrt(len(vals)) if len(vals) > 1 else np.nan
+    return np.mean(vals), sem
 
 
 def process_and_save(voltage_data, current_data, save_path):
@@ -437,17 +447,15 @@ def process_and_save(voltage_data, current_data, save_path):
 
     # Progress bar over locations; the per-trace fail rate is shown in the postfix
     # and refreshed each location.  tqdm provides the %, elapsed, ETA and rate.
+    arrs = {"Vp": (Vp_arr, Vp_err), "Te": (Te_arr, Te_err), "ne": (ne_arr, ne_err)}
     pbar = tqdm(range(n_locs), desc="Analyzing", unit="loc")
     for loc in pbar:
         for swp in range(n_sweeps):
             # The voltage trace applies to all shots at this location/sweep
             V_trace = voltage_data[loc, swp, :]
 
-            # Temporary storage for the shots in this specific sweep
-            temp_Vp = []
-            temp_Te = []
-            temp_ne = []
-
+            # Per-shot results for this sweep, keyed like `arrs`.
+            temp = {"Vp": [], "Te": [], "ne": []}
             for sht in range(n_shots):
                 I_trace = current_data[loc, sht, swp, :]
                 trace_id = f"Loc:{loc}|Shot:{sht}|Swp:{swp}"
@@ -455,37 +463,21 @@ def process_and_save(voltage_data, current_data, save_path):
                 # Analyze trace
                 Vp, Te, ne = analyze_IV_safe(V_trace, I_trace, file_name=trace_id)
 
-                # Track failures on a per-trace basis
+                # A NaN Vp marks a failed fit; ne can also be NaN if Te was forced
+                # to 0, so _mean_sem filters NaNs per-quantity below.
                 if np.isnan(Vp):
                     fail_count += 1
                 else:
-                    # Only keep valid numbers for averaging
-                    temp_Vp.append(Vp)
-                    temp_Te.append(Te)
-                    temp_ne.append(ne)
+                    temp["Vp"].append(Vp)
+                    temp["Te"].append(Te)
+                    temp["ne"].append(ne)
 
                 traces_completed += 1
 
             # --- AVERAGING LOGIC ---
-            # Calculate the mean and standard error of the mean (SEM) for valid shots
-
-            # Vp
-            if len(temp_Vp) > 0:
-                Vp_arr[loc, swp] = np.mean(temp_Vp)
-                # If more than 1 valid shot, calculate error: std_dev / sqrt(N)
-                Vp_err[loc, swp] = np.std(temp_Vp, ddof=1) / np.sqrt(len(temp_Vp)) if len(temp_Vp) > 1 else np.nan
-
-            # Te
-            if len(temp_Te) > 0:
-                Te_arr[loc, swp] = np.mean(temp_Te)
-                Te_err[loc, swp] = np.std(temp_Te, ddof=1) / np.sqrt(len(temp_Te)) if len(temp_Te) > 1 else np.nan
-
-            # ne
-            # Because ne can be NaN if Te was forced to 0, we need to filter NaNs out of temp_ne specifically
-            valid_ne = [n for n in temp_ne if not np.isnan(n)]
-            if len(valid_ne) > 0:
-                ne_arr[loc, swp] = np.mean(valid_ne)
-                ne_err[loc, swp] = np.std(valid_ne, ddof=1) / np.sqrt(len(valid_ne)) if len(valid_ne) > 1 else np.nan
+            # Mean + standard error of the valid shots, identically for each quantity.
+            for key, (arr, err) in arrs.items():
+                arr[loc, swp], err[loc, swp] = _mean_sem(temp[key])
 
         # ==========================================
         # INCREMENTAL SAVE
@@ -526,27 +518,21 @@ def _tip_tag(tip):
 def load_sweep_data(data_dir, run_num, tip=None):
     """Load the reshaped sweep arrays + axes saved by :func:`save_IV_data`."""
     save_path = os.path.join(data_dir, f"{run_num}{_tip_tag(tip)}-sweep-data.npz")
-    data = np.load(save_path)
-    return (data["Vswp_arr_rs"], data["Iswp_arr_rs"], data["data_timestamp"],
-            data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"]))
+    with np.load(save_path) as data:
+        return (data["Vswp_arr_rs"], data["Iswp_arr_rs"], data["data_timestamp"],
+                data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"]))
 
 
 def load_data(data_dir, run_num, tip=None):
     """Load saved plasma parameters + sweep timestamps for plotting."""
     save_path = os.path.join(data_dir, f"{run_num}{_tip_tag(tip)}-sweep-data.npz")
-    data = np.load(save_path)
-    t_ls = data["data_timestamp"]
+    with np.load(save_path) as data:
+        t_ls = data["data_timestamp"]
 
     ps_path = os.path.join(data_dir, f"{run_num}{_tip_tag(tip)}-plasma-data.npz")
-    ps_data = np.load(ps_path)
-    Vp_arr = ps_data["Vp_arr"]
-    Te_arr = ps_data["Te_arr"]
-    ne_arr = ps_data["ne_arr"]
-    Vp_err = ps_data["Vp_err"]
-    Te_err = ps_data["Te_err"]
-    ne_err = ps_data["ne_err"]
-
-    return Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls
+    with np.load(ps_path) as ps_data:
+        return (ps_data["Vp_arr"], ps_data["Te_arr"], ps_data["ne_arr"],
+                ps_data["Vp_err"], ps_data["Te_err"], ps_data["ne_err"], t_ls)
 
 
 def process_run(ifn):
@@ -569,32 +555,33 @@ def process_run(ifn):
     data_dir = os.path.dirname(ifn)
     run_num = os.path.basename(ifn).split("-")[0]
 
-    scope_name = SCOPE_NAME if SCOPE_NAME is not None else find_lp_scope(ifn)
+    # Tips to process: a single None tip when overriding (resolve_iv_channels
+    # then uses the override block), else every discovered complete-pair tip.
+    # None flows through _tip_tag/save_IV_data/load_sweep_data as the untagged
+    # single-tip case, so no "override" sentinel decoding is needed.
     if I_CHAN is not None and V_CHAN is not None:
-        tips = ["override"]
-        resolve_tip = None            # resolve_iv_channels uses the override block
+        tips = [None]
     else:
+        scope_name = SCOPE_NAME if SCOPE_NAME is not None else find_lp_scope(ifn)
         pairs, _ = discover_lp_channels(ifn, scope_name)
         tips = list(pairs)
-        resolve_tip = True
 
     results = {}
     for tip in tips:
-        tag = _tip_tag(None if tip == "override" else tip)
+        tag = _tip_tag(tip)
         print("\n" + "=" * 70)
-        print(f"PROCESSING tip {tip}")
+        print(f"PROCESSING tip {tip if tip is not None else 'override'}")
         print("=" * 70)
 
         sweep_path = os.path.join(data_dir, f"{run_num}{tag}-sweep-data.npz")
         plasma_path = os.path.join(data_dir, f"{run_num}{tag}-plasma-data.npz")
 
-        save_IV_data(ifn, sweep_path, tip=None if resolve_tip is None else tip)
+        save_IV_data(ifn, sweep_path, tip=tip)
 
-        Vswp_arr_rs, Iswp_arr_rs, *_ = \
-            load_sweep_data(data_dir, run_num, tip=None if tip == "override" else tip)
+        Vswp_arr_rs, Iswp_arr_rs, *_ = load_sweep_data(data_dir, run_num, tip=tip)
         process_and_save(Vswp_arr_rs, Iswp_arr_rs, plasma_path)
 
-        results[tip] = (sweep_path, plasma_path)
+        results[tip if tip is not None else "override"] = (sweep_path, plasma_path)
 
     print(f"\nDone. Processed tips: {list(results)}")
     return results
