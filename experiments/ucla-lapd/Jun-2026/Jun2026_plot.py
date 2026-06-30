@@ -35,7 +35,7 @@ import Jun2026_Isat as jis
 # Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/ for Jun-2026 figures.
 FIG_SUBDIR = "Jun2026"
 
-# Isat reference panel (4th panel of the IV line-scan figure).  A fixed-bias
+# Isat reference panel (5th panel of the IV line-scan figure).  A fixed-bias
 # ion-saturation tip on a *stationary* probe -- every position is essentially
 # identical -- so we read one representative position (npos // 2) and draw a
 # SINGLE shot's trace, block-mean downsampled, over 0..ISAT_TMAX_MS ms with the
@@ -232,7 +232,8 @@ def _draw_iv_panels(axs4, Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, title):
 
 
 def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
-                 show=True, title=None, isat=None):
+                 show=True, title=None, isat=None, fft=None,
+                 fft_fmax_khz=80.0):
     """
     Plot the line scan: Vp, Te, and ne vs x at selected sweep (time) indices,
     plus a reference Isat trace.
@@ -242,7 +243,7 @@ def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
     needed (unlike Mar-2026's xy-plane).  ``Vp_arr`` etc. are (n_locs, n_sweeps)
     with ``n_locs == len(xpos)``.
 
-    A 4th panel shows the fixed-bias Isat trace (a single block-mean-downsampled
+    The 5th panel shows the fixed-bias Isat trace (a single block-mean-downsampled
     shot at the stationary probe's mid position, from :func:`_read_isat_trace`)
     over 0..``ISAT_TMAX_MS`` ms, with the IV sweep result times
     (``t_ls[tndx_list]``) scattered *on the line* as points coloured to match the
@@ -250,13 +251,18 @@ def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
     pass ``None`` to leave that panel blank (e.g. when the Isat channel is
     absent).
 
+    The last panel shows that same Isat channel's all-shot-averaged FFT (like
+    :func:`plot_iv_isat_combined`), clipped to ``0..fft_fmax_khz`` kHz.  ``fft`` is
+    the ``(freq_khz, amp)`` spectrum; pass ``None`` to leave it blank (e.g. when
+    the Isat channel is absent).
+
     ``save_fig`` -- a path to write the figure to (PNG); ``None`` skips saving.
     ``show`` -- call ``plt.show()`` (set False for headless/batch saving only).
     ``title`` -- figure title; the caller passes the run's gas-puff label (run
     number + the puff setting, e.g. ``"01-Puff voltage 75V for 25ms"``).  ``None``
     uses a generic default.
     """
-    fig, axs = plt.subplots(5, 1, figsize=(12, 15))
+    fig, axs = plt.subplots(6, 1, figsize=(12, 18))
 
     # Title is the experiment-difference string from the caller (run number + the
     # one changed setting vs the baseline, e.g. "01: puff voltage 75V for 25ms").
@@ -264,14 +270,32 @@ def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
     marked_times = _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls,
                                    tndx_list, title)
     _draw_isat_panel(axs[4], isat, marked_times)
+    _draw_fft_panel(axs[5], fft, fft_fmax_khz,
+                    f"Isat averaged FFT (all shots), '{ISAT_SCOPE}'/{ISAT_CHAN}")
 
     # `show` is currently a no-op for this section (the batch drivers save
     # headlessly); kept in the signature for symmetry with the combined figure.
     finalize_figure(fig, save_fig=save_fig, compact_axes=axs[:4])
 
 
+def _scatter_iv_times_on_isat(ax, t_ms, I, marked_times):
+    """Scatter each IV result time as a point *on* an Isat trace.
+
+    ``t_ms`` / ``I`` are the Isat trace (time in ms, current).  For each
+    ``(colour, time_ms)`` in ``marked_times`` (from :func:`_draw_iv_panels`),
+    drops a point at that time on the line -- its current interpolated from the
+    trace -- coloured to match the IV panels, so the IV sweep instants are
+    visible on the Isat curve.  Shared by the line-scan and combined figures.
+    """
+    for color, t_val in marked_times:
+        if t_ms[0] <= t_val <= t_ms[-1]:
+            I_at = np.interp(t_val, t_ms, I)
+            ax.scatter(t_val, I_at, color=color, s=80, zorder=3,
+                       edgecolors="k", linewidths=0.5)
+
+
 def _draw_isat_panel(ax, isat, marked_times):
-    """Draw the Isat reference panel (4th panel of the IV line-scan figure).
+    """Draw the Isat reference panel (5th panel of the IV line-scan figure).
 
     ``isat`` is the downsampled ``(tarr, I)`` in (seconds, current) from
     :func:`_read_isat_trace`, or ``None`` to leave the panel blank with a note.
@@ -285,11 +309,7 @@ def _draw_isat_panel(ax, isat, marked_times):
         I = np.asarray(isat[1])
         ax.plot(t_ms, I, "k", linewidth=1.0, zorder=1)
         # Scatter each IV result time onto the line (interpolate its Isat value).
-        for color, t_val in marked_times:
-            if t_ms[0] <= t_val <= t_ms[-1]:
-                I_at = np.interp(t_val, t_ms, I)
-                ax.scatter(t_val, I_at, color=color, s=80, zorder=3,
-                           edgecolors="k", linewidths=0.5)
+        _scatter_iv_times_on_isat(ax, t_ms, I, marked_times)
         ax.set_title(f"Isat reference (stationary probe, "
                      f"'{ISAT_SCOPE}'/{ISAT_CHAN}, single shot @ mid position)",
                      fontsize=10)
@@ -304,8 +324,34 @@ def _draw_isat_panel(ax, isat, marked_times):
     ax.grid(True, alpha=0.3)
 
 
+def _draw_fft_panel(ax, fft, fmax_khz, title, chan_label=None):
+    """Draw an Isat-FFT panel (last panel of the IV line-scan / combined figures).
+
+    ``fft`` is the ``(freq_khz, amp)`` shot-averaged amplitude spectrum (frequency
+    in kHz), or ``None`` to leave the panel blank with a note.  The y-axis is log
+    (``semilogy``) and the x-axis is clipped to ``0..fmax_khz``.  Shared by
+    :func:`plot_iv_line` and :func:`plot_iv_isat_combined` so the FFT panel looks
+    the same in both figures.  ``chan_label`` names the channel in the blank-panel
+    note; pass the caller's own scope/chan (the combined figure can differ from
+    the module defaults), or ``None`` for ``'ISAT_SCOPE'/ISAT_CHAN``.
+    """
+    if fft is not None:
+        freq_khz, amp = fft
+        ax.semilogy(freq_khz, amp, "k", linewidth=0.9)
+        ax.set_title(title, fontsize=10)
+    else:
+        ax.text(0.5, 0.5,
+                f"Isat channel {chan_label or f'{ISAT_SCOPE!r}/{ISAT_CHAN}'} unavailable",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=11, color="0.5")
+    ax.set_xlim(0, fmax_khz)
+    ax.set_ylabel("Isat amplitude [a.u.]", fontsize=11)
+    ax.set_xlabel("frequency [kHz]", fontsize=11)
+    ax.grid(True, which="both", alpha=0.3)
+
+
 def _read_isat_trace(run, npos, nshot):
-    """Read + downsample a SINGLE-shot Isat reference trace for the 4th panel.
+    """Read + downsample a SINGLE-shot Isat reference trace for the 5th panel.
 
     The whole point is to be fast and never hang.  Steps:
 
@@ -338,6 +384,27 @@ def _read_isat_trace(run, npos, nshot):
     return t_ds, I_ds
 
 
+def _read_isat_fft(ifn, fft_npz=None):
+    """Load this run's all-shot-averaged Isat FFT for the figure's last panel.
+
+    Reads the precomputed spectrum from the batch FFT npz
+    (:func:`Jun2026_Isat.batch_fft`, default ``<run dir>/Jun2026_Isat.OUT_NPZ``)
+    rather than recomputing it -- the run's own ``<basename>__amp`` entry against
+    the shared ``freq`` axis, same as :func:`plot_iv_isat_combined`.  Returns
+    ``(freq_khz, amp)`` -- amplitude vs frequency in kHz -- or ``None`` if the npz
+    or this run's entry is missing (so :func:`_draw_fft_panel` draws it blank).
+    """
+    if fft_npz is None:
+        fft_npz = os.path.join(os.path.dirname(ifn), jis.OUT_NPZ)
+    run_key = os.path.splitext(os.path.basename(ifn))[0]
+    try:
+        with np.load(fft_npz) as fft:   # NpzFile holds an open fd; close it
+            return fft["freq"] * 1e-3, fft[f"{run_key}__amp"]
+    except (OSError, KeyError) as e:
+        print(f"  (FFT panel: no saved FFT for '{run_key}' in {fft_npz} -- {e})")
+        return None
+
+
 def _plot_iv_line_tip(data_dir, run_num, tip, ifn=None, tndx_list=None,
                       save_fig=True, show=True):
     """Load one tip's saved IV arrays and draw the line-scan plot (no reprocessing).
@@ -366,15 +433,19 @@ def _plot_iv_line_tip(data_dir, run_num, tip, ifn=None, tndx_list=None,
     # default.  (Output filenames still carry run_num + tip, via the name below.)
     title = run_title(ifn, run_num, run=run) if run is not None else None
 
-    # Reference Isat trace for the 4th panel -- read from the raw HDF5 (it's not
+    # Reference Isat trace for the 5th panel -- read from the raw HDF5 (it's not
     # in the saved .npz).  None when there's no run file or the channel is absent,
     # in which case the panel is drawn blank.
     isat = _read_isat_trace(run, npos, nshot) if run is not None else None
 
+    # All-shot-averaged Isat FFT for the last panel (same channel as the trace).
+    # None when there's no run file or the channel is absent -> blank panel.
+    fft = _read_isat_fft(ifn) if ifn is not None else None
+
     name = f"{run_num}{jiv._tip_tag(load_tip)}-line"
     save_path = fig_path(name) if save_fig is True else (save_fig or None)
     plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, ndx,
-                 save_fig=save_path, title=title, isat=isat)
+                 save_fig=save_path, title=title, isat=isat, fft=fft)
 
 
 def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=True):
@@ -399,12 +470,13 @@ def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=True):
 # =========================================================================== #
 #  Figure: combined IV line-scan (one run) + Isat raw/FFT (another run)
 #
-#  Five panels on one figure for comparing a swept-tip line scan against the
+#  Six panels on one figure for comparing a swept-tip line scan against the
 #  fixed-bias Isat fluctuations -- typically a different run for each:
-#    1-3. Vp / Te / ne vs x at selected sweep times, from the IV run's saved .npz.
-#    4.   The Isat run's raw fixed-bias trace, first `isat_nshot` shots averaged,
+#    1-4. Vp / Te / ne / Te*ne vs x at selected sweep times, from the IV run's
+#         saved .npz, with the sweep instants scattered onto panel 5.
+#    5.   The Isat run's raw fixed-bias trace, first `isat_nshot` shots averaged,
 #         over 0..isat_tmax_ms ms (read with Jun2026_Isat.get_isat_at_position).
-#    5.   That channel's all-shot-averaged FFT for the Isat run, loaded from the
+#    6.   That channel's all-shot-averaged FFT for the Isat run, loaded from the
 #         batch npz (Jun2026_Isat.OUT_NPZ), limited to < fft_fmax_khz.
 #  Reuses the IV loaders (jiv.load_data / load_sweep_data), the Isat reader (jis)
 #  and run_title -- no read/FFT logic is re-implemented here.
@@ -431,11 +503,11 @@ def _read_isat_avg(run, scope_name, chan, isat_nshot):
     Reads just the first ``isat_nshot`` shots off disk (a positional shot slice
     -- the probe is stationary, so the leading shots are repeats at one position)
     and averages them.  ``run`` is the already-open run.  Returns
-    ``(tarr, I_avg, n_used)`` in (seconds, signal, shot count).
+    ``(tarr, I_avg)`` in (seconds, signal).
     """
     Istack, tarr = run.channel(chan, scope_name=scope_name,
                                shots=slice(0, isat_nshot))
-    return tarr, Istack.mean(axis=0), Istack.shape[0]
+    return tarr, Istack.mean(axis=0)
 
 
 def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
@@ -443,10 +515,10 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
                           isat_nshot=10, isat_tmax_ms=6.0,
                           fft_npz=None, fft_fmax_khz=80.0,
                           save_fig=False, show=True):
-    """Draw the combined 5-panel IV-line-scan + Isat figure (see section header).
+    """Draw the combined 6-panel IV-line-scan + Isat figure (see section header).
 
     ``iv_ifn`` / ``isat_ifn`` are the run HDF5 paths for the IV line scan
-    (panels 1-3, loaded from its saved .npz) and the Isat trace/FFT (panels 4-5).
+    (panels 1-4, loaded from its saved .npz) and the Isat trace/FFT (panels 5-6).
     ``iv_tip`` selects the tip whose .npz to load (e.g. ``"L"``).  ``fft_npz``
     defaults to ``<isat dir>/Jun2026_Isat.OUT_NPZ``; the Isat run must be one of
     the runs in that batch npz.  The figure title is the gas-puff
@@ -457,31 +529,31 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
     run_num = run_num_of(iv_ifn)
     isat_run_num = run_num_of(isat_ifn)
     tndx_list = tndx_list if tndx_list is not None else [-7, -5, -3, -1]
-    if fft_npz is None:
-        fft_npz = os.path.join(os.path.dirname(isat_ifn), jis.OUT_NPZ)
 
     # Panels 1-3: IV arrays + axes from the IV run's saved .npz.
     Vp_arr, Te_arr, ne_arr, *_errs, t_ls = jiv.load_data(data_dir, run_num, tip=iv_tip)
     _, _, _, xpos, _, _, _ = jiv.load_sweep_data(data_dir, run_num, tip=iv_tip)
 
-    # Panels 4-5: raw Isat (shot-averaged) + the all-shot-averaged FFT from npz.
+    # Panels 4-5: raw Isat (shot-averaged) + the all-shot-averaged FFT loaded
+    # from the batch npz (shared loader, same as the line-scan figure).
     isat_run = open_lapd(isat_ifn)
-    t_isat, I_avg, n_avg = _read_isat_avg(isat_run, isat_scope, isat_chan, isat_nshot)
-    fft = np.load(fft_npz)
-    fft_run_key = os.path.splitext(os.path.basename(isat_ifn))[0]
-    freq_khz = fft["freq"] * 1e-3
-    fft_amp = fft[f"{fft_run_key}__amp"]
+    t_isat, I_avg = _read_isat_avg(isat_run, isat_scope, isat_chan, isat_nshot)
+    fft = _read_isat_fft(isat_ifn, fft_npz)
 
     fig, axs = plt.subplots(6, 1, figsize=(12, 18))
 
     # Panels 1-4 share the IV line-scan drawing with plot_iv_line (Vp/Te/ne and
     # the Te*ne product). Title = the gas-puff voltage/time from the IV run's
-    # description.
-    _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list,
-                    puff_title(iv_ifn))
+    # description.  marked_times = the (colour, time) of each IV sweep instant,
+    # scattered onto the Isat trace below.
+    marked_times = _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls,
+                                   tndx_list, puff_title(iv_ifn))
 
-    # Panel 5: Isat raw, shot-averaged, 0..isat_tmax_ms; y starts at 0.
-    axs[4].plot(t_isat * 1e3, I_avg, "k", linewidth=0.8)
+    # Panel 5: Isat raw, shot-averaged, 0..isat_tmax_ms; y starts at 0.  The IV
+    # sweep instants are scattered on the line, coloured to match the IV panels.
+    t_isat_ms = t_isat * 1e3
+    axs[4].plot(t_isat_ms, I_avg, "k", linewidth=0.8, zorder=1)
+    _scatter_iv_times_on_isat(axs[4], t_isat_ms, I_avg, marked_times)
     axs[4].set_xlim(0, isat_tmax_ms)
     axs[4].set_ylim(0,1)
     axs[4].set_ylabel("Isat [a.u.]", fontsize=11)
@@ -489,11 +561,10 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
     axs[4].grid(True, alpha=0.3)
 
     # Panel 6: all-shot-averaged FFT for the Isat run, < fft_fmax_khz.
-    axs[5].semilogy(freq_khz, fft_amp, "k", linewidth=0.9)
-    axs[5].set_xlim(0, fft_fmax_khz)
-    axs[5].set_ylabel("Isat amplitude [a.u.]", fontsize=11)
-    axs[5].set_xlabel("frequency [kHz]", fontsize=11)
-    axs[5].grid(True, which="both", alpha=0.3)
+    _draw_fft_panel(axs[5], fft, fft_fmax_khz,
+                    f"Run {isat_run_num} Isat averaged FFT (all shots), "
+                    f"scope '{isat_scope}' {isat_chan}",
+                    chan_label=f"'{isat_scope}'/{isat_chan}")
 
     name = f"{run_num}{jiv._tip_tag(iv_tip)}-{isat_run_num}-combined"
     save_path = fig_path(name) if save_fig is True else (save_fig or None)
@@ -512,7 +583,7 @@ if __name__ == '__main__':
     iv_ifn=r"D:\data\LAPD\jun2026-jia\25-He-800G-bias40V-LP-p29-line_2026-06-12.hdf5"
     isat_ifn=r"D:\data\LAPD\jun2026-jia\05-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
     
-    # plot_iv_line_run(iv_ifn, tndx_list=[-7, -5, -3, -1], save_fig=True)
+    # plot_iv_line_run(iv_ifn, tndx_list=[-3,-2,-1], save_fig=True)
 
-    # Combined IV (run 23, tip L) + Isat raw/FFT (run 01) on one figure.
-    plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip="R", tndx_list=[-20, -15, -10, -6], show=False, save_fig=True)
+    # Combined IV (run 25, tip R) + Isat raw/FFT (run 05) on one figure.
+    plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip="R", tndx_list=[-16,-14,-12,-10,-8], show=False, save_fig=True)
