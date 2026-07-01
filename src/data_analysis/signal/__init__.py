@@ -12,6 +12,8 @@ from data_analysis.signal.core import (
     coherence_spectrum,
     cross_phase_spectrum,
     avg_cross_spectrum,
+    band_cross_spectrum,
+    peak_cross_spectrum,
 )
 
 __all__ = [
@@ -26,4 +28,6 @@ __all__ = [
     "coherence_spectrum",
     "cross_phase_spectrum",
     "avg_cross_spectrum",
+    "band_cross_spectrum",
+    "peak_cross_spectrum",
 ]

@@ -1,35 +1,14 @@
 """Jun-2026 LAPD cross-correlation analysis between two scope channels.
 
-Companion to ``Jun2026_Isat.py``.  Where that module looks at *one* fixed-bias
-Isat channel's fluctuation spectrum, this one takes **two** channels and asks how
-they relate to each other in the frequency domain:
+Two channels, three frequency-domain relationships:
 
-* **magnitude-squared coherence** ``gamma2(f)`` -- which frequency bands the two
-  channels share (0..1), and
-* **cross-phase** ``phase(f)`` -- the phase lag per frequency (the standard LAPD
-  turbulence diagnostic that, with a known probe separation, gives mode
-  direction / speed),
-
-plus a time-lag **cross-correlation** whose peak is the scalar time delay.
+1. magnitude-squared coherence ``gamma2(f)`` -- shared frequency bands (0..1)
+2. cross-phase ``phase(f)`` -- phase difference per frequency
+3. time-lag cross-correlation whose peak is the scalar time delay.
 
 Channel identity is a ``(scope, channel)`` pair, e.g. ``("machscope", "C3")`` --
 a run has several scope groups, so the scope must be named.  Channel *inspection*
 (which scope/channel is what) is not done here; pick the pair yourself.
-
-Two workflows
--------------
-1. **Notebook (primary)** -- ``Jun2026_xcorr_explore.ipynb``.  Pick a probe
-   position and run the three methods on **all shots at that position**, viewing
-   a per-shot figure (shot-to-shot spread) and an ensemble-averaged figure.  The
-   per-shot / averaged **analysis** (:func:`xcorr_per_shot` / :func:`xcorr_averaged`)
-   lives here; the **figures** live in ``Jun2026_plot`` (as with every other
-   Jun-2026 figure), so this module stays pure data/DSP.
-2. **Batch (after verifying in the notebook)** -- :func:`batch_xcorr` processes
-   **one** run file, averaging the coherence/cross-phase over every shot (the
-   progress bar ticks per shot), and writes the result into that run's
-   co-located npz (:func:`xcorr_npz_path`), keyed by the channel pair so several
-   pairs can share the file.  ``Jun2026_plot`` reloads it to draw a figure.  This
-   is the module's ``__main__`` entry.
 
 Same read path as ``Jun2026_IV`` / ``Jun2026_Isat``: channels via
 ``run.channel(name, scope_name=...)``; positions via
@@ -46,6 +25,8 @@ from data_analysis.signal import (
     coherence_spectrum,
     cross_phase_spectrum,
     avg_cross_spectrum,
+    band_cross_spectrum,
+    peak_cross_spectrum,
 )
 
 import Jun2026_IV as jiv
@@ -57,6 +38,11 @@ CH_A        = ("machscope", "C2")      # e.g. LP@P29 Isat-L
 CH_B        = ("machscope", "C3")      # e.g. LP@P29 Isat-R
 TMIN_MS, TMAX_MS = 1.5, 5.0            # analysis time window (ms)
 NPERSEG     = 4096                     # Welch segment length (freq res vs variance)
+FBAND_KHZ   = (10.0, 14.0)            # fixed narrow band for band_xcorr maps (kHz)
+# Peak-tracking (for a mode whose frequency drifts across the plane): find the
+# per-position coherence peak inside SEARCH_KHZ, then integrate +-DELTAF_KHZ.
+SEARCH_KHZ  = (5.0, 30.0)             # window to locate the per-position peak (kHz)
+DELTAF_KHZ  = 2.0                     # half-width integrated around each peak (kHz)
 
 
 # =========================================================================== #
@@ -241,6 +227,31 @@ def _pair_key(ch_a, ch_b):
     return f"{ch_a[0]}-{ch_a[1]}__{ch_b[0]}-{ch_b[1]}"
 
 
+def _position_xy(pos_array, npos, nshot):
+    """(x, y) of each of the ``npos`` positions: the first shot of each block.
+
+    Kept with the spectra so a plane map has real axes (not just a position
+    index). Shared by :func:`batch_xcorr` and :func:`batch_xcorr_band`.
+    """
+    return pos_array["x"][::nshot][:npos], pos_array["y"][::nshot][:npos]
+
+
+def _merge_save_npz(out_path, new_arrays):
+    """Merge ``new_arrays`` into the run's co-located npz and rewrite it.
+
+    Loads any existing arrays at ``out_path`` (so other channel pairs already
+    stored are kept) and overwrites/adds the keys in ``new_arrays``. Shared by the
+    two batch drivers so several pairs -- and both the full-spectrum and band
+    entries -- accumulate in one file.
+    """
+    arrays = {}
+    if os.path.isfile(out_path):
+        with np.load(out_path) as d:
+            arrays = {k: d[k] for k in d.files}
+    arrays.update(new_arrays)
+    np.savez(out_path, **arrays)
+
+
 def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
                 nperseg=NPERSEG):
     """Per-position ensemble coherence/cross-phase/lag for ONE run -> co-located npz.
@@ -267,11 +278,7 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
 
     pos_array, _, _, npos, nshot = jiv.read_lp_positions(ifn)
     run = open_lapd(ifn)
-
-    # (x, y) of each position: the first shot of each position's block. Kept with
-    # the spectra so the plane map has real axes (not just a position index).
-    pos_x = np.array([pos_array["x"][p * nshot] for p in range(npos)])
-    pos_y = np.array([pos_array["y"][p * nshot] for p in range(npos)])
+    pos_x, pos_y = _position_xy(pos_array, npos, nshot)
 
     # One ensemble result PER position: average that position's shots, keep the
     # per-position gamma2/phase/xcorr so the spatial (x, y) structure is preserved.
@@ -307,28 +314,109 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
         raise ValueError("no finite shot pairs to correlate")
 
     # Merge into the run's co-located npz (keep any other pairs already stored).
+    # Guard the shared freq axis first: pairs in one file must share it.
     out_path = xcorr_npz_path(ifn)
-    arrays = {}
     if os.path.isfile(out_path):
         with np.load(out_path) as d:
-            arrays = {k: d[k] for k in d.files}
-    if "freq" in arrays and not np.array_equal(freq, arrays["freq"]):
-        raise ValueError(f"{out_path}: freq axis differs from stored pairs "
-                         "(different window / sampling rate)")
-    arrays["freq"] = freq
-    arrays["lags"] = lags
-    arrays["pos_x"] = pos_x
-    arrays["pos_y"] = pos_y
+            if "freq" in d.files and not np.array_equal(freq, d["freq"]):
+                raise ValueError(f"{out_path}: freq axis differs from stored pairs "
+                                 "(different window / sampling rate)")
     key = _pair_key(ch_a, ch_b)
-    arrays[f"{key}__gamma2"] = gamma2
-    arrays[f"{key}__phase"] = phase
-    arrays[f"{key}__xcorr"] = xcorr
-    arrays[f"{key}__nshots"] = nshots
-
-    np.savez(out_path, **arrays)
+    _merge_save_npz(out_path, {
+        "freq": freq, "lags": lags, "pos_x": pos_x, "pos_y": pos_y,
+        f"{key}__gamma2": gamma2, f"{key}__phase": phase,
+        f"{key}__xcorr": xcorr, f"{key}__nshots": nshots,
+    })
     print(f"\nWrote {out_path}: pair '{key}', {npos} positions "
           f"({int(nshots.sum())} shots total), {freq.size} freq bins, "
           f"{lags.size} lags, window {tmin_ms}-{tmax_ms} ms")
+    return out_path
+
+
+def batch_xcorr_band(ifn, ch_a=CH_A, ch_b=CH_B, fband_khz=FBAND_KHZ,
+                     track_peak=False, search_khz=SEARCH_KHZ, deltaf_khz=DELTAF_KHZ,
+                     tmin_ms=TMIN_MS, tmax_ms=TMAX_MS, nperseg=NPERSEG):
+    """Per-position **narrow-band** scalar coherence + cross-phase -> co-located npz.
+
+    Like :func:`batch_xcorr`, but collapses each position's ensemble spectrum to
+    one scalar coherence and one scalar cross-phase (the shot-averaged complex
+    spectra are averaged over a band *before* the coherence ratio / phase angle --
+    the statistically correct band estimate). Keeps the spatial dimension so a
+    plane run becomes a single-frequency coherence map and phase-difference map.
+
+    Two band modes:
+
+    * ``track_peak=False`` (default): a **fixed** band ``fband_khz = (f_lo, f_hi)``
+      (kHz) at every position, via :func:`band_cross_spectrum`.
+    * ``track_peak=True``: **peak-tracking** for a mode whose frequency drifts
+      across the plane -- at each position the coherence peak is located inside
+      ``search_khz`` and the band ``peak +- deltaf_khz`` is integrated, via
+      :func:`peak_cross_spectrum`. The located peak per position is stored too.
+
+    Writes into the run's co-located npz (:func:`xcorr_npz_path`), keyed by the
+    pair (:func:`_pair_key`) with a ``band`` suffix so it coexists with the full
+    spectra from :func:`batch_xcorr`: ``pos_x`` / ``pos_y`` (shared),
+    ``<pair>__band_gamma2`` ``(npos,)``, ``<pair>__band_phase`` ``(npos,)`` (rad),
+    ``<pair>__band_nshots`` ``(npos,)``, ``<pair>__band_fpeak`` ``(npos,)`` (the
+    per-position band-center frequency in Hz -- the tracked peak, or the fixed
+    band center), and ``<pair>__band_fband`` ``(2,)`` (the search/fixed window in
+    Hz). An existing npz is **merged**. Returns the npz path.
+    """
+    from tqdm import tqdm
+
+    # Select the per-position spectrum function (and its band args) once, then call
+    # it uniformly in the loop. peak_cross_spectrum tracks the coherence peak;
+    # band_cross_spectrum uses the fixed band. Both return (f_c, gamma2, phase, n).
+    if track_peak:
+        win = (search_khz[0] * 1e3, search_khz[1] * 1e3)
+        spectrum_fn = peak_cross_spectrum
+        band_args = (win, deltaf_khz * 1e3)
+        desc = f"peak {search_khz[0]:g}-{search_khz[1]:g}kHz +-{deltaf_khz:g}"
+    else:
+        win = (fband_khz[0] * 1e3, fband_khz[1] * 1e3)
+        spectrum_fn = band_cross_spectrum
+        band_args = (win,)
+        desc = f"band {fband_khz[0]:g}-{fband_khz[1]:g}kHz"
+
+    pos_array, _, _, npos, nshot = jiv.read_lp_positions(ifn)
+    run = open_lapd(ifn)
+    pos_x, pos_y = _position_xy(pos_array, npos, nshot)
+
+    # One scalar (coherence, phase, band-center) PER position. Dead positions (no
+    # finite shot pair) stay NaN so one bad point doesn't abort the whole plane.
+    gamma2 = np.full(npos, np.nan)
+    phase = np.full(npos, np.nan)
+    fpeak = np.full(npos, np.nan)
+    nshots = np.zeros(npos, dtype=int)
+    with tqdm(total=npos * nshot, desc="xcorr-band", unit="shot") as bar:
+        for p in range(npos):
+            sa, sb, dt = _read_pair_at_position(
+                run, ch_a, ch_b, npos, nshot, p, tmin_ms, tmax_ms)
+            try:
+                f_c, g2, ph, n_used = spectrum_fn(
+                    sa, sb, dt, *band_args, nperseg=nperseg)
+            except ValueError:
+                bar.update(sa.shape[0])
+                continue
+            gamma2[p] = g2
+            phase[p] = ph
+            fpeak[p] = f_c
+            nshots[p] = n_used
+            bar.update(sa.shape[0])
+
+    if nshots.sum() == 0:
+        raise ValueError("no finite shot pairs to correlate")
+
+    out_path = xcorr_npz_path(ifn)
+    key = _pair_key(ch_a, ch_b)
+    _merge_save_npz(out_path, {
+        "pos_x": pos_x, "pos_y": pos_y,
+        f"{key}__band_gamma2": gamma2, f"{key}__band_phase": phase,
+        f"{key}__band_nshots": nshots, f"{key}__band_fpeak": fpeak,
+        f"{key}__band_fband": np.array(win),
+    })
+    print(f"\nWrote {out_path}: pair '{key}' {desc}, {npos} positions "
+          f"({int(nshots.sum())} shots total), window {tmin_ms}-{tmax_ms} ms")
     return out_path
 
 

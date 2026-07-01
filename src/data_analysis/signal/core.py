@@ -528,26 +528,18 @@ def cross_phase_spectrum(x, y, dt, nperseg=4096, noverlap=None, detrend="constan
     return freq, np.angle(pxy)
 
 
-def avg_cross_spectrum(stack_x, stack_y, dt, nperseg=4096, noverlap=None,
+def _avg_welch_spectra(stack_x, stack_y, dt, nperseg=4096, noverlap=None,
                        detrend="constant"):
-    """Ensemble-averaged coherence + cross-phase over a shot stack.
+    """Shot-averaged Welch cross/auto spectra of a stack pair.
 
-    The two-signal analogue of :func:`avg_amplitude_spectrum`. ``stack_x`` and
-    ``stack_y`` are ``(nshot, nsamples)`` arrays of the two channels on the
-    **same** time grid (one row per shot). For each shot the Welch cross-spectrum
-    ``Pxy`` and auto-spectra ``Pxx``/``Pyy`` are formed (via
-    ``scipy.signal.csd``), then averaged across shots *before* taking the ratio:
-
-        ``gamma2 = |<Pxy>|**2 / (<Pxx> * <Pyy>)``   (magnitude-squared coherence)
-        ``phase  = angle(<Pxy>)``                    (cross-phase, radians)
-
-    Averaging the complex spectra before the ratio is what makes the coherence
-    non-trivial (a single segment gives ``gamma2 == 1`` identically); random
-    shot-to-shot phase cancels in ``<Pxy>`` where the channels are incoherent, so
-    ``gamma2`` drops there. Rows with any non-finite sample are skipped.
-
-    Returns ``(freq, gamma2, phase, n_used)`` with ``freq`` in Hz. Raises
-    ``ValueError`` if the stacks mismatch or no finite shot pair remains.
+    The shared core of :func:`avg_cross_spectrum` and :func:`band_cross_spectrum`:
+    validates the two ``(nshot, nsamples)`` stacks, drops rows with any non-finite
+    sample, forms the per-shot Welch cross-spectrum ``Pxy`` and auto-spectra
+    ``Pxx``/``Pyy`` (``scipy.signal.csd``/``welch``), and averages each **across
+    shots** (the complex ``Pxy`` averaged as a complex number, so incoherent
+    shot-to-shot phase cancels). Returns ``(freq, pxy_mean, pxx_mean, pyy_mean,
+    n_used)`` -- the three shot-averaged spectra over the frequency axis, plus the
+    number of finite shots used. Callers form ``gamma2``/``phase`` from these.
     """
     stack_x = np.asarray(stack_x, float)
     stack_y = np.asarray(stack_y, float)
@@ -570,11 +562,133 @@ def avg_cross_spectrum(stack_x, stack_y, dt, nperseg=4096, noverlap=None,
     freq, pxy = signal.csd(xs, ys, **csd_kw)
     _, pxx = signal.welch(xs, **csd_kw)
     _, pyy = signal.welch(ys, **csd_kw)
-    pxy_mean = pxy.mean(axis=0)
-    pxx_mean = pxx.mean(axis=0)
-    pyy_mean = pyy.mean(axis=0)
+    return (freq, pxy.mean(axis=0), pxx.mean(axis=0), pyy.mean(axis=0),
+            int(xs.shape[0]))
+
+
+def avg_cross_spectrum(stack_x, stack_y, dt, nperseg=4096, noverlap=None,
+                       detrend="constant"):
+    """Ensemble-averaged coherence + cross-phase over a shot stack.
+
+    The two-signal analogue of :func:`avg_amplitude_spectrum`. ``stack_x`` and
+    ``stack_y`` are ``(nshot, nsamples)`` arrays of the two channels on the
+    **same** time grid (one row per shot). For each shot the Welch cross-spectrum
+    ``Pxy`` and auto-spectra ``Pxx``/``Pyy`` are formed (via
+    ``scipy.signal.csd``), then averaged across shots *before* taking the ratio:
+
+        ``gamma2 = |<Pxy>|**2 / (<Pxx> * <Pyy>)``   (magnitude-squared coherence)
+        ``phase  = angle(<Pxy>)``                    (cross-phase, radians)
+
+    Averaging the complex spectra before the ratio is what makes the coherence
+    non-trivial (a single segment gives ``gamma2 == 1`` identically); random
+    shot-to-shot phase cancels in ``<Pxy>`` where the channels are incoherent, so
+    ``gamma2`` drops there. Rows with any non-finite sample are skipped.
+
+    Returns ``(freq, gamma2, phase, n_used)`` with ``freq`` in Hz. Raises
+    ``ValueError`` if the stacks mismatch or no finite shot pair remains.
+    """
+    freq, pxy_mean, pxx_mean, pyy_mean, n_used = _avg_welch_spectra(
+        stack_x, stack_y, dt, nperseg=nperseg, noverlap=noverlap, detrend=detrend)
 
     denom = pxx_mean * pyy_mean
     gamma2 = np.where(denom > 0, np.abs(pxy_mean) ** 2 / denom, 0.0)
     phase = np.angle(pxy_mean)
-    return freq, gamma2, phase, int(xs.shape[0])
+    return freq, gamma2, phase, n_used
+
+
+def band_cross_spectrum(stack_x, stack_y, dt, fband, nperseg=4096,
+                        noverlap=None, detrend="constant"):
+    """Narrow-band scalar coherence + cross-phase over a shot stack.
+
+    The single-frequency-band analogue of :func:`avg_cross_spectrum`: instead of
+    returning ``gamma2``/``phase`` over the whole frequency axis, it collapses a
+    band ``fband = (f_lo, f_hi)`` (Hz) to one scalar coherence and one scalar
+    cross-phase per stack pair. The shot-averaged complex spectra ``<Pxy>``,
+    ``<Pxx>``, ``<Pyy>`` (from :func:`_avg_welch_spectra`) are averaged over the
+    band's frequency bins **before** the coherence ratio and the phase angle::
+
+        gamma2 = |mean(<Pxy>[band])|**2 / (mean(<Pxx>[band]) * mean(<Pyy>[band]))
+        phase  = angle(mean(<Pxy>[band]))
+
+    Collapsing the complex spectra before the ratio/angle is the statistically
+    correct band estimate -- averaging the per-bin ``gamma2`` values (or the
+    per-bin phase) instead would mishandle the coherence bias and the +-pi phase
+    wrap. Returns ``(f_center, gamma2, phase, n_used)`` -- the band-center
+    frequency (Hz), the scalar coherence (0..1), the scalar cross-phase (radians),
+    and the number of finite shots used. Raises ``ValueError`` if ``fband`` selects
+    no frequency bin.
+    """
+    f_lo, f_hi = fband
+    freq, pxy_mean, pxx_mean, pyy_mean, n_used = _avg_welch_spectra(
+        stack_x, stack_y, dt, nperseg=nperseg, noverlap=noverlap, detrend=detrend)
+
+    band = (freq >= f_lo) & (freq <= f_hi)
+    if not band.any():
+        raise ValueError(
+            f"fband {f_lo}-{f_hi} Hz selects no frequency bin "
+            f"(df={freq[1] - freq[0]:.3g} Hz, fmax={freq[-1]:.3g} Hz)")
+
+    gamma2, phase = _collapse_band(pxy_mean, pxx_mean, pyy_mean, band)
+    return float(freq[band].mean()), gamma2, phase, n_used
+
+
+def _collapse_band(pxy_mean, pxx_mean, pyy_mean, band):
+    """Collapse shot-averaged spectra over a boolean ``band`` mask to scalars.
+
+    The statistically correct band estimate shared by :func:`band_cross_spectrum`
+    and :func:`peak_cross_spectrum`: averages the complex ``<Pxy>``/``<Pxx>``/
+    ``<Pyy>`` over the band's bins **before** the coherence ratio and phase angle.
+    Returns ``(gamma2, phase)`` -- scalar coherence (0..1) and scalar cross-phase
+    (radians). The band-center frequency is left to the caller (which already
+    knows it: the fixed band center, or the located peak).
+    """
+    pxy_b = pxy_mean[band].mean()
+    pxx_b = pxx_mean[band].mean()
+    pyy_b = pyy_mean[band].mean()
+    denom = pxx_b * pyy_b
+    gamma2 = float(np.abs(pxy_b) ** 2 / denom) if denom > 0 else 0.0
+    phase = float(np.angle(pxy_b))
+    return gamma2, phase
+
+
+def peak_cross_spectrum(stack_x, stack_y, dt, search_band, delta_f,
+                        nperseg=4096, noverlap=None, detrend="constant"):
+    """Peak-tracking scalar coherence + cross-phase over a shot stack.
+
+    For data whose dominant mode sits at a *different* frequency at each
+    measurement (e.g. a drift wave that shifts across a probe plane), a fixed band
+    straddles the peak at some positions and misses it at others.  This finds the
+    coherence peak within ``search_band = (f_lo, f_hi)`` (Hz) -- the frequency
+    where the shared mode is strongest -- then band-averages a window of half-width
+    ``delta_f`` (Hz) *centered on that peak*, so the estimate follows the mode.
+
+    The collapse itself (:func:`_collapse_band`) is identical to
+    :func:`band_cross_spectrum` -- the complex spectra are averaged before the
+    ratio/angle.  ``f_peak`` is located on the shot-averaged coherence
+    ``|<Pxy>|**2 / (<Pxx><Pyy>)`` (the shared mode), not on either auto-power
+    alone.  Returns ``(f_peak, gamma2, phase, n_used)`` -- the located peak
+    frequency (Hz, the band center actually used), the scalar coherence (0..1), the
+    scalar cross-phase (radians), and the number of finite shots used.  Raises
+    ``ValueError`` if ``search_band`` selects no frequency bin.
+    """
+    f_lo, f_hi = search_band
+    freq, pxy_mean, pxx_mean, pyy_mean, n_used = _avg_welch_spectra(
+        stack_x, stack_y, dt, nperseg=nperseg, noverlap=noverlap, detrend=detrend)
+
+    search = (freq >= f_lo) & (freq <= f_hi)
+    if not search.any():
+        raise ValueError(
+            f"search_band {f_lo}-{f_hi} Hz selects no frequency bin "
+            f"(df={freq[1] - freq[0]:.3g} Hz, fmax={freq[-1]:.3g} Hz)")
+
+    # Locate the coherence peak inside the search window (the shared mode), then
+    # integrate +-delta_f around it. Coherence is the ratio of the shot-averaged
+    # spectra, so incoherent power in the window does not pull the peak.
+    denom = pxx_mean * pyy_mean
+    coh = np.where(denom > 0, np.abs(pxy_mean) ** 2 / denom, 0.0)
+    coh_search = np.where(search, coh, -np.inf)
+    f_peak = freq[int(np.argmax(coh_search))]
+
+    band = (freq >= f_peak - delta_f) & (freq <= f_peak + delta_f)
+    gamma2, phase = _collapse_band(pxy_mean, pxx_mean, pyy_mean, band)
+    return float(f_peak), gamma2, phase, n_used

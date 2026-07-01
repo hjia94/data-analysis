@@ -632,6 +632,23 @@ def _grid_by_position(pos_x, pos_y, values):
     return grid, (xmin, xmax, ymin, ymax)
 
 
+def _draw_plane_maps(fig, axs, panels, extent):
+    """Draw a row of xy-plane ``imshow`` maps with colorbars and cm axes.
+
+    ``panels`` is a list of ``(grid, label, cmap, (vmin, vmax))`` (one per
+    ``imshow``), drawn onto ``axs`` in order; shared by the xcorr plane figures so
+    every map gets the same ``origin="lower"``, ``extent``, colorbar, and
+    X/Y-position labelling.
+    """
+    for ax, (grid, label, cmap, (vmin, vmax)) in zip(axs, panels):
+        im = ax.imshow(grid, origin="lower", extent=extent, aspect="auto",
+                       cmap=cmap, vmin=vmin, vmax=vmax)
+        fig.colorbar(im, ax=ax, label=label)
+        ax.set_xlabel("X Position [cm]")
+        ax.set_ylabel("Y Position [cm]")
+        ax.set_title(label)
+
+
 def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
                          fmin_khz=0.0, fmax_khz=80.0, gamma2_floor=0.2,
                          save_fig=True, show=False):
@@ -683,24 +700,105 @@ def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     lag_max = np.nanmax(np.abs(lag_grid)) if np.isfinite(lag_grid).any() else 1.0
 
     fig, axs = plt.subplots(1, 3, figsize=(20, 6))
-    maps = [(axs[0], g2_grid, r"coherence $\gamma^2$", "viridis", (0, 1)),
-            (axs[1], ph_grid, r"cross-phase $\Delta\phi$ [deg]", "twilight",
-             (-180, 180)),
-            (axs[2], lag_grid, r"peak lag [$\mu$s]", "RdBu_r",
-             (-lag_max, lag_max))]
-    for ax, grid, label, cmap, (vmin, vmax) in maps:
-        im = ax.imshow(grid, origin="lower", extent=extent, aspect="auto",
-                       cmap=cmap, vmin=vmin, vmax=vmax)
-        fig.colorbar(im, ax=ax, label=label)
-        ax.set_xlabel("X Position [cm]")
-        ax.set_ylabel("Y Position [cm]")
-        ax.set_title(label)
+    _draw_plane_maps(fig, axs, [
+        (g2_grid, r"coherence $\gamma^2$", "viridis", (0, 1)),
+        (ph_grid, r"cross-phase $\Delta\phi$ [deg]", "twilight", (-180, 180)),
+        (lag_grid, r"peak lag [$\mu$s]", "RdBu_r", (-lag_max, lag_max)),
+    ], extent)
 
     title = run_title(ifn, run_num_of(ifn)) or f"{run_num_of(ifn)} xcorr"
     fig.suptitle(f"{title}  —  {ch_a[0]}/{ch_a[1]} vs {ch_b[0]}/{ch_b[1]} "
                  f"({fmin_khz:g}-{fmax_khz:g} kHz band)",
                  fontsize=12, fontweight="bold")
     name = f"{run_num_of(ifn)}-xcorr-plane-{ch_a[0]}{ch_a[1]}-{ch_b[0]}{ch_b[1]}"
+    save_path = fig_path(name) if save_fig is True else (save_fig or None)
+    finalize_figure(fig, save_fig=save_path, show=show)
+
+
+def _load_xcorr_band_run(ifn, ch_a, ch_b, npz_path=None):
+    """Load a pair's per-position narrow-band scalar coherence/phase from the npz.
+
+    Reads what :func:`Jun2026_xcorr.batch_xcorr_band` wrote: one scalar coherence,
+    one scalar cross-phase (radians), and the band-center frequency per probe
+    position.  Returns ``(gamma2, phase, fpeak, nshots, fband, pos_x, pos_y)``
+    where ``gamma2``/``phase``/``fpeak``/``nshots`` are ``(npos,)``, ``fpeak`` is
+    the per-position band center in Hz (tracked peak or fixed band center), and
+    ``fband`` is the ``(f_lo, f_hi)`` search/fixed window in Hz.  ``fpeak`` falls
+    back to all-NaN for older npz files written before peak-tracking.  Returns
+    ``None`` (after printing why) if the npz or this pair's band entry is missing.
+    """
+    if npz_path is None:
+        npz_path = jxc.xcorr_npz_path(ifn)
+    key = jxc._pair_key(ch_a, ch_b)
+    try:
+        with np.load(npz_path) as d:
+            gamma2 = d[f"{key}__band_gamma2"]
+            fpeak = (d[f"{key}__band_fpeak"] if f"{key}__band_fpeak" in d.files
+                     else np.full(gamma2.shape, np.nan))
+            return (gamma2, d[f"{key}__band_phase"], fpeak,
+                    d[f"{key}__band_nshots"], d[f"{key}__band_fband"],
+                    d["pos_x"], d["pos_y"])
+    except (OSError, KeyError) as e:
+        print(f"  (xcorr band: no saved entry for pair '{key}' in {npz_path} -- {e})")
+        return None
+
+
+def plot_xcorr_band_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
+                              gamma2_floor=0.2, save_fig=True, show=False):
+    """Draw narrow-band coherence + phase-difference (+ peak-freq) xy-plane maps.
+
+    Uses the per-position scalars from :func:`Jun2026_xcorr.batch_xcorr_band` (one
+    band-averaged coherence + cross-phase per (x, y) position, collapsed the
+    statistically correct way over the band's complex spectra).  Draws
+    (:func:`_grid_by_position`):
+
+    * band coherence ``gamma2`` (0..1),
+    * band cross-phase ``Delta-phi`` (deg) -- the phase-difference map, and
+    * (peak-tracking runs only) the tracked peak frequency ``f_peak`` (kHz) --
+      how the mode frequency moves across the plane.
+
+    The ``f_peak`` panel is added only when the per-position band center varies
+    (a ``track_peak=True`` batch); a fixed-band batch has a constant center and
+    draws just the two maps.  Cross-phase (and ``f_peak``) are only trustworthy
+    where the channels are coherent, so positions with band coherence
+    ``< gamma2_floor`` are blanked (NaN) in those maps.  ``save_fig`` True routes
+    through :func:`fig_path`.
+    """
+    loaded = _load_xcorr_band_run(ifn, ch_a, ch_b, npz_path)
+    if loaded is None:
+        return
+    gamma2, phase, fpeak, _nshots, fband, pos_x, pos_y = loaded
+    fmin_khz, fmax_khz = fband[0] * 1e-3, fband[1] * 1e-3
+
+    incoherent = gamma2 < gamma2_floor
+    ph_deg = np.where(incoherent, np.nan, np.degrees(phase))
+
+    g2_grid, extent = _grid_by_position(pos_x, pos_y, gamma2)
+    ph_grid, _ = _grid_by_position(pos_x, pos_y, ph_deg)
+
+    panels = [(g2_grid, r"coherence $\gamma^2$", "viridis", (0, 1)),
+              (ph_grid, r"cross-phase $\Delta\phi$ [deg]", "twilight", (-180, 180))]
+
+    # Peak-frequency map: only when the tracked center actually varies across the
+    # plane (a fixed-band batch stores a constant center -- no map to draw).
+    fp_khz = np.where(incoherent, np.nan, fpeak * 1e-3)
+    peak_varies = np.nanstd(fp_khz) > 0
+    if peak_varies:
+        fp_grid, _ = _grid_by_position(pos_x, pos_y, fp_khz)
+        vlo, vhi = np.nanmin(fp_khz), np.nanmax(fp_khz)
+        panels.append((fp_grid, r"peak $f$ [kHz]", "plasma", (vlo, vhi)))
+
+    fig, axs = plt.subplots(1, len(panels), figsize=(7 * len(panels), 6))
+    _draw_plane_maps(fig, np.atleast_1d(axs), panels, extent)
+
+    band_desc = (f"peak in {fmin_khz:g}-{fmax_khz:g} kHz"
+                 if peak_varies else f"{fmin_khz:g}-{fmax_khz:g} kHz band")
+    title = run_title(ifn, run_num_of(ifn)) or f"{run_num_of(ifn)} xcorr"
+    fig.suptitle(f"{title}  —  {ch_a[0]}/{ch_a[1]} vs {ch_b[0]}/{ch_b[1]} "
+                 f"({band_desc})",
+                 fontsize=12, fontweight="bold")
+    name = (f"{run_num_of(ifn)}-xcorr-band-plane-"
+            f"{ch_a[0]}{ch_a[1]}-{ch_b[0]}{ch_b[1]}")
     save_path = fig_path(name) if save_fig is True else (save_fig or None)
     finalize_figure(fig, save_fig=save_path, show=show)
 
