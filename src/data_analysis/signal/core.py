@@ -440,3 +440,141 @@ def avg_amplitude_spectrum(stack, dt, detrend=True, drop_dc=True):
     if drop_dc:
         return freq[1:], amp_mean[1:], int(win.shape[0])
     return freq, amp_mean, int(win.shape[0])
+
+
+# --------------------------------------------------------------------------- #
+# Two-signal (cross) analysis: time-lag cross-correlation, coherence, and
+# cross-phase.  Like the spectrum helpers above these are generic DSP on plain
+# numpy arrays (no plasma/diagnostic knowledge); the frequency-domain pair
+# (coherence + cross-phase) is the standard "how do these two probe signals
+# relate, band by band" diagnostic.
+# --------------------------------------------------------------------------- #
+
+def cross_correlation(x, y, dt, normalize=True, max_lag=None):
+    """Time-lag cross-correlation of two 1-D traces -> ``(lags, xcorr)``.
+
+    ``x`` and ``y`` are 1-D signals sampled every ``dt`` seconds. Each is
+    mean-subtracted (detrended) first, then correlated with an FFT
+    (``scipy.signal.correlate(..., method="fft")``). ``lags`` is the lag axis in
+    **seconds** (positive lag = ``y`` delayed relative to ``x``), and the lag of
+    the peak is the time delay between the channels.
+
+    ``normalize=True`` divides by ``sqrt(sum x**2 * sum y**2)`` (Pearson-style),
+    so the result is in ``[-1, 1]`` and comparable across traces. ``max_lag``
+    (seconds), if given, clips the returned window to ``|lag| <= max_lag``.
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    if x.shape != y.shape or x.ndim != 1:
+        raise ValueError(f"x and y must be matching 1-D arrays; got {x.shape}, {y.shape}")
+
+    x = x - x.mean()
+    y = y - y.mean()
+
+    xcorr = signal.correlate(y, x, mode="full", method="fft")
+    lags = signal.correlation_lags(y.size, x.size, mode="full") * dt
+
+    if normalize:
+        norm = np.sqrt(np.sum(x**2) * np.sum(y**2))
+        if norm > 0:
+            xcorr = xcorr / norm
+
+    if max_lag is not None:
+        keep = np.abs(lags) <= max_lag
+        lags, xcorr = lags[keep], xcorr[keep]
+
+    return lags, xcorr
+
+
+def _welch_nperseg(nsamples, nperseg):
+    """Clamp ``nperseg`` to the trace length (scipy warns and clamps otherwise)."""
+    return int(min(nperseg, nsamples))
+
+
+def coherence_spectrum(x, y, dt, nperseg=4096, noverlap=None, detrend="constant"):
+    """Magnitude-squared coherence of one 1-D pair -> ``(freq, gamma2)``.
+
+    Thin wrapper over ``scipy.signal.coherence`` with ``fs = 1/dt``. ``gamma2(f)``
+    runs 0..1: near 1 where the two channels share a frequency strongly, near 0
+    where they are unrelated. Welch already averages the segments *within* this
+    one trace (that is what makes a single-pair coherence meaningful); the
+    across-shot ensemble estimate is :func:`avg_cross_spectrum`. ``nperseg`` is
+    the segment length (trades frequency resolution vs. variance) and is clamped
+    to the trace length. Returns frequency in Hz.
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    nperseg = _welch_nperseg(x.size, nperseg)
+    freq, gamma2 = signal.coherence(x, y, fs=1.0 / dt, nperseg=nperseg,
+                                    noverlap=noverlap, detrend=detrend)
+    return freq, gamma2
+
+
+def cross_phase_spectrum(x, y, dt, nperseg=4096, noverlap=None, detrend="constant"):
+    """Cross-phase of one 1-D pair -> ``(freq, phase_rad)``.
+
+    Wraps ``scipy.signal.csd`` (Welch cross-spectral density) and returns the
+    phase ``angle(Pxy)`` in radians at each frequency. Sign convention (verified):
+    ``phase`` is the phase *of* ``y`` relative to ``x`` -- if ``y`` is ``x``
+    delayed (lagging) by an angle at some frequency, the phase there is negative.
+    Pairs with :func:`coherence_spectrum` -- the phase is only trustworthy where
+    the coherence is high. Returns frequency in Hz.
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    nperseg = _welch_nperseg(x.size, nperseg)
+    freq, pxy = signal.csd(x, y, fs=1.0 / dt, nperseg=nperseg,
+                           noverlap=noverlap, detrend=detrend)
+    return freq, np.angle(pxy)
+
+
+def avg_cross_spectrum(stack_x, stack_y, dt, nperseg=4096, noverlap=None,
+                       detrend="constant"):
+    """Ensemble-averaged coherence + cross-phase over a shot stack.
+
+    The two-signal analogue of :func:`avg_amplitude_spectrum`. ``stack_x`` and
+    ``stack_y`` are ``(nshot, nsamples)`` arrays of the two channels on the
+    **same** time grid (one row per shot). For each shot the Welch cross-spectrum
+    ``Pxy`` and auto-spectra ``Pxx``/``Pyy`` are formed (via
+    ``scipy.signal.csd``), then averaged across shots *before* taking the ratio:
+
+        ``gamma2 = |<Pxy>|**2 / (<Pxx> * <Pyy>)``   (magnitude-squared coherence)
+        ``phase  = angle(<Pxy>)``                    (cross-phase, radians)
+
+    Averaging the complex spectra before the ratio is what makes the coherence
+    non-trivial (a single segment gives ``gamma2 == 1`` identically); random
+    shot-to-shot phase cancels in ``<Pxy>`` where the channels are incoherent, so
+    ``gamma2`` drops there. Rows with any non-finite sample are skipped.
+
+    Returns ``(freq, gamma2, phase, n_used)`` with ``freq`` in Hz. Raises
+    ``ValueError`` if the stacks mismatch or no finite shot pair remains.
+    """
+    stack_x = np.asarray(stack_x, float)
+    stack_y = np.asarray(stack_y, float)
+    if stack_x.shape != stack_y.shape or stack_x.ndim != 2:
+        raise ValueError(
+            f"stacks must be matching (nshot, nsamples) arrays; got "
+            f"{stack_x.shape}, {stack_y.shape}")
+
+    good = np.all(np.isfinite(stack_x), axis=1) & np.all(np.isfinite(stack_y), axis=1)
+    xs, ys = stack_x[good], stack_y[good]
+    if xs.shape[0] == 0:
+        raise ValueError("no finite shot pairs in the stacks")
+
+    nperseg = _welch_nperseg(xs.shape[1], nperseg)
+    csd_kw = dict(fs=1.0 / dt, nperseg=nperseg, noverlap=noverlap,
+                  detrend=detrend, axis=-1)
+
+    # scipy's csd/welch work over the whole (nshot, nsamples) stack at once via
+    # axis=-1, giving per-shot spectra (nshot, nf); average over shots.
+    freq, pxy = signal.csd(xs, ys, **csd_kw)
+    _, pxx = signal.welch(xs, **csd_kw)
+    _, pyy = signal.welch(ys, **csd_kw)
+    pxy_mean = pxy.mean(axis=0)
+    pxx_mean = pxx.mean(axis=0)
+    pyy_mean = pyy.mean(axis=0)
+
+    denom = pxx_mean * pyy_mean
+    gamma2 = np.where(denom > 0, np.abs(pxy_mean) ** 2 / denom, 0.0)
+    phase = np.angle(pxy_mean)
+    return freq, gamma2, phase, int(xs.shape[0])

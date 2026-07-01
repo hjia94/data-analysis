@@ -8,6 +8,10 @@ from data_analysis.signal.core import (
     analyze_downsample_options,
     amplitude_spectrum,
     avg_amplitude_spectrum,
+    cross_correlation,
+    coherence_spectrum,
+    cross_phase_spectrum,
+    avg_cross_spectrum,
 )
 
 __all__ = [
@@ -18,4 +22,8 @@ __all__ = [
     "analyze_downsample_options",
     "amplitude_spectrum",
     "avg_amplitude_spectrum",
+    "cross_correlation",
+    "coherence_spectrum",
+    "cross_phase_spectrum",
+    "avg_cross_spectrum",
 ]

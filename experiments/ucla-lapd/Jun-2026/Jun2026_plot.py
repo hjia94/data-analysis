@@ -31,6 +31,7 @@ from data_analysis.signal.core import downsample_blockmean
 
 import Jun2026_IV as jiv
 import Jun2026_Isat as jis
+import Jun2026_xcorr as jxc
 
 # Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/ for Jun-2026 figures.
 FIG_SUBDIR = "Jun2026"
@@ -569,6 +570,149 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
     name = f"{run_num}{jiv._tip_tag(iv_tip)}-{isat_run_num}-combined"
     save_path = fig_path(name) if save_fig is True else (save_fig or None)
     finalize_figure(fig, save_fig=save_path, show=show, compact_axes=axs[:4])
+
+
+# =========================================================================== #
+#  Figure: cross-correlation (coherence / cross-phase / lag) for a channel pair
+#
+#  Jun2026_xcorr.py does the reading + DSP and returns plain dicts/arrays; the
+#  figures live here, like every other Jun-2026 figure (Jun2026_Isat.py is
+#  likewise plot-free).  Three drivers share one panel drawer:
+#    plot_xcorr_per_shot(per_shot)  -- overlay every shot (from jxc.xcorr_per_shot)
+#    plot_xcorr_averaged(avg)       -- the ensemble result (from jxc.xcorr_averaged)
+#    plot_xcorr_run(ifn)            -- reload a run's ensemble result from batch npz
+#  The lag (cross-correlation) panel is optional: the per-shot/averaged figures
+#  have it; the batch npz doesn't store it, so plot_xcorr_run omits it.
+# =========================================================================== #
+
+def mask_phase_by_coherence(phase_rad, gamma2, gamma2_floor=0.5):
+    """Cross-phase in **degrees**, NaN where ``gamma2 < gamma2_floor``.
+
+    Phase is only trustworthy where the two channels are coherent, so incoherent
+    bands are blanked (NaN) before plotting.
+    """
+    return np.where(gamma2 >= gamma2_floor, np.degrees(phase_rad), np.nan)
+
+
+def _draw_xcorr_panels(axs, freq_khz, gamma2, phase_deg, lags_us=None,
+                       xcorr=None, gamma2_floor=0.5, mark_peak=False, **line_kw):
+    """Draw one trace across the coherence / cross-phase (/ lag) panels of ``axs``.
+
+    ``axs`` is 2 axes (coherence, cross-phase) or 3 (plus the time-lag panel).
+    Call once per shot to overlay faint lines, or once for a bold ensemble line;
+    ``**line_kw`` (``color``/``alpha``/``lw``) styles all panels together.  The
+    phase panel is masked to ``gamma2 >= gamma2_floor``.  The lag panel is drawn
+    only when ``axs`` has a third axis and ``lags_us``/``xcorr`` are given;
+    ``mark_peak`` then marks the cross-correlation peak.
+    """
+    axs[0].plot(freq_khz, gamma2, **line_kw)
+    axs[1].plot(freq_khz, np.where(gamma2 >= gamma2_floor, phase_deg, np.nan),
+                **line_kw)
+    if len(axs) > 2 and lags_us is not None and xcorr is not None:
+        axs[2].plot(lags_us, xcorr, **line_kw)
+        if mark_peak:
+            k = int(np.argmax(xcorr))
+            axs[2].scatter(lags_us[k], xcorr[k], s=60, zorder=3,
+                           edgecolors="k", linewidths=0.5,
+                           color=line_kw.get("color", "C0"))
+
+
+def _finish_xcorr_axes(axs, fmax_khz, title):
+    """Label / limit the shared xcorr axes (2 or 3) and title the top panel."""
+    axs[0].set_ylabel(r"coherence $\gamma^2$")
+    axs[0].set_ylim(0, 1)
+    axs[0].set_xlim(0, fmax_khz)
+    axs[0].grid(True, alpha=0.3)
+    if title:
+        axs[0].set_title(title, fontsize=12, fontweight="bold")
+
+    axs[1].set_ylabel(r"cross-phase $\Delta\phi$ [deg]")
+    axs[1].set_ylim(-180, 180)
+    axs[1].set_xlim(0, fmax_khz)
+    axs[1].set_xlabel("frequency [kHz]")
+    axs[1].grid(True, alpha=0.3)
+
+    if len(axs) > 2:
+        axs[2].set_ylabel("cross-correlation")
+        axs[2].set_xlabel(r"lag [$\mu$s]")
+        axs[2].grid(True, alpha=0.3)
+
+
+def plot_xcorr_per_shot(per_shot, title=None, fmax_khz=80.0, gamma2_floor=0.5,
+                        save_fig=None, show=True):
+    """Overlay every shot's 3-panel correlation (from ``jxc.xcorr_per_shot``).
+
+    Each shot is a faint line so the shot-to-shot spread is visible.  ``save_fig``
+    True routes through :func:`fig_path`; a string is an explicit path; falsey
+    skips saving (same convention as the rest of Jun-2026).
+    """
+    fig, axs = plt.subplots(3, 1, figsize=(12, 12))
+    freq_khz = per_shot["freq"] * 1e-3
+    lags_us = per_shot["lags"] * 1e6
+    nshot = per_shot["gamma2"].shape[0]
+    for i in range(nshot):
+        _draw_xcorr_panels(axs, freq_khz, per_shot["gamma2"][i],
+                           np.degrees(per_shot["phase"][i]), lags_us,
+                           per_shot["xcorr"][i], gamma2_floor=gamma2_floor,
+                           color="C0", alpha=0.25, lw=0.8)
+    _finish_xcorr_axes(axs, fmax_khz,
+                       title or f"Per-shot cross-correlation ({nshot} shots)")
+    save_path = fig_path(save_fig) if save_fig is True else (save_fig or None)
+    finalize_figure(fig, save_fig=save_path, show=show)
+
+
+def plot_xcorr_averaged(avg, title=None, fmax_khz=80.0, gamma2_floor=0.5,
+                        save_fig=None, show=True):
+    """Draw the ensemble-averaged 3-panel correlation (from ``jxc.xcorr_averaged``).
+
+    One bold line per panel; the cross-correlation peak is marked.  ``save_fig``
+    follows the same convention as :func:`plot_xcorr_per_shot`.
+    """
+    fig, axs = plt.subplots(3, 1, figsize=(12, 12))
+    freq_khz = avg["freq"] * 1e-3
+    lags_us = avg["lags"] * 1e6
+    _draw_xcorr_panels(axs, freq_khz, avg["gamma2"], np.degrees(avg["phase"]),
+                       lags_us, avg["xcorr"], gamma2_floor=gamma2_floor,
+                       mark_peak=True, color="k", lw=1.2)
+    n = avg.get("n_used", "?")
+    _finish_xcorr_axes(axs, fmax_khz,
+                       title or f"Ensemble-averaged cross-correlation ({n} shots)")
+    save_path = fig_path(save_fig) if save_fig is True else (save_fig or None)
+    finalize_figure(fig, save_fig=save_path, show=show)
+
+
+def plot_xcorr_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
+                   save_fig=True, show=False, fmax_khz=80.0, gamma2_floor=0.5):
+    """Draw a channel pair's ensemble coherence + cross-phase from the run's npz.
+
+    Loads the pair's ``<pair>__gamma2`` / ``<pair>__phase`` (keyed by
+    :func:`Jun2026_xcorr._pair_key`) against the shared ``freq`` axis from the
+    run's co-located npz (default :func:`Jun2026_xcorr.xcorr_npz_path`) -- no HDF5
+    read, no recomputation.  Run ``Jun2026_xcorr.batch_xcorr`` first.  The npz
+    doesn't store the lag trace, so this figure is the two frequency-domain panels
+    only (reusing :func:`_draw_xcorr_panels` with no lag axis).  ``save_fig`` True
+    routes through :func:`fig_path`.
+    """
+    if npz_path is None:
+        npz_path = jxc.xcorr_npz_path(ifn)
+    key = jxc._pair_key(ch_a, ch_b)
+    try:
+        with np.load(npz_path) as d:
+            freq = d["freq"]
+            gamma2 = d[f"{key}__gamma2"]
+            phase = d[f"{key}__phase"]
+    except (OSError, KeyError) as e:
+        print(f"  (xcorr: no saved entry for pair '{key}' in {npz_path} -- {e})")
+        return
+
+    fig, axs = plt.subplots(2, 1, figsize=(12, 8))
+    _draw_xcorr_panels(axs, freq * 1e-3, gamma2, np.degrees(phase),
+                       gamma2_floor=gamma2_floor, color="k", lw=1.0)
+    title = run_title(ifn, run_num_of(ifn)) or f"{run_num_of(ifn)} xcorr"
+    _finish_xcorr_axes(axs, fmax_khz, f"{title}  —  {ch_a[0]}/{ch_a[1]} vs {ch_b[0]}/{ch_b[1]}")
+    name = f"{run_num_of(ifn)}-xcorr-{ch_a[0]}{ch_a[1]}-{ch_b[0]}{ch_b[1]}"
+    save_path = fig_path(name) if save_fig is True else (save_fig or None)
+    finalize_figure(fig, save_fig=save_path, show=show)
 
 
 # =========================================================================== #
