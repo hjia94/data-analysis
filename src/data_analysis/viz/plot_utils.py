@@ -96,20 +96,19 @@ def select_monitor(monitor_idx: Optional[int] = None,
         tuple: (monitor_object, x_pos, y_pos, window_width, window_height)
     """
     from screeninfo import get_monitors
+    from data_analysis.io import choose_from_list
     monitors = get_monitors()
-    
+
     # If monitor_idx not provided, show available monitors and prompt user
     if monitor_idx is None:
-        print("\nAvailable monitors:")
-        for i, m in enumerate(monitors):
-            print(f"Monitor {i}: {m.width}x{m.height} at position ({m.x}, {m.y})")
-        monitor_idx = int(input("\nEnter the monitor number to display plots on: "))
-    
-    # Validate monitor index
-    if not 0 <= monitor_idx < len(monitors):
-        raise ValueError(f"Invalid monitor index {monitor_idx}. Must be between 0 and {len(monitors)-1}")
-    
-    monitor = monitors[monitor_idx]
+        monitor = choose_from_list(
+            monitors,
+            label=lambda m: f"{m.width}x{m.height} at position ({m.x}, {m.y})",
+            prompt="Monitor number", header="\nAvailable monitors:")
+    else:
+        if not 0 <= monitor_idx < len(monitors):
+            raise ValueError(f"Invalid monitor index {monitor_idx}. Must be between 0 and {len(monitors)-1}")
+        monitor = monitors[monitor_idx]
     
     # Calculate window dimensions
     width_scale, height_scale = window_scale

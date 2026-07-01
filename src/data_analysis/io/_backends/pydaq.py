@@ -276,15 +276,16 @@ def read_positions(hdf5_filename, motion_group_name=None):
 			print("No motion groups found in Control/Positions.")
 			return None
 
-		print(f"Available motion groups: {mg_list}")
-
 		if motion_group_name is None:
 			if len(mg_list) == 1:
 				motion_group_name = mg_list[0]
 				print(f"Using motion group: {motion_group_name}")
 			else:
-				print("Multiple motion groups found. Please specify motion_group_name")
-				return None
+				from .prompts import choose_from_list
+				motion_group_name = choose_from_list(
+					mg_list, label=lambda g: f'"{g}"',
+					prompt="Motion group index",
+					header="Multiple motion groups; choose one:")
 
 		if motion_group_name not in positions_group:
 			print(f"Motion group '{motion_group_name}' not found.")

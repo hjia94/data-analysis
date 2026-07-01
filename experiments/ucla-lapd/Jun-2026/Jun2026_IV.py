@@ -63,7 +63,7 @@ import re
 import numpy as np
 import h5py
 
-from data_analysis.io import open_lapd
+from data_analysis.io import open_lapd, choose_from_list
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
 from data_analysis.plasma.langmuir import find_sweep_indices, reshape_IV, analyze_IV_safe
 
@@ -221,10 +221,9 @@ def read_lp_positions(fn, motion_group_name=None):
         pos_root = f["Control/Positions"]
         groups = list(pos_root.keys())
         if motion_group_name is None:
-            if len(groups) != 1:
-                raise ValueError(
-                    f"Multiple motion groups {groups}; pass motion_group_name=.")
-            motion_group_name = groups[0]
+            motion_group_name = groups[0] if len(groups) == 1 else choose_from_list(
+                groups, label=lambda g: f'"{g}"', prompt="Motion group index",
+                header="Multiple motion groups; choose one:")
         mg = pos_root[motion_group_name]
         print(f"Using motion group: {motion_group_name!r}")
 
