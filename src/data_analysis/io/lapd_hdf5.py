@@ -50,7 +50,8 @@ import numpy as np
 # + matplotlib, so importing them eagerly would load those heavy deps even when
 # opening a pydaq/legacy file. Matches the lazy-import convention in io/scope_reader.py.
 
-__all__ = ["open_lapd", "LapdRun", "LapdSession", "detect_backend", "compare_runs"]
+__all__ = ["open_lapd", "LapdRun", "LapdSession", "detect_backend", "compare_runs",
+           "gas_puff", "parse_gas_puff", "position_shots"]
 
 
 # --------------------------------------------------------------------------- #
@@ -153,23 +154,44 @@ _PUFF_RE = re.compile(
 )
 
 
+def parse_gas_puff(text):
+    """Extract the gas-puff setting from description text -> ``(puff_v, puff_t)``.
+
+    The one parser for the operator's free-text puff bullet (``"... Puff voltage
+    75V for 24ms West+East"``): callers that already hold a parsed description
+    (e.g. for a plot title) use this instead of re-declaring the phrasing rule.
+    Tolerant of spacing/casing drift; returns ``None`` when there is no puff line.
+    """
+    m = _PUFF_RE.search(text or "")
+    if not m:
+        return None
+    return float(m.group(1)), float(m.group(2))
+
+
 def gas_puff(path):
     """Read a run's gas-puff setting -> ``(puff_v, puff_t)`` in (volts, ms).
 
     Convenience wrapper for the common "group runs by gas puff" question: opens
     the file and pulls the puff voltage/duration out of the free-text
-    plasma-condition bullet of its ``description`` (the operator writes it as
-    ``"... Puff voltage 75V for 24ms West+East"``, no clean ``key: value``).
-    Tolerant of spacing/casing drift; returns ``None`` when the run has no puff
-    line.
+    plasma-condition bullet of its ``description`` via :func:`parse_gas_puff`.
+    Returns ``None`` when the run has no puff line.
 
     LAPD_DAQ (pydaq) layout only; a non-pydaq file raises ``NotImplementedError``
     (via :meth:`LapdRun.description`).
     """
-    m = _PUFF_RE.search(open_lapd(path).description().raw or "")
-    if not m:
-        return None
-    return float(m.group(1)), float(m.group(2))
+    return parse_gas_puff(open_lapd(path).description().raw)
+
+
+def position_shots(pos_index, nshot):
+    """Positional shot slice for one probe position -> ``slice``.
+
+    LAPD_DAQ shots are stored position-major: position ``p`` owns the ``nshot``
+    consecutive rows ``[p*nshot, (p+1)*nshot)`` of the sorted shot list. Pass the
+    returned slice to :meth:`LapdRun.channel` (``shots=``) to read just that
+    position's shots off disk. This is the single home of that layout fact --
+    don't hand-build the slice at call sites.
+    """
+    return slice(pos_index * nshot, (pos_index + 1) * nshot)
 
 
 # --------------------------------------------------------------------------- #
@@ -188,6 +210,7 @@ class LapdRun:
     def __init__(self, path, backend):
         self.path = path
         self._backend = backend
+        self._tarr_cache = {}   # pydaq: scope_name -> time_array (constant per run)
 
     @property
     def backend(self):
@@ -299,6 +322,18 @@ class LapdRun:
         with self.session() as sess:
             return sess.digitizer_config()
 
+    def scope_names(self):
+        """List the scope-group names in the file (LAPD_DAQ pydaq files only).
+
+        A scope group is a top-level group holding ``shot_*`` subgroups -- the
+        same positive test :func:`detect_backend` uses, rather than a deny-list
+        of the non-scope groups (``Configuration``/``Control``). Raises
+        ``NotImplementedError`` for bapsflib/legacy files.
+        """
+        self._require_pydaq("scope_names()")
+        with h5py.File(self.path, "r") as f:
+            return [k for k in f if _has_shot_groups(f[k])]
+
     def scope_channels(self, scope_name):
         """Print channel descriptions for a scope group (pydaq files only).
 
@@ -389,6 +424,20 @@ class LapdRun:
         """Build the uniform 1-D time axis from sample count + sampling (dt, t0)."""
         return np.arange(nsamples) * dt + t0
 
+    def _scope_tarr(self, f, scope_name, scope):
+        """The scope group's stored ``time_array``, cached per scope.
+
+        The axis is constant for the run (~MBs, shared by every channel on the
+        scope), but per-position batch loops call :meth:`channel` thousands of
+        times -- re-reading it each call dominates the read cost, so it is read
+        once per scope and reused. Callers must not mutate the returned array.
+        """
+        tarr = self._tarr_cache.get(scope_name)
+        if tarr is None:
+            tarr = scope.read_hdf5_scope_tarr(f, scope_name)
+            self._tarr_cache[scope_name] = tarr
+        return tarr
+
     def channel(self, name, shots=None, scope_name=None, **kwargs):
         """Read channel data, normalized to ``(stack, tarr)`` for every backend.
 
@@ -420,8 +469,8 @@ class LapdRun:
                     return None, None
                 # The scope group stores one time_array shared by all its
                 # channels -- read it as ground truth rather than reconstructing
-                # the axis from the channel header's dt/t0.
-                tarr = scope.read_hdf5_scope_tarr(f, scope_name)
+                # the axis from the channel header's dt/t0 (cached per scope).
+                tarr = self._scope_tarr(f, scope_name, scope)
             return stack, tarr
 
         if self._backend == "bapsflib":
@@ -467,7 +516,7 @@ class LapdRun:
         """
         self._require_pydaq("iter_shots()")
         with self._open_pydaq_scope(scope_name) as (f, scope_name, scope):
-            tarr = scope.read_hdf5_scope_tarr(f, scope_name)
+            tarr = self._scope_tarr(f, scope_name, scope)
             for s in self._pydaq_shot_list(f, scope_name, shots, scope):
                 data, _dt, _t0 = scope.read_hdf5_scope_data(f, scope_name, name, s)
                 yield s, data, tarr
@@ -498,7 +547,7 @@ class LapdRun:
         """
         if self._backend == "pydaq":
             with self._open_pydaq_scope(scope_name) as (f, scope_name, scope):
-                return scope.read_hdf5_scope_tarr(f, scope_name)
+                return self._scope_tarr(f, scope_name, scope)
         if name is None:
             raise TypeError(
                 f"time_array() needs a channel name for {self._backend!r} files "

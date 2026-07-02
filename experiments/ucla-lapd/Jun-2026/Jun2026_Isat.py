@@ -32,15 +32,9 @@ import numpy as np
 import h5py
 from tqdm import tqdm
 
-from data_analysis.io import open_lapd
+from data_analysis.io import open_lapd, position_shots
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
-from data_analysis.signal import avg_amplitude_spectrum
-
-import Jun2026_IV as jiv   # noqa: F401  (kept for the commented current-scaling lines)
-
-# Scope groups that may hold probe signals.  ``Configuration`` / ``Control`` are
-# never scopes; everything else is a scope group.
-_NON_SCOPE_GROUPS = {"Configuration", "Control"}
+from data_analysis.signal import avg_amplitude_spectrum, clip_time_window
 
 # --- Batch FFT configuration (runs 00-06) -----------------------------------
 # Runs 00-06 share a fixed (stationary) Isat probe, so the averaged spectrum is
@@ -56,18 +50,20 @@ CHAN        = "C2"                     # Isat channel within that scope
 FFT_TMIN_MS = 1.5                      # FFT time window start (ms)
 FFT_TMAX_MS = 5.0                      # FFT time window stop  (ms)
 
+FFT_CHUNK_SHOTS = 50                   # shots per read in run_avg_fft (caps peak memory)
+
 
 def list_all_channels(fn):
     """Print every scope group's channel descriptions and return them.
 
     Returns ``{scope_name: {chan: description}}`` for every scope group in the
-    file (``Configuration`` / ``Control`` excluded).  Use the printout to decide
-    which scope + channel is the Isat channel you want -- nothing is classified
-    or guessed.
+    file (:meth:`LapdRun.scope_names` -- top-level groups holding ``shot_*``
+    subgroups).  Use the printout to decide which scope + channel is the Isat
+    channel you want -- nothing is classified or guessed.
     """
     out = {}
+    scope_groups = open_lapd(fn).scope_names()
     with h5py.File(fn, "r") as f:
-        scope_groups = [g for g in f.keys() if g not in _NON_SCOPE_GROUPS]
         print("Scope groups and channel descriptions:")
         for scope_name in scope_groups:
             desc = read_scope_channel_descriptions(f, scope_name)
@@ -103,18 +99,17 @@ def print_run_description(fn):
 def get_isat_at_position(run, scope_name, chan, npos, nshot, pos_index):
     """Read the raw Isat signal for ONE probe position.
 
-    Reads only that position's ``nshot`` shots off disk (a positional shot slice,
-    same ordering as ``Jun2026_IV._read_reshaped``).  Returns ``(tarr, Iarr)``
-    where ``Iarr`` is the ``(nshot, nsamples)`` raw signal (volts).  Current
-    scaling (``jiv.RESISTOR`` / ``jiv.Aprobe``) is left out for now -- the
+    Reads only that position's ``nshot`` shots off disk
+    (:func:`data_analysis.io.position_shots`).  Returns ``(tarr, Iarr)`` where
+    ``Iarr`` is the ``(nshot, nsamples)`` raw signal (volts).  Current scaling
+    (``Jun2026_IV.RESISTOR`` / ``Aprobe``) is left out for now -- the
     fluctuation *shape* is what matters, not the absolute scaling.  No sign flip
     either -- it doesn't matter for Isat fluctuations.
     """
-    shots = slice(pos_index * nshot, (pos_index + 1) * nshot)
-    Istack, tarr = run.channel(chan, scope_name=scope_name, shots=shots)
-    Iarr = Istack[:nshot]
-    # Iarr = Istack[:nshot] / (jiv.RESISTOR * jiv.Aprobe)   # current scaling (off)
-    return tarr, Iarr
+    Istack, tarr = run.channel(chan, scope_name=scope_name,
+                               shots=position_shots(pos_index, nshot))
+    # Istack /= Jun2026_IV.RESISTOR * Jun2026_IV.Aprobe   # current scaling (off)
+    return tarr, Istack
 
 
 def run_avg_fft(fn, scope_name=SCOPE_NAME, chan=CHAN,
@@ -129,22 +124,34 @@ def run_avg_fft(fn, scope_name=SCOPE_NAME, chan=CHAN,
     Returns ``(freq, amp_mean, n_shots)`` -- ``freq`` in Hz, ``amp_mean`` the
     shot-averaged single-sided amplitude (DC dropped), ``n_shots`` the number of
     shots that contributed (NaN/unreadable shots are skipped).
+
+    Shots are read in chunks of ``FFT_CHUNK_SHOTS`` and the chunk spectra
+    averaged weighted by their shot counts -- identical to the all-at-once mean,
+    but peak memory is one chunk instead of the whole multi-GB run (each shot is
+    ~2.5M samples of which only the FFT window is kept).
     """
     run = open_lapd(fn)
-    Istack, tarr = run.channel(chan, scope_name=scope_name)   # shots=None -> all
-
-    # Trim to the FFT window here, then hand the trimmed stack + dt to the
-    # shared helper (per-shot FFT + incoherent average is generic DSP).
+    tarr = run.time_array(scope_name=scope_name)
     dt = tarr[1] - tarr[0]
-    i0, i1 = np.searchsorted(tarr, [tmin_ms * 1e-3, tmax_ms * 1e-3])
-    if i1 - i0 < 2:
-        raise ValueError(
-            f"window {tmin_ms}-{tmax_ms} ms selects < 2 samples "
-            f"(i0={i0}, i1={i1})")
-    freq, amp_mean, n_shots = avg_amplitude_spectrum(Istack[:, i0:i1], dt)
+    i0, i1 = clip_time_window(tarr, tmin_ms, tmax_ms)
 
-    # amp_mean = amp_mean / (jiv.RESISTOR * jiv.Aprobe)
-    return freq, amp_mean, n_shots
+    n_all = len(run.shots(scope_name=scope_name))
+    freq = amp_sum = None
+    n_shots = 0
+    for s in range(0, n_all, FFT_CHUNK_SHOTS):
+        Istack, _ = run.channel(chan, scope_name=scope_name,
+                                shots=slice(s, min(s + FFT_CHUNK_SHOTS, n_all)))
+        try:
+            freq, amp, n = avg_amplitude_spectrum(Istack[:, i0:i1], dt)
+        except ValueError:      # no finite shots in this chunk
+            continue
+        amp_sum = amp * n if amp_sum is None else amp_sum + amp * n
+        n_shots += n
+    if amp_sum is None:
+        raise ValueError(f"no finite shots for '{scope_name}'/{chan} in {fn!r}")
+
+    # amp_mean = amp_mean / (Jun2026_IV.RESISTOR * Jun2026_IV.Aprobe)
+    return freq, amp_sum / n_shots, n_shots
 
 
 def batch_fft(data_dir=DATA_DIR, run_glob=RUN_GLOB, out_npz=OUT_NPZ,

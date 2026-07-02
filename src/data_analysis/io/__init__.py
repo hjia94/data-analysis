@@ -9,7 +9,8 @@ and returns a :class:`~data_analysis.io.lapd_hdf5.LapdRun`; the per-provenance
 backends under :mod:`data_analysis.io._backends` are private implementation detail.
 """
 
-from .lapd_hdf5 import open_lapd, LapdRun, LapdSession, compare_runs, gas_puff
+from .lapd_hdf5 import (open_lapd, LapdRun, LapdSession, compare_runs,
+                        gas_puff, parse_gas_puff, position_shots)
 from .prompts import choose_from_list
 
 __all__ = [
@@ -18,5 +19,7 @@ __all__ = [
     "LapdSession",
     "compare_runs",
     "gas_puff",
+    "parse_gas_puff",
+    "position_shots",
     "choose_from_list",
 ]

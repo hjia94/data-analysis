@@ -63,7 +63,7 @@ import re
 import numpy as np
 import h5py
 
-from data_analysis.io import open_lapd, choose_from_list
+from data_analysis.io import open_lapd, choose_from_list, position_shots
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
 from data_analysis.plasma.langmuir import find_sweep_indices, reshape_IV, analyze_IV_safe
 
@@ -92,6 +92,15 @@ I_SIGN = -1           # +1 / -1 to orient current (electron current positive at 
 
 LP_SCOPE_CANDIDATES = ("lpscope", "scope")  # scope-group names that may hold the LP IV
 #===============================================================================================================================================
+
+
+def run_num_of(ifn):
+    """The leading run-number token of a run file (``"02-He-..."`` -> ``"02"``).
+
+    The one home of the ``NN-description.hdf5`` filename convention -- the other
+    Jun-2026 modules import this rather than re-splitting the basename.
+    """
+    return os.path.basename(ifn).split("-")[0]
 
 
 def find_lp_scope(fn):
@@ -273,14 +282,14 @@ def _read_reshaped(run, scope_name, I_chan, V_chan, npos, nshot, pos_index=None)
         shots = slice(0, npos * nshot)
         out_npos = npos
     else:
-        shots = slice(pos_index * nshot, (pos_index + 1) * nshot)
+        shots = position_shots(pos_index, nshot)
         out_npos = 1
 
     Vstack, tarr = run.channel(V_chan, scope_name=scope_name, shots=shots)
     Istack, _ = run.channel(I_chan, scope_name=scope_name, shots=shots)
 
     V3d = Vstack.reshape((out_npos, nshot, -1))
-    I3d = Istack.reshape((out_npos, nshot, -1)) * I_SIGN / (RESISTOR * Aprobe)
+    I3d = Istack.reshape((out_npos, nshot, -1)) * (I_SIGN / (RESISTOR * Aprobe))
     return tarr, V3d, I3d
 
 
@@ -339,45 +348,75 @@ def analyze_tip_at_position(run, scope_name, I_chan, V_chan, npos, nshot,
     return analyze_IV_safe(V_rs[0, sweep_idx], I_trace)
 
 
-def resolve_iv_channels(ifn, tip=None):
-    """Decide which scope group and I/V channels to use.
+def resolve_iv_channel_map(ifn):
+    """Every analyzable tip's channels: ``{tip: (scope_name, I_chan, V_chan)}``.
 
     Honors the top-of-file ``SCOPE_NAME`` / ``I_CHAN`` / ``V_CHAN`` override
-    first; any field left ``None`` is auto-detected from the channel
-    descriptions only.  Returns ``(scope_name, I_chan, V_chan)``.
+    first (which collapses the map to ``{None: ...}`` -- the untagged single-tip
+    case); otherwise auto-detects every complete I+V pair from the channel
+    descriptions.  The single owner of the override-vs-discover decision, shared
+    by :func:`resolve_iv_channels` and :func:`process_run`.
     """
     scope_name = SCOPE_NAME if SCOPE_NAME is not None else find_lp_scope(ifn)
 
     if I_CHAN is not None and V_CHAN is not None:
         print(f"\nUsing USER-OVERRIDE channels: I={I_CHAN}, V={V_CHAN} "
               f"(scope '{scope_name}')")
-        return scope_name, I_CHAN, V_CHAN
+        return {None: (scope_name, I_CHAN, V_CHAN)}
     if (I_CHAN is None) != (V_CHAN is None):
         raise ValueError("Set BOTH I_CHAN and V_CHAN to override, or leave both None.")
 
     pairs, _ = discover_lp_channels(ifn, scope_name)
+    return {tip: (scope_name, chans["I"], chans["V"]) for tip, chans in pairs.items()}
+
+
+def resolve_iv_channels(ifn, tip=None):
+    """Decide which scope group and I/V channels to use for ONE tip.
+
+    Honors the top-of-file ``SCOPE_NAME`` / ``I_CHAN`` / ``V_CHAN`` override
+    first; else picks ``tip`` (default: the first complete I+V pair) from
+    :func:`resolve_iv_channel_map`.  Returns ``(scope_name, I_chan, V_chan)``.
+    """
+    channel_map = resolve_iv_channel_map(ifn)
+    if None in channel_map:                      # override always wins
+        return channel_map[None]
     if tip is None:
-        tip = next(iter(pairs))
-    if tip not in pairs:
-        raise ValueError(f"Tip {tip!r} has no complete I+V pair; available: {list(pairs)}")
-    I_chan, V_chan = pairs[tip]["I"], pairs[tip]["V"]
+        tip = next(iter(channel_map))
+    if tip not in channel_map:
+        raise ValueError(f"Tip {tip!r} has no complete I+V pair; available: {list(channel_map)}")
+    scope_name, I_chan, V_chan = channel_map[tip]
     print(f"\nAuto-selected tip {tip}: I={I_chan}, V={V_chan} (scope '{scope_name}')")
     return scope_name, I_chan, V_chan
 
 
-def save_IV_data(ifn, save_path, tip=None):
+def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=None):
     """Detect sweeps, reshape + smooth the IV traces, and save to ``.npz``.
 
     Same workflow as Mar-2026's ``save_IV_data`` but for the pydaq format and
     for a single tip.  Channels come from :func:`resolve_iv_channels` (top-of-file
     override, else auto-detected first complete I+V pair).
+
+    ``run`` / ``channels`` / ``positions`` let a caller that already opened the
+    file, resolved ``(scope_name, I_chan, V_chan)``, and read
+    ``(xpos, ypos, npos, nshot)`` -- :func:`process_run`, once per run -- pass
+    them in instead of re-running discovery for every tip; each ``None`` is
+    resolved here (the standalone / notebook path).
+
+    Returns ``(Vswp_arr_rs, Iswp_arr_rs)`` -- the reshaped sweep arrays just
+    saved -- so the caller can feed :func:`process_and_save` directly instead of
+    re-loading the multi-GB npz it just wrote.
     """
-    run = open_lapd(ifn)
-    print(f"backend: {run.backend}")
+    if run is None:
+        run = open_lapd(ifn)
+        print(f"backend: {run.backend}")
 
-    scope_name, I_chan, V_chan = resolve_iv_channels(ifn, tip=tip)
+    scope_name, I_chan, V_chan = (channels if channels is not None
+                                  else resolve_iv_channels(ifn, tip=tip))
 
-    _, xpos, ypos, npos, nshot = read_lp_positions(ifn)
+    if positions is None:
+        _, xpos, ypos, npos, nshot = read_lp_positions(ifn)
+    else:
+        xpos, ypos, npos, nshot = positions
 
     tarr, Vswp_arr, Iswp_arr = get_IV_arr(run, scope_name, I_chan, V_chan, npos, nshot)
 
@@ -398,6 +437,7 @@ def save_IV_data(ifn, save_path, tip=None):
              data_timestamp=data_timestamp, xpos=xpos, ypos=ypos,
              npos=npos, nshot=nshot, I_chan=I_chan, V_chan=V_chan)
     print(f"Saved to: {save_path}")
+    return Vswp_arr_rs, Iswp_arr_rs
 
 
 def _mean_sem(vals):
@@ -426,27 +466,22 @@ def process_and_save(voltage_data, current_data, save_path):
     """
     n_locs, n_shots, n_sweeps, _ = current_data.shape
 
-    # Pre-allocate 2D output arrays with NaNs (locs, sweeps)
-    Vp_arr = np.full((n_locs, n_sweeps), np.nan)
-    Te_arr = np.full((n_locs, n_sweeps), np.nan)
-    ne_arr = np.full((n_locs, n_sweeps), np.nan)
-
-    # Pre-allocate 2D error arrays for the error bars
-    Vp_err = np.full((n_locs, n_sweeps), np.nan)
-    Te_err = np.full((n_locs, n_sweeps), np.nan)
-    ne_err = np.full((n_locs, n_sweeps), np.nan)
+    # Pre-allocate the (mean, err) output pair per quantity, NaN-filled
+    # (locs, sweeps); everything downstream (averaging, incremental save,
+    # return) is driven off this dict so adding a quantity is one key.
+    arrs = {k: (np.full((n_locs, n_sweeps), np.nan),
+                np.full((n_locs, n_sweeps), np.nan))
+            for k in ("Vp", "Te", "ne")}
 
     total_traces = n_locs * n_shots * n_sweeps
     print(f"Starting batch processing of {total_traces} traces across {n_locs} locations...")
     print(f"Averaging {n_shots} shots per sweep...")
 
     start_time = time.time()
-    traces_completed = 0
     fail_count = 0
 
     # Progress bar over locations; the per-trace fail rate is shown in the postfix
     # and refreshed each location.  tqdm provides the %, elapsed, ETA and rate.
-    arrs = {"Vp": (Vp_arr, Vp_err), "Te": (Te_arr, Te_err), "ne": (ne_arr, ne_err)}
     pbar = tqdm(range(n_locs), desc="Analyzing", unit="loc")
     for loc in pbar:
         for swp in range(n_sweeps):
@@ -471,8 +506,6 @@ def process_and_save(voltage_data, current_data, save_path):
                     temp["Te"].append(Te)
                     temp["ne"].append(ne)
 
-                traces_completed += 1
-
             # --- AVERAGING LOGIC ---
             # Mean + standard error of the valid shots, identically for each quantity.
             for key, (arr, err) in arrs.items():
@@ -483,11 +516,12 @@ def process_and_save(voltage_data, current_data, save_path):
         # ==========================================
         # Save all 6 arrays to the file
         np.savez(save_path,
-                 Vp_arr=Vp_arr, Te_arr=Te_arr, ne_arr=ne_arr,
-                 Vp_err=Vp_err, Te_err=Te_err, ne_err=ne_err)
+                 **{f"{k}_arr": arr for k, (arr, _) in arrs.items()},
+                 **{f"{k}_err": err for k, (_, err) in arrs.items()})
 
         # Live running fail rate alongside the progress bar
-        pbar.set_postfix(fails=f"{fail_count} ({fail_count / traces_completed * 100:.1f}%)")
+        traces_done = (loc + 1) * n_sweeps * n_shots
+        pbar.set_postfix(fails=f"{fail_count} ({fail_count / traces_done * 100:.1f}%)")
 
     # ==========================================
     # FINAL SUMMARY
@@ -506,6 +540,8 @@ def process_and_save(voltage_data, current_data, save_path):
     print(f"Data saved to: {save_path}")
     print("=" * 55)
 
+    (Vp_arr, Vp_err), (Te_arr, Te_err), (ne_arr, ne_err) = (
+        arrs[k] for k in ("Vp", "Te", "ne"))
     return Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err
 
 
@@ -520,6 +556,17 @@ def load_sweep_data(data_dir, run_num, tip=None):
     with np.load(save_path) as data:
         return (data["Vswp_arr_rs"], data["Iswp_arr_rs"], data["data_timestamp"],
                 data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"]))
+
+
+def load_sweep_axes(data_dir, run_num, tip=None):
+    """Just the position axes + shot layout from a saved sweep npz.
+
+    ``np.load`` reads npz entries lazily, so this skips the multi-hundred-MB
+    sweep arrays -- for plot drivers that only need ``(xpos, ypos, npos, nshot)``.
+    """
+    save_path = os.path.join(data_dir, f"{run_num}{_tip_tag(tip)}-sweep-data.npz")
+    with np.load(save_path) as data:
+        return data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"])
 
 
 def load_data(data_dir, run_num, tip=None):
@@ -552,21 +599,19 @@ def process_run(ifn):
     experiment); change it at the top of the file if a run needs the other sign.
     """
     data_dir = os.path.dirname(ifn)
-    run_num = os.path.basename(ifn).split("-")[0]
+    run_num = run_num_of(ifn)
 
-    # Tips to process: a single None tip when overriding (resolve_iv_channels
-    # then uses the override block), else every discovered complete-pair tip.
-    # None flows through _tip_tag/save_IV_data/load_sweep_data as the untagged
-    # single-tip case, so no "override" sentinel decoding is needed.
-    if I_CHAN is not None and V_CHAN is not None:
-        tips = [None]
-    else:
-        scope_name = SCOPE_NAME if SCOPE_NAME is not None else find_lp_scope(ifn)
-        pairs, _ = discover_lp_channels(ifn, scope_name)
-        tips = list(pairs)
+    # Everything tip-invariant is resolved ONCE for the run: the open handle,
+    # the scope/channel map (a None tip = the override, flowing through
+    # _tip_tag/save_IV_data as the untagged single-tip case), and the positions.
+    # save_IV_data reuses these instead of re-running discovery per tip.
+    run = open_lapd(ifn)
+    print(f"backend: {run.backend}")
+    channel_map = resolve_iv_channel_map(ifn)
+    _, xpos, ypos, npos, nshot = read_lp_positions(ifn)
 
     results = {}
-    for tip in tips:
+    for tip, channels in channel_map.items():
         tag = _tip_tag(tip)
         print("\n" + "=" * 70)
         print(f"PROCESSING tip {tip if tip is not None else 'override'}")
@@ -575,9 +620,9 @@ def process_run(ifn):
         sweep_path = os.path.join(data_dir, f"{run_num}{tag}-sweep-data.npz")
         plasma_path = os.path.join(data_dir, f"{run_num}{tag}-plasma-data.npz")
 
-        save_IV_data(ifn, sweep_path, tip=tip)
-
-        Vswp_arr_rs, Iswp_arr_rs, *_ = load_sweep_data(data_dir, run_num, tip=tip)
+        Vswp_arr_rs, Iswp_arr_rs = save_IV_data(
+            ifn, sweep_path, tip=tip, run=run, channels=channels,
+            positions=(xpos, ypos, npos, nshot))
         process_and_save(Vswp_arr_rs, Iswp_arr_rs, plasma_path)
 
         results[tip if tip is not None else "override"] = (sweep_path, plasma_path)
@@ -591,11 +636,6 @@ def process_run(ifn):
 if __name__ == '__main__':
 
     ifn = r"D:\data\LAPD\jun2026-jia\25-He-800G-bias40V-LP-p29-line_2026-06-12.hdf5"
-
-    if not ifn:
-        raise SystemExit(
-            "Set `ifn` to a run file first (or use Jun2026_IV_explore.ipynb to "
-            "inspect one position before running the batch pipeline).")
 
     # Batch-process every complete-pair tip and save the .npz results.  Draw the
     # figures afterwards from the saved .npz with Jun2026_plot.plot_iv_line_run(ifn).

@@ -383,6 +383,32 @@ def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, wi
     return freq, stft_matrix, stft_time
 
 
+def clip_time_window(tarr, tmin_ms, tmax_ms):
+    """Index range ``[i0, i1)`` of ``tarr`` (seconds) inside ``[tmin, tmax]`` ms.
+
+    The standard "trim the shot stack to the analysis window" step: slice with
+    ``stack[:, i0:i1]`` before handing the stack to a spectrum helper. Raises
+    ``ValueError`` if the window selects fewer than 2 samples.
+    """
+    i0, i1 = np.searchsorted(tarr, [tmin_ms * 1e-3, tmax_ms * 1e-3])
+    if i1 - i0 < 2:
+        raise ValueError(
+            f"window {tmin_ms}-{tmax_ms} ms selects < 2 samples (i0={i0}, i1={i1})")
+    return int(i0), int(i1)
+
+
+def finite_row_mask(*stacks):
+    """Boolean mask of rows (shots) that are all-finite in every given stack.
+
+    The row filter every shot-ensemble helper applies before averaging: NaN rows
+    mark unreadable shots and must not poison the ensemble.
+    """
+    good = np.all(np.isfinite(stacks[0]), axis=1)
+    for s in stacks[1:]:
+        good &= np.all(np.isfinite(s), axis=1)
+    return good
+
+
 def amplitude_spectrum(x, dt, detrend=True, drop_dc=True):
     """Single-sided amplitude spectrum of a 1-D trace.
 
@@ -426,8 +452,7 @@ def avg_amplitude_spectrum(stack, dt, detrend=True, drop_dc=True):
     if stack.shape[1] < 2:
         raise ValueError(f"need >= 2 samples, got {stack.shape[1]}")
 
-    good = np.all(np.isfinite(stack), axis=1)
-    win = stack[good]
+    win = stack[finite_row_mask(stack)]
     if win.shape[0] == 0:
         raise ValueError("no finite rows in stack")
 
@@ -548,7 +573,7 @@ def _avg_welch_spectra(stack_x, stack_y, dt, nperseg=4096, noverlap=None,
             f"stacks must be matching (nshot, nsamples) arrays; got "
             f"{stack_x.shape}, {stack_y.shape}")
 
-    good = np.all(np.isfinite(stack_x), axis=1) & np.all(np.isfinite(stack_y), axis=1)
+    good = finite_row_mask(stack_x, stack_y)
     xs, ys = stack_x[good], stack_y[good]
     if xs.shape[0] == 0:
         raise ValueError("no finite shot pairs in the stacks")

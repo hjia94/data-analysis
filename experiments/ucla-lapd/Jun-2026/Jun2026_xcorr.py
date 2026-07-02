@@ -18,8 +18,9 @@ the coherence/phase is what matters, not absolute current scaling.
 
 import os
 import numpy as np
+from tqdm import tqdm
 
-from data_analysis.io import open_lapd
+from data_analysis.io import open_lapd, position_shots
 from data_analysis.signal import (
     cross_correlation,
     coherence_spectrum,
@@ -27,6 +28,8 @@ from data_analysis.signal import (
     avg_cross_spectrum,
     band_cross_spectrum,
     peak_cross_spectrum,
+    clip_time_window,
+    finite_row_mask,
 )
 
 import Jun2026_IV as jiv
@@ -49,28 +52,13 @@ DELTAF_KHZ  = 2.0                     # half-width integrated around each peak (
 #  Reading -- pull a position's shots for both channels onto one time grid
 # =========================================================================== #
 
-def _clip_window(tarr, tmin_ms, tmax_ms):
-    """Index range ``[i0, i1)`` of ``tarr`` (seconds) inside ``[tmin, tmax]`` ms."""
-    i0, i1 = np.searchsorted(tarr, [tmin_ms * 1e-3, tmax_ms * 1e-3])
-    if i1 - i0 < 2:
-        raise ValueError(
-            f"window {tmin_ms}-{tmax_ms} ms selects < 2 samples (i0={i0}, i1={i1})")
-    return int(i0), int(i1)
-
-
-def _finite_row_mask(stack_a, stack_b):
-    """Boolean mask of shots (rows) that are all-finite in *both* stacks."""
-    return (np.all(np.isfinite(stack_a), axis=1)
-            & np.all(np.isfinite(stack_b), axis=1))
-
-
 def _read_pair_at_position(run, ch_a, ch_b, npos, nshot, pos_index,
                            tmin_ms=TMIN_MS, tmax_ms=TMAX_MS):
     """Read both channels' shots at one probe position onto a common time grid.
 
     ``ch_a`` / ``ch_b`` are ``(scope, channel)`` pairs.  Only that position's
-    ``nshot`` shots are read off disk (a positional shot slice, same ordering as
-    ``Jun2026_Isat.get_isat_at_position``).  Returns ``(stack_a, stack_b, dt)``
+    ``nshot`` shots are read off disk
+    (:func:`data_analysis.io.position_shots`).  Returns ``(stack_a, stack_b, dt)``
     with the two ``(nshot, nsamples)`` stacks clipped to ``[tmin_ms, tmax_ms]``
     and on the *same* grid, plus the sample interval ``dt`` (seconds).
 
@@ -80,14 +68,14 @@ def _read_pair_at_position(run, ch_a, ch_b, npos, nshot, pos_index,
     B's rows are resampled onto A's clipped grid via ``np.interp``.
     """
     (scope_a, chan_a), (scope_b, chan_b) = ch_a, ch_b
-    shots = slice(pos_index * nshot, (pos_index + 1) * nshot)
+    shots = position_shots(pos_index, nshot)
 
     stack_a, tarr_a = run.channel(chan_a, scope_name=scope_a, shots=shots)
     stack_b, tarr_b = run.channel(chan_b, scope_name=scope_b, shots=shots)
     if stack_a is None or stack_b is None:
         raise ValueError(f"could not read {ch_a} or {ch_b} at position {pos_index}")
 
-    ia0, ia1 = _clip_window(tarr_a, tmin_ms, tmax_ms)
+    ia0, ia1 = clip_time_window(tarr_a, tmin_ms, tmax_ms)
     ta = tarr_a[ia0:ia1]
     sa = stack_a[:, ia0:ia1]
     dt = ta[1] - ta[0]
@@ -99,7 +87,7 @@ def _read_pair_at_position(run, ch_a, ch_b, npos, nshot, pos_index,
 
     # Cross scope: clip B to its own window, then interpolate each row onto A's
     # grid (row-wise) so both stacks live on the same axis for the FFTs.
-    ib0, ib1 = _clip_window(tarr_b, tmin_ms, tmax_ms)
+    ib0, ib1 = clip_time_window(tarr_b, tmin_ms, tmax_ms)
     tb = tarr_b[ib0:ib1]
     sb_clip = stack_b[:, ib0:ib1]
     sb = np.vstack([np.interp(ta, tb, row) for row in sb_clip])
@@ -127,7 +115,7 @@ def xcorr_per_shot(stack_a, stack_b, dt, nperseg=NPERSEG):
     """
     stack_a = np.asarray(stack_a, float)
     stack_b = np.asarray(stack_b, float)
-    good = _finite_row_mask(stack_a, stack_b)
+    good = finite_row_mask(stack_a, stack_b)
 
     freq = lags = None
     g2_rows, ph_rows, xc_rows = [], [], []
@@ -163,7 +151,7 @@ def _ensemble_xcorr(stack_a, stack_b, dt):
     """
     stack_a = np.asarray(stack_a, float)
     stack_b = np.asarray(stack_b, float)
-    good = _finite_row_mask(stack_a, stack_b)
+    good = finite_row_mask(stack_a, stack_b)
     a_avg = stack_a[good].mean(axis=0)
     b_avg = stack_b[good].mean(axis=0)
     return cross_correlation(a_avg, b_avg, dt)
@@ -215,8 +203,7 @@ def xcorr_npz_path(ifn):
     derived from the run number only, so every channel-pair for that run shares
     one file.
     """
-    run_num = os.path.basename(ifn).split("-")[0]
-    return os.path.join(os.path.dirname(ifn), f"{run_num}{OUT_NPZ_SUFFIX}")
+    return os.path.join(os.path.dirname(ifn), f"{jiv.run_num_of(ifn)}{OUT_NPZ_SUFFIX}")
 
 
 def _pair_key(ch_a, ch_b):
@@ -252,6 +239,31 @@ def _merge_save_npz(out_path, new_arrays):
     np.savez(out_path, **arrays)
 
 
+def _iter_run_positions(ifn, ch_a, ch_b, tmin_ms, tmax_ms, desc):
+    """Per-position read loop shared by the two batch drivers.
+
+    Reads the run's positions, opens the file, and returns ``(pos_x, pos_y,
+    npos, gen)`` where ``gen`` yields ``(p, sa, sb, dt)`` for each position --
+    the two clipped shot stacks from :func:`_read_pair_at_position` -- under a
+    per-shot tqdm bar (the read is the slow part on a plane run, so per-shot
+    ticks give continuous feedback).  A caller that ``continue``s past a failed
+    position still ticks the bar.
+    """
+    pos_array, _, _, npos, nshot = jiv.read_lp_positions(ifn)
+    run = open_lapd(ifn)
+    pos_x, pos_y = _position_xy(pos_array, npos, nshot)
+
+    def gen():
+        with tqdm(total=npos * nshot, desc=desc, unit="shot") as bar:
+            for p in range(npos):
+                sa, sb, dt = _read_pair_at_position(
+                    run, ch_a, ch_b, npos, nshot, p, tmin_ms, tmax_ms)
+                yield p, sa, sb, dt
+                bar.update(sa.shape[0])
+
+    return pos_x, pos_y, npos, gen()
+
+
 def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
                 nperseg=NPERSEG):
     """Per-position ensemble coherence/cross-phase/lag for ONE run -> co-located npz.
@@ -274,41 +286,31 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
     other pairs are kept), so several pairs accumulate in one file. Returns the npz
     path.
     """
-    from tqdm import tqdm
-
-    pos_array, _, _, npos, nshot = jiv.read_lp_positions(ifn)
-    run = open_lapd(ifn)
-    pos_x, pos_y = _position_xy(pos_array, npos, nshot)
+    pos_x, pos_y, npos, positions = _iter_run_positions(
+        ifn, ch_a, ch_b, tmin_ms, tmax_ms, "xcorr")
 
     # One ensemble result PER position: average that position's shots, keep the
     # per-position gamma2/phase/xcorr so the spatial (x, y) structure is preserved.
-    # The bar ticks per shot as each position is read off disk (the read is the
-    # slow part on a plane run, so per-shot ticks give continuous feedback).
     freq = lags = None
     gamma2 = phase = xcorr = None   # (npos, n*), filled as positions complete
     nshots = np.zeros(npos, dtype=int)
-    with tqdm(total=npos * nshot, desc="xcorr", unit="shot") as bar:
-        for p in range(npos):
-            sa, sb, dt = _read_pair_at_position(
-                run, ch_a, ch_b, npos, nshot, p, tmin_ms, tmax_ms)
-            try:
-                f, g2, ph, n_used = avg_cross_spectrum(sa, sb, dt, nperseg=nperseg)
-            except ValueError:
-                # No finite shot pair at this position: leave its row NaN so one
-                # dead position doesn't abort the whole plane.
-                bar.update(sa.shape[0])
-                continue
-            lag, xc = _ensemble_xcorr(sa, sb, dt)
-            if gamma2 is None:
-                freq, lags = f, lag
-                gamma2 = np.full((npos, f.size), np.nan)
-                phase = np.full((npos, f.size), np.nan)
-                xcorr = np.full((npos, lag.size), np.nan)
-            gamma2[p] = g2
-            phase[p] = ph
-            xcorr[p] = xc
-            nshots[p] = n_used
-            bar.update(sa.shape[0])
+    for p, sa, sb, dt in positions:
+        try:
+            f, g2, ph, n_used = avg_cross_spectrum(sa, sb, dt, nperseg=nperseg)
+        except ValueError:
+            # No finite shot pair at this position: leave its row NaN so one
+            # dead position doesn't abort the whole plane.
+            continue
+        lag, xc = _ensemble_xcorr(sa, sb, dt)
+        if gamma2 is None:
+            freq, lags = f, lag
+            gamma2 = np.full((npos, f.size), np.nan)
+            phase = np.full((npos, f.size), np.nan)
+            xcorr = np.full((npos, lag.size), np.nan)
+        gamma2[p] = g2
+        phase[p] = ph
+        xcorr[p] = xc
+        nshots[p] = n_used
 
     if freq is None or nshots.sum() == 0:
         raise ValueError("no finite shot pairs to correlate")
@@ -362,8 +364,6 @@ def batch_xcorr_band(ifn, ch_a=CH_A, ch_b=CH_B, fband_khz=FBAND_KHZ,
     band center), and ``<pair>__band_fband`` ``(2,)`` (the search/fixed window in
     Hz). An existing npz is **merged**. Returns the npz path.
     """
-    from tqdm import tqdm
-
     # Select the per-position spectrum function (and its band args) once, then call
     # it uniformly in the loop. peak_cross_spectrum tracks the coherence peak;
     # band_cross_spectrum uses the fixed band. Both return (f_c, gamma2, phase, n).
@@ -378,9 +378,8 @@ def batch_xcorr_band(ifn, ch_a=CH_A, ch_b=CH_B, fband_khz=FBAND_KHZ,
         band_args = (win,)
         desc = f"band {fband_khz[0]:g}-{fband_khz[1]:g}kHz"
 
-    pos_array, _, _, npos, nshot = jiv.read_lp_positions(ifn)
-    run = open_lapd(ifn)
-    pos_x, pos_y = _position_xy(pos_array, npos, nshot)
+    pos_x, pos_y, npos, positions = _iter_run_positions(
+        ifn, ch_a, ch_b, tmin_ms, tmax_ms, "xcorr-band")
 
     # One scalar (coherence, phase, band-center) PER position. Dead positions (no
     # finite shot pair) stay NaN so one bad point doesn't abort the whole plane.
@@ -388,21 +387,16 @@ def batch_xcorr_band(ifn, ch_a=CH_A, ch_b=CH_B, fband_khz=FBAND_KHZ,
     phase = np.full(npos, np.nan)
     fpeak = np.full(npos, np.nan)
     nshots = np.zeros(npos, dtype=int)
-    with tqdm(total=npos * nshot, desc="xcorr-band", unit="shot") as bar:
-        for p in range(npos):
-            sa, sb, dt = _read_pair_at_position(
-                run, ch_a, ch_b, npos, nshot, p, tmin_ms, tmax_ms)
-            try:
-                f_c, g2, ph, n_used = spectrum_fn(
-                    sa, sb, dt, *band_args, nperseg=nperseg)
-            except ValueError:
-                bar.update(sa.shape[0])
-                continue
-            gamma2[p] = g2
-            phase[p] = ph
-            fpeak[p] = f_c
-            nshots[p] = n_used
-            bar.update(sa.shape[0])
+    for p, sa, sb, dt in positions:
+        try:
+            f_c, g2, ph, n_used = spectrum_fn(
+                sa, sb, dt, *band_args, nperseg=nperseg)
+        except ValueError:
+            continue
+        gamma2[p] = g2
+        phase[p] = ph
+        fpeak[p] = f_c
+        nshots[p] = n_used
 
     if nshots.sum() == 0:
         raise ValueError("no finite shot pairs to correlate")

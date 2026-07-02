@@ -5,8 +5,6 @@ The **plotting** home for the Jun-2026 LAPD analyses.  The processing modules
 to ``.npz``; this module reads those saved arrays back and draws the figures.
 It does **no** processing of its own.
 
-TODO: Show plot not working
-
 Layout
 ------
 * **Shared helpers** (top): figure finalisation (:func:`finalize_figure`),
@@ -19,13 +17,14 @@ Layout
   Jun-2026 figures as further sections following the same shape.
 """
 
+import glob
 import os
 import re
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from data_analysis.io import open_lapd
+from data_analysis.io import open_lapd, parse_gas_puff
 from data_analysis.io.paths import output_path
 from data_analysis.signal.core import downsample_blockmean
 
@@ -43,11 +42,12 @@ FIG_SUBDIR = "Jun2026"
 # IV sweep result times scattered on it.  The channel is ~2.5M samples/shot, so
 # reading every shot / plotting the raw trace is what made plotting hang; one
 # block-mean-downsampled shot is fast and enough for a visual reference.  No
-# shot averaging and no current scaling.  Channel is hardcoded here for now.
-# These are plotting config (which reference trace to show), so they live with
-# the plotting code.
-ISAT_SCOPE = "machscope"   # scope group holding the fixed-bias Isat channel
-ISAT_CHAN = "C2"           # Isat channel name
+# shot averaging and no current scaling.  These are plotting config (which
+# reference trace to show), so they live with the plotting code -- but the
+# channel identity itself is owned by Jun2026_Isat (the processing module), so
+# changing it there moves both the batch FFT and these reference panels.
+ISAT_SCOPE = jis.SCOPE_NAME   # scope group holding the fixed-bias Isat channel
+ISAT_CHAN = jis.CHAN          # Isat channel name
 ISAT_SHOT = 0              # which single shot to show (0-based, within the position)
 ISAT_DS_Q = 500            # block-mean downsample factor (2.5M -> ~5k samples)
 ISAT_TMAX_MS = 10.0        # x-axis upper limit for the Isat panel, ms
@@ -97,58 +97,80 @@ def fig_path(name, subdir=FIG_SUBDIR):
     return output_path("figures", subdir, name)
 
 
-# The gas-puff setting the operator writes into the run ``description`` -- e.g.
-# "Helium backside pressure 40 Psi, Puff voltage 75V for 25ms West+East".  We
-# title each plot with the "Puff voltage ... ms" span of that line; it is the
-# knob that varies run to run.
-_PUFF_RE = re.compile(r"puff voltage.*?\d+\s*ms", re.IGNORECASE)
+def _resolve_save(save_fig, name):
+    """Resolve a driver's ``save_fig`` convention (see :func:`fig_path`).
+
+    ``True`` -> the centralized ``fig_path(name)``; a string -> that explicit
+    path; anything falsey -> ``None`` (don't save).  Every ``plot_*_run`` driver
+    resolves through here so the convention lives in one place.
+    """
+    return fig_path(name) if save_fig is True else (save_fig or None)
+
+
+run_num_of = jiv.run_num_of   # the run filename convention lives with the processing module
+
+
+def _run_description(ifn, run=None):
+    """A run's parsed ``description``, or ``None`` (with a note) if unreadable.
+
+    Pass an already-open ``run`` to reuse it instead of re-opening ``ifn``;
+    ``None`` opens it here.  Shared guard for the title helpers, so a
+    description hiccup degrades to a generic title instead of blocking the plot.
+    """
+    try:
+        if run is None:
+            run = open_lapd(ifn)
+        return run.description()
+    except (OSError, ValueError, NotImplementedError, KeyError) as e:
+        print(f"  (title: could not read run description -- {e})")
+        return None
+
+
+def _puff_label(puff):
+    """Format a ``(puff_v, puff_t)`` pair as the operator writes it."""
+    return f"Puff voltage {puff[0]:g}V for {puff[1]:g}ms"
 
 
 def run_title(ifn, run_num, run=None):
     """Plot title for a run: ``"<run_num>-<puff voltage ... ms>"``.
 
-    Reads this run's own hand-written ``description`` and pulls the gas-puff span
-    (``"Puff voltage 75V for 25ms"``) -- the setting that changes run to run -- so
+    Reads this run's own hand-written ``description`` and pulls the gas-puff
+    setting (via the shared :func:`data_analysis.io.parse_gas_puff` -- the same
+    parser ``group_by_gas_puff`` uses) -- the knob that changes run to run -- so
     e.g. run 01 titles as ``"01-Puff voltage 75V for 25ms"``.  Returns just the
     run number when the description has no recognizable puff line, and ``None``
     when the file can't be read / isn't pydaq, so the plot falls back to its
     generic title rather than being blocked by a description hiccup.
-
-    Pass an already-open ``run`` to reuse it instead of re-opening ``ifn`` (the
-    HDF5 is multi-GB); ``None`` opens it here.  Generic across Jun-2026 figures.
     """
-    try:
-        if run is None:
-            run = open_lapd(ifn)
-        desc = run.description()
-    except (OSError, ValueError, NotImplementedError, KeyError) as e:
-        print(f"  (title: could not read run description -- {e})")
+    desc = _run_description(ifn, run=run)
+    if desc is None:
         return None
-    for sec in desc.sections.values():
-        for it in sec.items:
-            m = _PUFF_RE.search(it.raw)
-            if m:
-                return f"{run_num}-{m.group(0)}"
-    return run_num
-
-
-def run_num_of(ifn):
-    """The leading run-number token of a run file (``"02-He-..."`` -> ``"02"``)."""
-    return os.path.basename(ifn).split("-")[0]
+    puff = parse_gas_puff(desc.raw)
+    return f"{run_num}-{_puff_label(puff)}" if puff else run_num
 
 
 def discover_tips(ifn):
     """The tip labels :func:`Jun2026_IV.process_run` produced ``.npz`` for.
 
-    Mirrors that processing's tip selection so a driver plots exactly the tips
-    that were saved: the override tip when ``I_CHAN``/``V_CHAN`` are set, else
-    every complete I+V pair discovered in the file.
+    Read off the saved ``<run>-tip<T>-sweep-data.npz`` filenames rather than by
+    re-running channel discovery against the raw multi-GB HDF5 -- the saved
+    files *are* what can be plotted (a tip whose processing failed or was
+    skipped has no npz).  An un-tagged ``<run>-sweep-data.npz`` (the override /
+    legacy single-tip case) maps to ``["override"]``.
     """
-    if jiv.I_CHAN is not None and jiv.V_CHAN is not None:
-        return ["override"]
-    scope_name = jiv.SCOPE_NAME if jiv.SCOPE_NAME is not None else jiv.find_lp_scope(ifn)
-    pairs, _ = jiv.discover_lp_channels(ifn, scope_name)
-    return list(pairs)
+    data_dir, run_num = os.path.dirname(ifn), run_num_of(ifn)
+    tip_re = re.compile(rf"{re.escape(run_num)}-tip(.+)-sweep-data\.npz$")
+    tips = sorted(m.group(1) for m in
+                  (tip_re.match(os.path.basename(p)) for p in
+                   glob.glob(os.path.join(data_dir, f"{run_num}-tip*-sweep-data.npz")))
+                  if m)
+    if not tips:
+        if os.path.isfile(os.path.join(data_dir, f"{run_num}-sweep-data.npz")):
+            return ["override"]
+        raise FileNotFoundError(
+            f"no saved sweep npz for run {run_num} in {data_dir}; run "
+            "Jun2026_IV.process_run(ifn) first")
+    return tips
 
 
 # =========================================================================== #
@@ -233,7 +255,7 @@ def _draw_iv_panels(axs4, Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, title):
 
 
 def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
-                 show=True, title=None, isat=None, fft=None,
+                 show=False, title=None, isat=None, fft=None,
                  fft_fmax_khz=80.0):
     """
     Plot the line scan: Vp, Te, and ne vs x at selected sweep (time) indices,
@@ -258,7 +280,7 @@ def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
     the Isat channel is absent).
 
     ``save_fig`` -- a path to write the figure to (PNG); ``None`` skips saving.
-    ``show`` -- call ``plt.show()`` (set False for headless/batch saving only).
+    ``show`` -- call ``plt.show()`` (default False: headless/batch saving).
     ``title`` -- figure title; the caller passes the run's gas-puff label (run
     number + the puff setting, e.g. ``"01-Puff voltage 75V for 25ms"``).  ``None``
     uses a generic default.
@@ -270,13 +292,13 @@ def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
     # The Isat panel marks the same instants the Vp/Te/ne/Te*ne panels show.
     marked_times = _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls,
                                    tndx_list, title)
-    _draw_isat_panel(axs[4], isat, marked_times)
+    _draw_isat_panel(axs[4], isat, marked_times,
+                     title=f"Isat reference (stationary probe, "
+                           f"'{ISAT_SCOPE}'/{ISAT_CHAN}, single shot @ mid position)")
     _draw_fft_panel(axs[5], fft, fft_fmax_khz,
                     f"Isat averaged FFT (all shots), '{ISAT_SCOPE}'/{ISAT_CHAN}")
 
-    # `show` is currently a no-op for this section (the batch drivers save
-    # headlessly); kept in the signature for symmetry with the combined figure.
-    finalize_figure(fig, save_fig=save_fig, compact_axes=axs[:4])
+    finalize_figure(fig, save_fig=save_fig, show=show, compact_axes=axs[:4])
 
 
 def _scatter_iv_times_on_isat(ax, t_ms, I, marked_times):
@@ -295,15 +317,17 @@ def _scatter_iv_times_on_isat(ax, t_ms, I, marked_times):
                        edgecolors="k", linewidths=0.5)
 
 
-def _draw_isat_panel(ax, isat, marked_times):
-    """Draw the Isat reference panel (5th panel of the IV line-scan figure).
+def _draw_isat_panel(ax, isat, marked_times, title=None, tmax_ms=ISAT_TMAX_MS,
+                     ylim=None):
+    """Draw an Isat reference panel (5th panel of the line-scan / combined figures).
 
-    ``isat`` is the downsampled ``(tarr, I)`` in (seconds, current) from
-    :func:`_read_isat_trace`, or ``None`` to leave the panel blank with a note.
-    ``marked_times`` is the list of ``(colour, time_ms)`` of the IV result
-    times; each is drawn as a scatter point *on the Isat line* (its current
-    value interpolated at that time) so the IV sweep instants are visible on the
-    reference trace.  The panel is clipped to 0..``ISAT_TMAX_MS`` ms.
+    ``isat`` is the ``(tarr, I)`` trace in (seconds, current) -- downsampled
+    single shot or shot-averaged, per the caller -- or ``None`` to leave the
+    panel blank with a note.  ``marked_times`` is the list of
+    ``(colour, time_ms)`` of the IV result times; each is drawn as a scatter
+    point *on the Isat line* (its current value interpolated at that time) so
+    the IV sweep instants are visible on the reference trace.  The panel is
+    clipped to 0..``tmax_ms``; ``title``/``ylim`` are optional.
     """
     if isat is not None:
         t_ms = np.asarray(isat[0]) * 1e3
@@ -311,15 +335,16 @@ def _draw_isat_panel(ax, isat, marked_times):
         ax.plot(t_ms, I, "k", linewidth=1.0, zorder=1)
         # Scatter each IV result time onto the line (interpolate its Isat value).
         _scatter_iv_times_on_isat(ax, t_ms, I, marked_times)
-        ax.set_title(f"Isat reference (stationary probe, "
-                     f"'{ISAT_SCOPE}'/{ISAT_CHAN}, single shot @ mid position)",
-                     fontsize=10)
+        if title:
+            ax.set_title(title, fontsize=10)
     else:
         ax.text(0.5, 0.5,
                 f"Isat channel '{ISAT_SCOPE}'/{ISAT_CHAN} unavailable",
                 transform=ax.transAxes, ha="center", va="center",
                 fontsize=11, color="0.5")
-    ax.set_xlim(0, ISAT_TMAX_MS)
+    ax.set_xlim(0, tmax_ms)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
     ax.set_ylabel("Isat [a.u.]", fontsize=11)
     ax.set_xlabel("t [ms]", fontsize=11)
     ax.grid(True, alpha=0.3)
@@ -378,6 +403,9 @@ def _read_isat_trace(run, npos, nshot):
     except (OSError, ValueError, KeyError) as e:
         print(f"  (Isat panel: channel '{ISAT_SCOPE}'/{ISAT_CHAN} unavailable -- {e})")
         return None
+    if Istack is None:   # run.channel signals a missing scope with (None, None)
+        print(f"  (Isat panel: channel '{ISAT_SCOPE}'/{ISAT_CHAN} unavailable)")
+        return None
     I = Istack[0]
     # block-mean downsample the current (anti-aliases as it shrinks the trace);
     # the time axis rides along on the same blocks.
@@ -406,66 +434,60 @@ def _read_isat_fft(ifn, fft_npz=None):
         return None
 
 
-def _plot_iv_line_tip(data_dir, run_num, tip, ifn=None, tndx_list=None,
-                      save_fig=True, show=True):
+def _plot_iv_line_tip(data_dir, run_num, tip, tndx_list=None, save_fig=True,
+                      show=False, title=None, isat=None, fft=None):
     """Load one tip's saved IV arrays and draw the line-scan plot (no reprocessing).
 
     ``tip`` is the discovered tip label, or ``"override"``/``None`` for the
-    un-tagged single-tip files.  ``ifn`` (the run's HDF5 path) drives the
-    descriptive title (just the changed setting vs the baseline) via
-    :func:`run_title` and the Isat reference read; pass ``None`` for the plot's
-    generic title and a blank Isat panel.  ``save_fig`` True routes the PNG
-    through :func:`fig_path`; pass a path to override, or False to skip saving.
+    un-tagged single-tip files.  ``title`` / ``isat`` / ``fft`` are the
+    tip-invariant pieces the run driver reads once (descriptive title, Isat
+    reference trace, saved FFT); each may be ``None`` for a generic title /
+    blank panel.  ``save_fig`` True routes the PNG through :func:`fig_path`;
+    pass a path to override, or False to skip saving.
     """
     load_tip = None if tip in (None, "override") else tip
     Vp_arr, Te_arr, ne_arr, *_errs, t_ls = jiv.load_data(data_dir, run_num, tip=load_tip)
-    _, _, _, xpos, _, npos, nshot = jiv.load_sweep_data(data_dir, run_num, tip=load_tip)
+    xpos, *_ = jiv.load_sweep_axes(data_dir, run_num, tip=load_tip)
 
     ndx = tndx_list if tndx_list is not None else list(
         range(0, Vp_arr.shape[1], max(1, Vp_arr.shape[1] // 4)))
 
-    # Open the run once (multi-GB HDF5) and reuse it for both raw reads below:
-    # the descriptive title and the Isat reference trace.  None -> no run file,
-    # so a generic title and a blank Isat panel.
-    run = open_lapd(ifn) if ifn is not None else None
-
-    # Title = "<run_num>-<puff voltage ... ms>" from this run's description (e.g.
-    # "01-Puff voltage 75V for 25ms"); no tip.  None -> the plot's generic
-    # default.  (Output filenames still carry run_num + tip, via the name below.)
-    title = run_title(ifn, run_num, run=run) if run is not None else None
-
-    # Reference Isat trace for the 5th panel -- read from the raw HDF5 (it's not
-    # in the saved .npz).  None when there's no run file or the channel is absent,
-    # in which case the panel is drawn blank.
-    isat = _read_isat_trace(run, npos, nshot) if run is not None else None
-
-    # All-shot-averaged Isat FFT for the last panel (same channel as the trace).
-    # None when there's no run file or the channel is absent -> blank panel.
-    fft = _read_isat_fft(ifn) if ifn is not None else None
-
     name = f"{run_num}{jiv._tip_tag(load_tip)}-line"
-    save_path = fig_path(name) if save_fig is True else (save_fig or None)
     plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, ndx,
-                 save_fig=save_path, title=title, isat=isat, fft=fft)
+                 save_fig=_resolve_save(save_fig, name), show=show,
+                 title=title, isat=isat, fft=fft)
 
 
-def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=True):
+def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=False):
     """Draw the IV line-scan plot(s) for a run from already-saved ``.npz``.
 
     Plots each tip :func:`Jun2026_IV.process_run` saved (see
-    :func:`discover_tips`) from its ``-tip<T>-*.npz`` files -- no HDF5 read, no
-    reprocessing (apart from the small Isat reference trace).  Run
+    :func:`discover_tips`) from its ``-tip<T>-*.npz`` files -- no reprocessing
+    (apart from the small Isat reference trace).  Run
     :func:`Jun2026_IV.process_run` first to create the ``.npz``.  ``save_fig``
     True writes the PNG via :func:`fig_path`; pass a path to override or False to
     skip.
     """
     data_dir = os.path.dirname(ifn)
     run_num = run_num_of(ifn)
+    tips = discover_tips(ifn)
 
-    for tip in discover_tips(ifn):
+    # Everything tip-invariant is read ONCE here (the HDF5 is multi-GB): the
+    # open run, the descriptive title ("<run_num>-<puff voltage ... ms>"), the
+    # Isat reference trace (not in the saved .npz), and the saved all-shot FFT.
+    # Each tip's plot then only loads its own npz.
+    run = open_lapd(ifn)
+    title = run_title(ifn, run_num, run=run)
+    load_tip = None if tips == ["override"] else tips[0]
+    _, _, npos, nshot = jiv.load_sweep_axes(data_dir, run_num, tip=load_tip)
+    isat = _read_isat_trace(run, npos, nshot)
+    fft = _read_isat_fft(ifn)
+
+    for tip in tips:
         print(f"Plotting IV line-scan for tip {tip} from saved data...")
-        _plot_iv_line_tip(data_dir, run_num, tip, ifn=ifn, tndx_list=tndx_list,
-                          save_fig=save_fig)
+        _plot_iv_line_tip(data_dir, run_num, tip, tndx_list=tndx_list,
+                          save_fig=save_fig, show=show,
+                          title=title, isat=isat, fft=fft)
 
 
 # =========================================================================== #
@@ -484,18 +506,17 @@ def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=True):
 # =========================================================================== #
 
 def puff_title(ifn, run=None):
-    """The gas-puff span of a run's description (``"Puff voltage 75V for 30ms"``).
+    """The gas-puff setting of a run's description (``"Puff voltage 75V for 30ms"``).
 
-    Reuses :func:`run_title` (which pulls the puff span via ``_PUFF_RE``) and
-    strips its leading ``"<run_num>-"`` so the result is just the puff
-    voltage/time setting -- used as the combined figure's title.  Returns
-    ``None`` when no description / puff line is available.
+    :func:`run_title` without the leading ``"<run_num>-"`` -- used as the
+    combined figure's title.  Falls back to the bare run number when the
+    description has no puff line, and ``None`` when it can't be read.
     """
-    title = run_title(ifn, run_num_of(ifn), run=run)
-    if not title:
+    desc = _run_description(ifn, run=run)
+    if desc is None:
         return None
-    m = _PUFF_RE.search(title)
-    return m.group(0) if m else title
+    puff = parse_gas_puff(desc.raw)
+    return _puff_label(puff) if puff else run_num_of(ifn)
 
 
 def _read_isat_avg(run, scope_name, chan, isat_nshot):
@@ -533,7 +554,7 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
 
     # Panels 1-3: IV arrays + axes from the IV run's saved .npz.
     Vp_arr, Te_arr, ne_arr, *_errs, t_ls = jiv.load_data(data_dir, run_num, tip=iv_tip)
-    _, _, _, xpos, _, _, _ = jiv.load_sweep_data(data_dir, run_num, tip=iv_tip)
+    xpos, *_ = jiv.load_sweep_axes(data_dir, run_num, tip=iv_tip)
 
     # Panels 4-5: raw Isat (shot-averaged) + the all-shot-averaged FFT loaded
     # from the batch npz (shared loader, same as the line-scan figure).
@@ -550,16 +571,10 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
     marked_times = _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls,
                                    tndx_list, puff_title(iv_ifn))
 
-    # Panel 5: Isat raw, shot-averaged, 0..isat_tmax_ms; y starts at 0.  The IV
-    # sweep instants are scattered on the line, coloured to match the IV panels.
-    t_isat_ms = t_isat * 1e3
-    axs[4].plot(t_isat_ms, I_avg, "k", linewidth=0.8, zorder=1)
-    _scatter_iv_times_on_isat(axs[4], t_isat_ms, I_avg, marked_times)
-    axs[4].set_xlim(0, isat_tmax_ms)
-    axs[4].set_ylim(0,1)
-    axs[4].set_ylabel("Isat [a.u.]", fontsize=11)
-    axs[4].set_xlabel("t [ms]", fontsize=11)
-    axs[4].grid(True, alpha=0.3)
+    # Panel 5: Isat raw, shot-averaged, 0..isat_tmax_ms; y clipped to 0..1.  The
+    # IV sweep instants are scattered on the line, coloured to match the IV panels.
+    _draw_isat_panel(axs[4], (t_isat, I_avg), marked_times,
+                     tmax_ms=isat_tmax_ms, ylim=(0, 1))
 
     # Panel 6: all-shot-averaged FFT for the Isat run, < fft_fmax_khz.
     _draw_fft_panel(axs[5], fft, fft_fmax_khz,
@@ -568,8 +583,8 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
                     chan_label=f"'{isat_scope}'/{isat_chan}")
 
     name = f"{run_num}{jiv._tip_tag(iv_tip)}-{isat_run_num}-combined"
-    save_path = fig_path(name) if save_fig is True else (save_fig or None)
-    finalize_figure(fig, save_fig=save_path, show=show, compact_axes=axs[:4])
+    finalize_figure(fig, save_fig=_resolve_save(save_fig, name), show=show,
+                    compact_axes=axs[:4])
 
 
 # =========================================================================== #
@@ -711,8 +726,7 @@ def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
                  f"({fmin_khz:g}-{fmax_khz:g} kHz band)",
                  fontsize=12, fontweight="bold")
     name = f"{run_num_of(ifn)}-xcorr-plane-{ch_a[0]}{ch_a[1]}-{ch_b[0]}{ch_b[1]}"
-    save_path = fig_path(name) if save_fig is True else (save_fig or None)
-    finalize_figure(fig, save_fig=save_path, show=show)
+    finalize_figure(fig, save_fig=_resolve_save(save_fig, name), show=show)
 
 
 def _load_xcorr_band_run(ifn, ch_a, ch_b, npz_path=None):
@@ -799,8 +813,7 @@ def plot_xcorr_band_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
                  fontsize=12, fontweight="bold")
     name = (f"{run_num_of(ifn)}-xcorr-band-plane-"
             f"{ch_a[0]}{ch_a[1]}-{ch_b[0]}{ch_b[1]}")
-    save_path = fig_path(name) if save_fig is True else (save_fig or None)
-    finalize_figure(fig, save_fig=save_path, show=show)
+    finalize_figure(fig, save_fig=_resolve_save(save_fig, name), show=show)
 
 
 # =========================================================================== #
