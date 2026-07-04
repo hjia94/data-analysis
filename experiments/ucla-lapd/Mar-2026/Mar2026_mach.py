@@ -44,7 +44,7 @@ from scipy.fft import next_fast_len
 from tqdm import tqdm
 
 from data_analysis.io import open_lapd
-from data_analysis.signal.core import butter_bandpass
+from data_analysis.signal import butter_bandpass
 
 
 def get_mach_data(sess, adc, npos, nshot):
@@ -200,8 +200,7 @@ def process_mach_envelopes(Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr, tarr, npos, fs=1.
     # 1. Pipeline Setup & Pre-calculations
     # ==========================================
     # Stable Bandpass filter design (SOS)
-    nyq = 0.5 * fs
-    sos = signal.butter(filter_order, [lowcut/nyq, highcut/nyq], btype='band', output='sos')
+    sos = butter_bandpass(lowcut, highcut, fs, order=filter_order)
     
     # Baseline Decimation Setup (Fixed to 50 for max speed)
     baseline_dec_factor = 50 

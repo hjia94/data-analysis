@@ -16,14 +16,17 @@ def first_and_last_zerocrossings(cur):
     """
     Find the first and last positive-going zero crossings in approximately sinusoidal data.
 
+    Kept for reuse (past sweep-timing analyses) even when no current experiment calls it.
+
     Parameters:
-    data (numpy array): Input sinusoidal data (e.g., current waveform).
-    lpf_gsmooth_interval (int): Smoothing interval for the low-pass filter.
+    cur (numpy array): Input sinusoidal data (e.g., current waveform), assumed
+        centered around zero. The data is Gaussian-smoothed with a hardcoded
+        25-sample interval before crossing detection to suppress noise.
 
     Returns:
     int: Index of the first positive-going zero crossing.
     int: Index of the last positive-going zero crossing.
-    float: Fractional number of points in one cycle.
+    float: Fractional number of points in one cycle (0 if < 2 crossings found).
     """
 
     n = np.size(cur)
@@ -50,28 +53,40 @@ def first_and_last_zerocrossings(cur):
     return first, last, NPeriod    # note: NPeriod is not an integer
 
 
-def find_all_zerocrossing(signal, direction='all'):
+def find_all_zerocrossing(data, direction='all'):
+    """Simple zero crossing detector.
 
-    """Simple zero crossing detector"""
-    # Center signal around zero
-    signal = signal - np.median(signal)  # Using median instead of mean
+    Centers ``data`` around its median, then returns the indices ``i`` where the
+    signal crosses zero between samples ``i-1`` and ``i`` (the right-hand sample
+    of each crossing pair; no sub-sample interpolation). ``direction`` selects
+    ``'positive'`` (negative -> non-negative), ``'negative'``, or ``'all'``
+    crossings. Returns an int index array.
+    """
+    s = np.asarray(data, float)
+    s = s - np.median(s)  # Using median instead of mean
 
-    # Find zero crossings
-    zero_crossings = []
-    for i in range(1, len(signal)):
-        if signal[i-1] * signal[i] <= 0:  # Zero crossing between adjacent points
-            # Determine crossing direction
-            is_positive = signal[i-1] < 0 and signal[i] >= 0
-            if direction == 'all' or (direction == 'positive' and is_positive) or (direction == 'negative' and not is_positive):
-                # Simply return the index without interpolation
-                zero_crossings.append(i)
+    # Zero crossing between adjacent points: sign product <= 0
+    cross = s[:-1] * s[1:] <= 0
+    if direction in ('positive', 'negative'):
+        is_positive = (s[:-1] < 0) & (s[1:] >= 0)
+        cross &= is_positive if direction == 'positive' else ~is_positive
 
-    return np.array(zero_crossings)
+    return np.nonzero(cross)[0] + 1
 
 
 def fast_gaussian_filter(data, sigma):
-    # Create Gaussian kernel
-    kernel_size = int(6 * sigma)  # 3 sigma on each side
+    """Gaussian smoothing via FFT convolution (fast on long traces).
+
+    ``sigma`` is the Gaussian width in samples; the kernel spans +-3 sigma
+    (odd length, minimum 3, so tiny sigmas still yield a valid kernel and the
+    output stays aligned with the input). FFT convolution
+    (``scipy.signal.fftconvolve``) is much faster than direct convolution for
+    the multi-million-sample traces this is meant for. Returns the smoothed
+    array (same length, ``mode='same'``).
+    """
+    # Create Gaussian kernel: odd size >= 3 (even kernels shift the output by
+    # half a sample; size 0 would divide by zero in the normalization)
+    kernel_size = max(int(6 * sigma) | 1, 3)  # ~3 sigma on each side
     kernel = np.exp(-np.linspace(-3, 3, kernel_size)**2 / 2)
     kernel = kernel / kernel.sum()  # normalize
 
@@ -79,32 +94,46 @@ def fast_gaussian_filter(data, sigma):
     return signal.fftconvolve(data, kernel, mode='same')
 
 
-def low_pass_filter(data, cutoff_freq):
-        # Design a low-pass Butterworth filter
-        b, a = signal.butter(2, cutoff_freq, btype='low')
+def low_pass_filter(data, cutoff_freq, fs=None):
+    """Zero-phase 2nd-order Butterworth low-pass filter.
 
-        return signal.filtfilt(b, a, data)
+    With ``fs`` given (sampling frequency), ``cutoff_freq`` is in the same
+    units (e.g. both in Hz). With ``fs=None`` (legacy behavior),
+    ``cutoff_freq`` must already be normalized to the Nyquist frequency
+    (0..1). Filters forward and backward (``filtfilt``) so the output has no
+    phase shift. Returns the filtered array.
+    """
+    b, a = signal.butter(2, cutoff_freq, btype='low', fs=fs)
+    return signal.filtfilt(b, a, data)
 
 
 def butter_bandpass(lowcut, highcut, fs, order=5):
-    nyq = 0.5 * fs
-    low = lowcut / nyq
-    high = highcut / nyq
-    b, a = signal.butter(order, [low, high], btype='band')
-    return b, a
+    """Design a Butterworth bandpass filter in SOS form.
+
+    ``lowcut``/``highcut`` are the band edges and ``fs`` the sampling
+    frequency, all in the same units (e.g. Hz). Returns second-order sections
+    (numerically stable at higher orders, unlike the ``(b, a)`` form) --
+    apply with ``scipy.signal.sosfiltfilt(sos, data)`` for zero-phase
+    filtering.
+    """
+    return signal.butter(order, [lowcut, highcut], btype='band',
+                         output='sos', fs=fs)
 
 
 def rolling_baseline(data, window_size=1000, quantile=0.1):
     """
-    Estimate the baseline using a rolling window and a lower quantile.
+    Estimate the baseline using a centered rolling window and a lower quantile.
     Args:
-        data: pandas Series or numpy array
+        data: numpy array (or anything np.asarray accepts, e.g. pandas Series)
         window_size: Size of the rolling window (in samples)
         quantile: Quantile for baseline estimation (e.g., 0.1 for the 10th percentile)
     Returns:
-        baseline: Smoothed baseline
+        baseline: numpy array, same length as data (edges use the nearest
+            in-bounds samples rather than NaN)
     """
-    return data.rolling(window=window_size, center=True).quantile(quantile)
+    return ndimage.percentile_filter(np.asarray(data, float),
+                                     percentile=quantile * 100,
+                                     size=window_size, mode='nearest')
 
 
 def hl_envelopes_idx(s, dmin=1, dmax=1, split=False):
@@ -225,7 +254,8 @@ def analyze_downsample_options(data, tarr, filtered_data, min_timescale_ms=1e-3,
     for rate in rates:
         # Skip rates that would undersample the minimum timescale
         if rate > min_samples/2:  # Nyquist criterion
-            print(f"Rate {rate:2d}: Too high for {min_timescale_ms:.1e} ms features")
+            if verbose:
+                print(f"Rate {rate:2d}: Too high for {min_timescale_ms:.1e} ms features")
             continue
 
         # Downsample filtered data
@@ -254,7 +284,7 @@ def analyze_downsample_options(data, tarr, filtered_data, min_timescale_ms=1e-3,
         return 1
 
 
-def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, window='hanning', freq_min=None, freq_max=None):
+def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, window='hanning', freq_min=None, freq_max=None, verbose=False):
     """
     Calculate Short-Time Fourier Transform with specified number of frequency bins.
 
@@ -263,9 +293,10 @@ def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, wi
         data_arr: Signal data array
         freq_bins: Number of frequency bins desired between freq_min and freq_max
         overlap_fraction: Fraction of overlap between consecutive FFT windows
-        window: Window function ('hanning', 'blackman', or None)
+        window: Window function ('hanning', 'blackman', or None for rectangular)
         freq_min: Minimum frequency to include in output (Hz)
         freq_max: Maximum frequency to include in output (Hz)
+        verbose: Print the resolved FFT parameters (warnings always print)
 
     Returns:
         freq: Frequency array
@@ -294,7 +325,8 @@ def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, wi
 
         if samples_per_fft < min_samples_needed:
             samples_per_fft = min_samples_needed
-            print(f"Increased samples_per_fft to {samples_per_fft} to accommodate frequency range")
+            if verbose:
+                print(f"Increased samples_per_fft to {samples_per_fft} to accommodate frequency range")
 
         # Ensure samples_per_fft is even (for FFT efficiency)
         if samples_per_fft % 2 != 0:
@@ -317,10 +349,11 @@ def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, wi
     time_resolution = dt * hop  # Time between successive FFTs
     freq_resolution = fs / samples_per_fft  # Frequency resolution
 
-    # Create window function
-    if window.lower() == 'hanning':
+    # Create window function (None or unrecognized -> rectangular)
+    wname = (window or '').lower()
+    if wname == 'hanning':
         win = np.hanning(samples_per_fft)
-    elif window.lower() == 'blackman':
+    elif wname == 'blackman':
         win = np.blackman(samples_per_fft)
     else:
         win = np.ones(samples_per_fft)
@@ -376,9 +409,10 @@ def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, wi
         freq = freq[freq_mask]
         stft_matrix = stft_matrix[:, freq_mask]
 
-    print(f"STFT calculated with {samples_per_fft} samples per FFT window")
-    print(f"Frequency range: {freq[0]/1e6:.1f} MHz to {freq[-1]/1e6:.1f} MHz")
-    print(f"Generated {len(stft_time)} time points for {stft_matrix.shape[0]} FFT segments")
+    if verbose:
+        print(f"STFT calculated with {samples_per_fft} samples per FFT window")
+        print(f"Frequency range: {freq[0]/1e6:.1f} MHz to {freq[-1]/1e6:.1f} MHz")
+        print(f"Generated {len(stft_time)} time points for {stft_matrix.shape[0]} FFT segments")
 
     return freq, stft_matrix, stft_time
 
