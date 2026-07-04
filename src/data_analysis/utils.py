@@ -11,8 +11,10 @@ Date: 2024-02-28
 Included functions:
 - get_files_in_folder
 - get_number_before_keyword
+- run_num_of
 - save_to_npy
 - read_from_npy
+- merge_save_npz
 '''
 
 import os
@@ -72,6 +74,16 @@ def get_number_before_keyword(string, keyword, verbose=False):
         return None
 
 
+def run_num_of(ifn):
+    """The leading run-number token of a run file (``"02-He-..."`` -> ``"02"``).
+
+    The one home of the ``NN-description.hdf5`` filename convention used by the
+    LAPD campaigns -- experiment scripts import this rather than re-splitting
+    the basename.
+    """
+    return os.path.basename(ifn).split("-")[0]
+
+
 def save_to_npy(data, npy_file_path):
     """
     Save data to a .npy file.
@@ -109,3 +121,22 @@ def read_from_npy(npy_file_path):
         return None
     data = np.load(npy_file_path, allow_pickle=True)
     return data
+
+
+def merge_save_npz(out_path, new_arrays):
+    """Merge ``new_arrays`` into an existing ``.npz`` and rewrite it.
+
+    Loads any arrays already stored at ``out_path`` (so entries written by
+    earlier passes are kept) and overwrites/adds the keys in ``new_arrays``.
+    Lets several results accumulate in one file instead of one file per pass.
+
+    Args:
+        out_path (str): The ``.npz`` file to update (created if missing).
+        new_arrays (dict): Mapping of key -> array to add or overwrite.
+    """
+    arrays = {}
+    if os.path.isfile(out_path):
+        with np.load(out_path) as d:
+            arrays = {k: d[k] for k in d.files}
+    arrays.update(new_arrays)
+    np.savez(out_path, **arrays)

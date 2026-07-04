@@ -55,8 +55,6 @@ the interferometer downstream, so these set only the first-order trend, not a
 final ne.
 """
 
-import time
-import datetime
 import os
 import re
 
@@ -65,10 +63,13 @@ import h5py
 
 from data_analysis.io import open_lapd, choose_from_list, position_shots
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
-from data_analysis.plasma.langmuir import find_sweep_indices, reshape_IV, analyze_IV_safe
+from data_analysis.plasma.langmuir import (
+    find_sweep_indices, reshape_IV, analyze_IV_safe,
+    prepare_sweep_data, process_iv_and_save, sweep_npz_paths,
+)
+from data_analysis.utils import run_num_of
 
 from scipy.ndimage import gaussian_filter1d
-from tqdm import tqdm
 
 # ========================================================================== #
 #  >>> USER OVERRIDE: set which scope / channels are the LP I and V <<<
@@ -92,15 +93,6 @@ I_SIGN = -1           # +1 / -1 to orient current (electron current positive at 
 
 LP_SCOPE_CANDIDATES = ("lpscope", "scope")  # scope-group names that may hold the LP IV
 #===============================================================================================================================================
-
-
-def run_num_of(ifn):
-    """The leading run-number token of a run file (``"02-He-..."`` -> ``"02"``).
-
-    The one home of the ``NN-description.hdf5`` filename convention -- the other
-    Jun-2026 modules import this rather than re-splitting the basename.
-    """
-    return os.path.basename(ifn).split("-")[0]
 
 
 def find_lp_scope(fn):
@@ -403,7 +395,7 @@ def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=No
     resolved here (the standalone / notebook path).
 
     Returns ``(Vswp_arr_rs, Iswp_arr_rs)`` -- the reshaped sweep arrays just
-    saved -- so the caller can feed :func:`process_and_save` directly instead of
+    saved -- so the caller can feed :func:`data_analysis.plasma.langmuir.process_iv_and_save` directly instead of
     re-loading the multi-GB npz it just wrote.
     """
     if run is None:
@@ -420,18 +412,9 @@ def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=No
 
     tarr, Vswp_arr, Iswp_arr = get_IV_arr(run, scope_name, I_chan, V_chan, npos, nshot)
 
-    # Reshape arrays to include swept traces only
-    start_t_ls, stop_t_ls = find_sweep_indices(Vswp_arr[0], padding=10)
-
-    # Middle index of each sweep -> a representative timestamp per sweep.
-    mid_indices = [(start + stop) // 2 for start, stop in zip(start_t_ls, stop_t_ls)]
-    data_timestamp = tarr[mid_indices]
-    print(f"Number of sweeps: {len(data_timestamp)}")
-
-    Vswp_arr_rs, Iswp_arr_rs = reshape_IV(Vswp_arr, Iswp_arr, start_t_ls, stop_t_ls, 10)
-
-    print("Applying smoothing to current array...")
-    Iswp_arr_rs = gaussian_filter1d(Iswp_arr_rs, 10, axis=-1)
+    # Sweep detection -> reshape -> smoothing (shared batch pipeline).
+    Vswp_arr_rs, Iswp_arr_rs, data_timestamp = prepare_sweep_data(
+        tarr, Vswp_arr, Iswp_arr)
 
     np.savez(save_path, Vswp_arr_rs=Vswp_arr_rs, Iswp_arr_rs=Iswp_arr_rs,
              data_timestamp=data_timestamp, xpos=xpos, ypos=ypos,
@@ -440,145 +423,9 @@ def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=No
     return Vswp_arr_rs, Iswp_arr_rs
 
 
-def _mean_sem(vals):
-    """Mean and standard error of the valid (non-NaN) entries of ``vals``.
-
-    Returns ``(nan, nan)`` when nothing is valid and a ``nan`` SEM for a single
-    sample (no spread to estimate).  Shared by the Vp/Te/ne averaging in
-    :func:`process_and_save` so the three quantities are reduced identically.
-    """
-    vals = [v for v in vals if not np.isnan(v)]
-    if not vals:
-        return np.nan, np.nan
-    sem = np.std(vals, ddof=1) / np.sqrt(len(vals)) if len(vals) > 1 else np.nan
-    return np.mean(vals), sem
-
-
-def process_and_save(voltage_data, current_data, save_path):
-    """
-    Loops through the multi-dimensional Langmuir probe dataset, extracting
-    plasma parameters. Averages the valid shots for each location/sweep combination,
-    calculates the standard error, and outputs 2D arrays.
-    Saves progress incrementally to prevent data loss.
-
-    (Unchanged from Mar-2026: the reshaped sweep arrays have the same shape
-    convention, so the batch loop is reused as-is.)
-    """
-    n_locs, n_shots, n_sweeps, _ = current_data.shape
-
-    # Pre-allocate the (mean, err) output pair per quantity, NaN-filled
-    # (locs, sweeps); everything downstream (averaging, incremental save,
-    # return) is driven off this dict so adding a quantity is one key.
-    arrs = {k: (np.full((n_locs, n_sweeps), np.nan),
-                np.full((n_locs, n_sweeps), np.nan))
-            for k in ("Vp", "Te", "ne")}
-
-    total_traces = n_locs * n_shots * n_sweeps
-    print(f"Starting batch processing of {total_traces} traces across {n_locs} locations...")
-    print(f"Averaging {n_shots} shots per sweep...")
-
-    start_time = time.time()
-    fail_count = 0
-
-    # Progress bar over locations; the per-trace fail rate is shown in the postfix
-    # and refreshed each location.  tqdm provides the %, elapsed, ETA and rate.
-    pbar = tqdm(range(n_locs), desc="Analyzing", unit="loc")
-    for loc in pbar:
-        for swp in range(n_sweeps):
-            # The voltage trace applies to all shots at this location/sweep
-            V_trace = voltage_data[loc, swp, :]
-
-            # Per-shot results for this sweep, keyed like `arrs`.
-            temp = {"Vp": [], "Te": [], "ne": []}
-            for sht in range(n_shots):
-                I_trace = current_data[loc, sht, swp, :]
-                trace_id = f"Loc:{loc}|Shot:{sht}|Swp:{swp}"
-
-                # Analyze trace
-                Vp, Te, ne = analyze_IV_safe(V_trace, I_trace, file_name=trace_id)
-
-                # A NaN Vp marks a failed fit; ne can also be NaN if Te was forced
-                # to 0, so _mean_sem filters NaNs per-quantity below.
-                if np.isnan(Vp):
-                    fail_count += 1
-                else:
-                    temp["Vp"].append(Vp)
-                    temp["Te"].append(Te)
-                    temp["ne"].append(ne)
-
-            # --- AVERAGING LOGIC ---
-            # Mean + standard error of the valid shots, identically for each quantity.
-            for key, (arr, err) in arrs.items():
-                arr[loc, swp], err[loc, swp] = _mean_sem(temp[key])
-
-        # ==========================================
-        # INCREMENTAL SAVE
-        # ==========================================
-        # Save all 6 arrays to the file
-        np.savez(save_path,
-                 **{f"{k}_arr": arr for k, (arr, _) in arrs.items()},
-                 **{f"{k}_err": err for k, (_, err) in arrs.items()})
-
-        # Live running fail rate alongside the progress bar
-        traces_done = (loc + 1) * n_sweeps * n_shots
-        pbar.set_postfix(fails=f"{fail_count} ({fail_count / traces_done * 100:.1f}%)")
-
-    # ==========================================
-    # FINAL SUMMARY
-    # ==========================================
-    total_time = time.time() - start_time
-    final_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    final_fail_rate = (fail_count / total_traces) * 100
-
-    print("\n" + "=" * 55)
-    print("BATCH PROCESSING COMPLETE")
-    print("=" * 55)
-    print(f"Total Time:    {final_time_str}")
-    print(f"Total Traces:  {total_traces}")
-    print(f"Total Fails:   {fail_count}")
-    print(f"Fail Rate:     {final_fail_rate:.2f}%")
-    print(f"Data saved to: {save_path}")
-    print("=" * 55)
-
-    (Vp_arr, Vp_err), (Te_arr, Te_err), (ne_arr, ne_err) = (
-        arrs[k] for k in ("Vp", "Te", "ne"))
-    return Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err
-
-
-def _tip_tag(tip):
-    """Filename fragment for a tip (``"-tipR"``); empty for the legacy single-tip."""
-    return f"-tip{tip}" if tip else ""
-
-
-def load_sweep_data(data_dir, run_num, tip=None):
-    """Load the reshaped sweep arrays + axes saved by :func:`save_IV_data`."""
-    save_path = os.path.join(data_dir, f"{run_num}{_tip_tag(tip)}-sweep-data.npz")
-    with np.load(save_path) as data:
-        return (data["Vswp_arr_rs"], data["Iswp_arr_rs"], data["data_timestamp"],
-                data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"]))
-
-
-def load_sweep_axes(data_dir, run_num, tip=None):
-    """Just the position axes + shot layout from a saved sweep npz.
-
-    ``np.load`` reads npz entries lazily, so this skips the multi-hundred-MB
-    sweep arrays -- for plot drivers that only need ``(xpos, ypos, npos, nshot)``.
-    """
-    save_path = os.path.join(data_dir, f"{run_num}{_tip_tag(tip)}-sweep-data.npz")
-    with np.load(save_path) as data:
-        return data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"])
-
-
-def load_data(data_dir, run_num, tip=None):
-    """Load saved plasma parameters + sweep timestamps for plotting."""
-    save_path = os.path.join(data_dir, f"{run_num}{_tip_tag(tip)}-sweep-data.npz")
-    with np.load(save_path) as data:
-        t_ls = data["data_timestamp"]
-
-    ps_path = os.path.join(data_dir, f"{run_num}{_tip_tag(tip)}-plasma-data.npz")
-    with np.load(ps_path) as ps_data:
-        return (ps_data["Vp_arr"], ps_data["Te_arr"], ps_data["ne_arr"],
-                ps_data["Vp_err"], ps_data["Te_err"], ps_data["ne_err"], t_ls)
+# Batch analysis + the npz loaders (load_sweep_data / load_sweep_axes /
+# load_plasma_data) live in data_analysis.plasma.langmuir now; Jun2026_plot
+# imports them from there directly.
 
 
 def process_run(ifn):
@@ -586,7 +433,7 @@ def process_run(ifn):
 
     For each tip with a complete I+V pair (from :func:`discover_lp_channels`):
     sweep-detect + reshape + smooth (:func:`save_IV_data`) -> batch
-    ``analyze_IV`` over all positions/shots (:func:`process_and_save`).  Outputs
+    ``analyze_IV`` over all positions/shots (:func:`data_analysis.plasma.langmuir.process_iv_and_save`).  Outputs
     are saved **per tip** (filenames carry ``-tip<T>``) so the two probes never
     mix; an override (``I_CHAN``/``V_CHAN``) collapses to the single overridden
     tip.  Tips missing a channel are flagged and skipped (their results stay
@@ -603,7 +450,7 @@ def process_run(ifn):
 
     # Everything tip-invariant is resolved ONCE for the run: the open handle,
     # the scope/channel map (a None tip = the override, flowing through
-    # _tip_tag/save_IV_data as the untagged single-tip case), and the positions.
+    # sweep_npz_paths/save_IV_data as the untagged single-tip case), and the positions.
     # save_IV_data reuses these instead of re-running discovery per tip.
     run = open_lapd(ifn)
     print(f"backend: {run.backend}")
@@ -612,18 +459,16 @@ def process_run(ifn):
 
     results = {}
     for tip, channels in channel_map.items():
-        tag = _tip_tag(tip)
         print("\n" + "=" * 70)
         print(f"PROCESSING tip {tip if tip is not None else 'override'}")
         print("=" * 70)
 
-        sweep_path = os.path.join(data_dir, f"{run_num}{tag}-sweep-data.npz")
-        plasma_path = os.path.join(data_dir, f"{run_num}{tag}-plasma-data.npz")
+        sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
 
         Vswp_arr_rs, Iswp_arr_rs = save_IV_data(
             ifn, sweep_path, tip=tip, run=run, channels=channels,
             positions=(xpos, ypos, npos, nshot))
-        process_and_save(Vswp_arr_rs, Iswp_arr_rs, plasma_path)
+        process_iv_and_save(Vswp_arr_rs, Iswp_arr_rs, plasma_path)
 
         results[tip if tip is not None else "override"] = (sweep_path, plasma_path)
 

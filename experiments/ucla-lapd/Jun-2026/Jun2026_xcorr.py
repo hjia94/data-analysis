@@ -21,6 +21,7 @@ import numpy as np
 from tqdm import tqdm
 
 from data_analysis.io import open_lapd, position_shots
+from data_analysis.utils import merge_save_npz, run_num_of
 from data_analysis.signal import (
     cross_correlation,
     coherence_spectrum,
@@ -203,7 +204,7 @@ def xcorr_npz_path(ifn):
     derived from the run number only, so every channel-pair for that run shares
     one file.
     """
-    return os.path.join(os.path.dirname(ifn), f"{jiv.run_num_of(ifn)}{OUT_NPZ_SUFFIX}")
+    return os.path.join(os.path.dirname(ifn), f"{run_num_of(ifn)}{OUT_NPZ_SUFFIX}")
 
 
 def _pair_key(ch_a, ch_b):
@@ -221,22 +222,6 @@ def _position_xy(pos_array, npos, nshot):
     index). Shared by :func:`batch_xcorr` and :func:`batch_xcorr_band`.
     """
     return pos_array["x"][::nshot][:npos], pos_array["y"][::nshot][:npos]
-
-
-def _merge_save_npz(out_path, new_arrays):
-    """Merge ``new_arrays`` into the run's co-located npz and rewrite it.
-
-    Loads any existing arrays at ``out_path`` (so other channel pairs already
-    stored are kept) and overwrites/adds the keys in ``new_arrays``. Shared by the
-    two batch drivers so several pairs -- and both the full-spectrum and band
-    entries -- accumulate in one file.
-    """
-    arrays = {}
-    if os.path.isfile(out_path):
-        with np.load(out_path) as d:
-            arrays = {k: d[k] for k in d.files}
-    arrays.update(new_arrays)
-    np.savez(out_path, **arrays)
 
 
 def _iter_run_positions(ifn, ch_a, ch_b, tmin_ms, tmax_ms, desc):
@@ -324,7 +309,7 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
                 raise ValueError(f"{out_path}: freq axis differs from stored pairs "
                                  "(different window / sampling rate)")
     key = _pair_key(ch_a, ch_b)
-    _merge_save_npz(out_path, {
+    merge_save_npz(out_path, {
         "freq": freq, "lags": lags, "pos_x": pos_x, "pos_y": pos_y,
         f"{key}__gamma2": gamma2, f"{key}__phase": phase,
         f"{key}__xcorr": xcorr, f"{key}__nshots": nshots,
@@ -403,7 +388,7 @@ def batch_xcorr_band(ifn, ch_a=CH_A, ch_b=CH_B, fband_khz=FBAND_KHZ,
 
     out_path = xcorr_npz_path(ifn)
     key = _pair_key(ch_a, ch_b)
-    _merge_save_npz(out_path, {
+    merge_save_npz(out_path, {
         "pos_x": pos_x, "pos_y": pos_y,
         f"{key}__band_gamma2": gamma2, f"{key}__band_phase": phase,
         f"{key}__band_nshots": nshots, f"{key}__band_fpeak": fpeak,

@@ -25,8 +25,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from data_analysis.io import open_lapd, parse_gas_puff
-from data_analysis.io.paths import output_path
+from data_analysis.plasma.langmuir import load_plasma_data, load_sweep_axes, tip_tag
 from data_analysis.signal.core import downsample_blockmean
+from data_analysis.utils import run_num_of
+from data_analysis.viz import plot_utils
+from data_analysis.viz.plot_utils import finalize_figure, grid_by_position
 
 import Jun2026_IV as jiv
 import Jun2026_Isat as jis
@@ -54,60 +57,21 @@ ISAT_TMAX_MS = 10.0        # x-axis upper limit for the Isat panel, ms
 
 
 # =========================================================================== #
-#  Shared helpers -- reuse these in every figure section below.
+#  Shared helpers -- thin bindings of the data_analysis.viz helpers to this
+#  campaign's FIG_SUBDIR; reuse these in every figure section below.
 # =========================================================================== #
 
-def finalize_figure(fig, save_fig=None, show=False, compact_axes=None):
-    """Save and/or show a finished figure, then release it.
-
-    ``save_fig`` -- path to write the PNG to; ``None`` skips saving.
-    ``show``     -- call ``plt.show()`` (the interactive window owns the figure
-                    until closed); otherwise the figure is closed immediately
-                    (headless/batch saving).
-    ``compact_axes`` -- optional group of shared-x axes to pack tight *after*
-                    ``tight_layout`` (which would otherwise re-space them); see
-                    :func:`_pack_shared_x`.
-    """
-    fig.tight_layout()
-    if compact_axes is not None:
-        _pack_shared_x(compact_axes)
-    if save_fig is not None:
-        fig.savefig(save_fig, dpi=150, bbox_inches="tight")
-        print(f"Figure saved to: {save_fig}")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-
-
 def fig_path(name, subdir=FIG_SUBDIR):
-    """Centralized figure location under the repo-external output root.
-
-    Routes through :func:`data_analysis.io.paths.output_path`, so figures land in
-    ``$DATA_ANALYSIS_OUTPUT/figures/<subdir>/`` (default ``~/data-analysis-output``)
-    rather than next to the raw data or in the repo.  ``name`` is the filename
-    stem already including any run/tip/figure tags (e.g. ``"02-tipR-line"``); a
-    ``.png`` extension is added if absent.
-
-    Drivers follow the convention: ``save_fig is True`` -> ``fig_path(name)``; a
-    string -> that explicit path; anything falsey -> don't save.
-    """
-    if not os.path.splitext(name)[1]:
-        name += ".png"
-    return output_path("figures", subdir, name)
+    """Centralized figure location: :func:`data_analysis.viz.plot_utils.fig_path`
+    with this campaign's default subdirectory."""
+    return plot_utils.fig_path(name, subdir)
 
 
 def _resolve_save(save_fig, name):
-    """Resolve a driver's ``save_fig`` convention (see :func:`fig_path`).
-
-    ``True`` -> the centralized ``fig_path(name)``; a string -> that explicit
-    path; anything falsey -> ``None`` (don't save).  Every ``plot_*_run`` driver
-    resolves through here so the convention lives in one place.
-    """
-    return fig_path(name) if save_fig is True else (save_fig or None)
-
-
-run_num_of = jiv.run_num_of   # the run filename convention lives with the processing module
+    """Resolve a driver's ``save_fig`` convention (True -> :func:`fig_path`, a
+    string -> that path, falsey -> None).  Every ``plot_*_run`` driver resolves
+    through here so the convention lives in one place."""
+    return plot_utils.resolve_save(save_fig, name, FIG_SUBDIR)
 
 
 def _run_description(ifn, run=None):
@@ -176,28 +140,6 @@ def discover_tips(ifn):
 # =========================================================================== #
 #  Figure: IV line-scan (Vp / Te / ne vs x + Isat reference)
 # =========================================================================== #
-
-def _pack_shared_x(axes, gap=0.012):
-    """Stack ``axes`` so they abut vertically with only ``gap`` between them.
-
-    For a group of panels that share one x-axis the default ``subplots`` spacing
-    leaves wasted blank rows between them.  This repositions the panels to fill
-    their *current* combined top->bottom extent, split into equal heights with a
-    thin ``gap`` (figure fraction) between neighbours.  Only the passed ``axes``
-    move, so any other panels on the same figure (e.g. a trailing Isat/FFT block)
-    keep their original positions and stay visually separated.
-    """
-    boxes = [ax.get_position() for ax in axes]
-    top = max(b.y1 for b in boxes)
-    bottom = min(b.y0 for b in boxes)
-    left = boxes[0].x0
-    width = boxes[0].width
-    n = len(axes)
-    h = (top - bottom - gap * (n - 1)) / n
-    for i, ax in enumerate(axes):
-        y0 = top - (i + 1) * h - i * gap
-        ax.set_position([left, y0, width, h])
-
 
 def _draw_iv_panels(axs4, Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, title):
     """Draw the Vp / Te / ne / Te*ne vs x panels at the selected sweep times.
@@ -446,13 +388,13 @@ def _plot_iv_line_tip(data_dir, run_num, tip, tndx_list=None, save_fig=True,
     pass a path to override, or False to skip saving.
     """
     load_tip = None if tip in (None, "override") else tip
-    Vp_arr, Te_arr, ne_arr, *_errs, t_ls = jiv.load_data(data_dir, run_num, tip=load_tip)
-    xpos, *_ = jiv.load_sweep_axes(data_dir, run_num, tip=load_tip)
+    Vp_arr, Te_arr, ne_arr, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=load_tip)
+    xpos, *_ = load_sweep_axes(data_dir, run_num, tip=load_tip)
 
     ndx = tndx_list if tndx_list is not None else list(
         range(0, Vp_arr.shape[1], max(1, Vp_arr.shape[1] // 4)))
 
-    name = f"{run_num}{jiv._tip_tag(load_tip)}-line"
+    name = f"{run_num}{tip_tag(load_tip)}-line"
     plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, ndx,
                  save_fig=_resolve_save(save_fig, name), show=show,
                  title=title, isat=isat, fft=fft)
@@ -479,7 +421,7 @@ def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=False):
     run = open_lapd(ifn)
     title = run_title(ifn, run_num, run=run)
     load_tip = None if tips == ["override"] else tips[0]
-    _, _, npos, nshot = jiv.load_sweep_axes(data_dir, run_num, tip=load_tip)
+    _, _, npos, nshot = load_sweep_axes(data_dir, run_num, tip=load_tip)
     isat = _read_isat_trace(run, npos, nshot)
     fft = _read_isat_fft(ifn)
 
@@ -501,7 +443,7 @@ def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=False):
 #         over 0..isat_tmax_ms ms (read with Jun2026_Isat.get_isat_at_position).
 #    6.   That channel's all-shot-averaged FFT for the Isat run, loaded from the
 #         batch npz (Jun2026_Isat.OUT_NPZ), limited to < fft_fmax_khz.
-#  Reuses the IV loaders (jiv.load_data / load_sweep_data), the Isat reader (jis)
+#  Reuses the IV loaders (load_plasma_data / load_sweep_axes), the Isat reader (jis)
 #  and run_title -- no read/FFT logic is re-implemented here.
 # =========================================================================== #
 
@@ -553,8 +495,8 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
     tndx_list = tndx_list if tndx_list is not None else [-7, -5, -3, -1]
 
     # Panels 1-3: IV arrays + axes from the IV run's saved .npz.
-    Vp_arr, Te_arr, ne_arr, *_errs, t_ls = jiv.load_data(data_dir, run_num, tip=iv_tip)
-    xpos, *_ = jiv.load_sweep_axes(data_dir, run_num, tip=iv_tip)
+    Vp_arr, Te_arr, ne_arr, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=iv_tip)
+    xpos, *_ = load_sweep_axes(data_dir, run_num, tip=iv_tip)
 
     # Panels 4-5: raw Isat (shot-averaged) + the all-shot-averaged FFT loaded
     # from the batch npz (shared loader, same as the line-scan figure).
@@ -582,7 +524,7 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
                     f"scope '{isat_scope}' {isat_chan}",
                     chan_label=f"'{isat_scope}'/{isat_chan}")
 
-    name = f"{run_num}{jiv._tip_tag(iv_tip)}-{isat_run_num}-combined"
+    name = f"{run_num}{tip_tag(iv_tip)}-{isat_run_num}-combined"
     finalize_figure(fig, save_fig=_resolve_save(save_fig, name), show=show,
                     compact_axes=axs[:4])
 
@@ -622,31 +564,6 @@ def _load_xcorr_run(ifn, ch_a, ch_b, npz_path=None):
         return None
 
 
-def _grid_by_position(pos_x, pos_y, values):
-    """Scatter per-position ``values`` onto a regular (y, x) grid for ``imshow``.
-
-    ``pos_x`` / ``pos_y`` / ``values`` are 1-D, one entry per probe position.
-    Returns ``(grid, extent)`` where ``grid`` is ``(ny, nx)`` (NaN at any unvisited
-    cell) laid out for ``imshow(origin="lower")`` and ``extent`` is
-    ``(xmin, xmax, ymin, ymax)`` in cm.  Positions are snapped to the sorted unique
-    x / y axes, so an irregular visiting order still lands on the right cell.
-    """
-    xs = np.unique(np.round(pos_x, 3))
-    ys = np.unique(np.round(pos_y, 3))
-    grid = np.full((ys.size, xs.size), np.nan)
-    ix = np.searchsorted(xs, np.round(pos_x, 3))
-    iy = np.searchsorted(ys, np.round(pos_y, 3))
-    grid[iy, ix] = values
-
-    # extent spans cell centers +/- half a step so pixels are centered on positions.
-    def _halfspan(a):
-        step = np.diff(a).mean() if a.size > 1 else 1.0
-        return a[0] - step / 2, a[-1] + step / 2
-    xmin, xmax = _halfspan(xs)
-    ymin, ymax = _halfspan(ys)
-    return grid, (xmin, xmax, ymin, ymax)
-
-
 def _draw_plane_maps(fig, axs, panels, extent):
     """Draw a row of xy-plane ``imshow`` maps with colorbars and cm axes.
 
@@ -672,7 +589,7 @@ def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     For a plane run, :func:`Jun2026_xcorr.batch_xcorr` stores one ensemble
     coherence/cross-phase spectrum and one time-lag cross-correlation trace per
     (x, y) position.  This collapses each to a per-position scalar and lays it on
-    the xy grid (:func:`_grid_by_position`), drawing three maps side by side:
+    the xy grid (:func:`data_analysis.viz.plot_utils.grid_by_position`), drawing three maps side by side:
 
     * mean coherence ``gamma2`` (0..1) over the ``[fmin_khz, fmax_khz]`` band,
     * mean cross-phase ``Delta-phi`` (deg) over that band, and
@@ -707,9 +624,9 @@ def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     ph_band = np.where(incoherent, np.nan, ph_band)
     peak_lag = np.where(incoherent, np.nan, peak_lag)
 
-    g2_grid, extent = _grid_by_position(pos_x, pos_y, g2_band)
-    ph_grid, _ = _grid_by_position(pos_x, pos_y, ph_band)
-    lag_grid, _ = _grid_by_position(pos_x, pos_y, peak_lag)
+    g2_grid, extent = grid_by_position(pos_x, pos_y, g2_band)
+    ph_grid, _ = grid_by_position(pos_x, pos_y, ph_band)
+    lag_grid, _ = grid_by_position(pos_x, pos_y, peak_lag)
 
     # Symmetric lag color range about 0 so +/- delay reads at a glance.
     lag_max = np.nanmax(np.abs(lag_grid)) if np.isfinite(lag_grid).any() else 1.0
@@ -764,7 +681,7 @@ def plot_xcorr_band_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     Uses the per-position scalars from :func:`Jun2026_xcorr.batch_xcorr_band` (one
     band-averaged coherence + cross-phase per (x, y) position, collapsed the
     statistically correct way over the band's complex spectra).  Draws
-    (:func:`_grid_by_position`):
+    (:func:`data_analysis.viz.plot_utils.grid_by_position`):
 
     * band coherence ``gamma2`` (0..1),
     * band cross-phase ``Delta-phi`` (deg) -- the phase-difference map, and
@@ -787,8 +704,8 @@ def plot_xcorr_band_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     incoherent = gamma2 < gamma2_floor
     ph_deg = np.where(incoherent, np.nan, np.degrees(phase))
 
-    g2_grid, extent = _grid_by_position(pos_x, pos_y, gamma2)
-    ph_grid, _ = _grid_by_position(pos_x, pos_y, ph_deg)
+    g2_grid, extent = grid_by_position(pos_x, pos_y, gamma2)
+    ph_grid, _ = grid_by_position(pos_x, pos_y, ph_deg)
 
     panels = [(g2_grid, r"coherence $\gamma^2$", "viridis", (0, 1)),
               (ph_grid, r"cross-phase $\Delta\phi$ [deg]", "twilight", (-180, 180))]
@@ -798,7 +715,7 @@ def plot_xcorr_band_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     fp_khz = np.where(incoherent, np.nan, fpeak * 1e-3)
     peak_varies = np.nanstd(fp_khz) > 0
     if peak_varies:
-        fp_grid, _ = _grid_by_position(pos_x, pos_y, fp_khz)
+        fp_grid, _ = grid_by_position(pos_x, pos_y, fp_khz)
         vlo, vhi = np.nanmin(fp_khz), np.nanmax(fp_khz)
         panels.append((fp_grid, r"peak $f$ [kHz]", "plasma", (vlo, vhi)))
 

@@ -109,6 +109,11 @@ def get_IV(sess, adc, npos, nshot, area, cal_fac = [1, 1]):
 
     return tarr, Vsweep, IsweepL_dic, IsweepR_dic
 #--------------------------------------------------------------
+# NOTE: find_IV_tndx / reshape_IV below are the Jan-2024 predecessors of
+# data_analysis.plasma.langmuir.find_sweep_indices / reshape_IV (used by the
+# Mar/Jun-2026 pipelines). They are NOT drop-in interchangeable: this version
+# uses fixed offsets around dV^2 peaks tuned to the Jan-2024 sweep timing, so
+# they stay local to preserve this campaign's results.
 def find_IV_tndx(V):
     dV = np.gradient(V)**2
     peaks, _ = find_peaks(dV, prominence=100, distance=1000)

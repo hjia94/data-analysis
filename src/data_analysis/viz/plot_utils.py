@@ -7,7 +7,9 @@ into the following categories:
 
 1. Frequency Analysis
     - plot_fft: Plot Fast Fourier Transform of signals
+    - plot_stft: Plot one STFT spectrogram panel (ms/MHz axes, optional LogNorm)
     - plot_stft_wt_photon_counts: Plot STFT spectrogram with photon-count overlay
+    - floor_for_lognorm: Make a matrix safe for matplotlib LogNorm
 
 2. Multi-Shot Display
     - select_monitor / position_window: place figures across monitors
@@ -17,6 +19,19 @@ into the following categories:
 3. Photon Counting
     - plot_counts_per_bin: Plot histogram of photon counts in time bins
     - plot_photon_detection / plot_original_and_baseline / plot_subtracted_signal
+
+4. Figure Finalisation and Output
+    - finalize_figure: tight_layout -> save -> show/close, in one place
+    - fig_path / resolve_save: centralized figure paths under the output root
+    - pack_shared_x: pack shared-x panels so they abut vertically
+
+5. Style
+    - configure_publication_style: publication-quality rcParams
+    - OKABE_ITO: colorblind-safe categorical palette
+
+6. Plane Maps and Animation
+    - grid_by_position: per-position scalars -> regular (y, x) grid + imshow extent
+    - Player: play/pause controller stepping a Slider through frame ticks
 
 Each function includes detailed documentation of its parameters and returns.
 '''
@@ -436,6 +451,250 @@ def plot_stft_wt_photon_counts(tarr, fft_arr, freq_arr, bin_centers, counts, fig
     ax.set_title('STFT with Photon Counts Overlay')
 
     ax.set_xlim(tarr[0]*1e3, tarr[-1]*1e3)
+
+#==============================================================================
+# Spectrogram Helpers
+#==============================================================================
+
+def floor_for_lognorm(matrix):
+    """Replace non-positive entries with the smallest positive value so the
+    matrix is safe for matplotlib LogNorm.
+
+    Args:
+        matrix (np.ndarray): STFT/spectrogram magnitude matrix.
+
+    Returns:
+        tuple: (safe_matrix, vmin) where safe_matrix is a floored copy and vmin
+        is the floor value (usable as the LogNorm vmin).
+    """
+    safe = matrix.copy()
+    vmin = safe[safe > 0].min() if np.any(safe > 0) else 1e-10
+    safe[safe <= 0] = vmin
+    return safe, vmin
+
+
+def plot_stft(tarr, freq_arr, stft_matrix, ax=None, fig=None, log_norm=True,
+              norm=None, cmap='jet', colorbar=True, cbar_label='Magnitude',
+              title=None):
+    """Plot one STFT spectrogram panel with the ms/MHz axis convention.
+
+    Args:
+        tarr (np.ndarray): STFT time array in seconds (displayed in ms)
+        freq_arr (np.ndarray): Frequency array in Hz (displayed in MHz)
+        stft_matrix (np.ndarray): (n_time, n_freq) magnitude matrix as returned
+            by ``data_analysis.signal.calculate_stft``; plotted transposed
+        ax: Axes to plot on. If None, current axes will be used.
+        fig: Figure for the colorbar. If None, taken from ax.
+        log_norm (bool): Floor non-positive values (floor_for_lognorm) and use a
+            LogNorm built from this matrix.
+        norm: Externally shared matplotlib norm (e.g. for side-by-side panels
+            that must share one color scale); overrides the per-matrix LogNorm.
+        colorbar (bool): Draw a colorbar labelled cbar_label next to ax.
+        title (str, optional): Axes title.
+
+    Sets the y label ("Frequency (MHz)"); the x label is left to the caller so
+    stacked shared-x panels can label only the bottom one.
+
+    Returns:
+        matplotlib.image.AxesImage: The imshow image (for external colorbars).
+    """
+    import matplotlib.colors as mcolors
+
+    if ax is None:
+        ax = plt.gca()
+    if fig is None:
+        fig = ax.get_figure()
+
+    matrix = stft_matrix
+    if log_norm or norm is not None:
+        matrix, vmin = floor_for_lognorm(stft_matrix)
+        if norm is None:
+            norm = mcolors.LogNorm(vmin=vmin, vmax=matrix.max())
+
+    im = ax.imshow(matrix.T, aspect='auto', origin='lower',
+                   extent=[tarr[0]*1e3, tarr[-1]*1e3,
+                           freq_arr[0]/1e6, freq_arr[-1]/1e6],
+                   interpolation='None', cmap=cmap, norm=norm)
+    ax.set_ylabel('Frequency (MHz)')
+    if title is not None:
+        ax.set_title(title)
+    if colorbar:
+        fig.colorbar(im, ax=ax, label=cbar_label)
+    return im
+
+#==============================================================================
+# Figure Finalisation and Output
+#==============================================================================
+
+def finalize_figure(fig, save_fig=None, show=False, compact_axes=None, dpi=150):
+    """Save and/or show a finished figure, then release it.
+
+    Args:
+        fig: The finished figure.
+        save_fig: Path to write the figure to; None skips saving.
+        show (bool): Call ``plt.show()`` (the interactive window owns the figure
+            until closed); otherwise the figure is closed immediately
+            (headless/batch saving).
+        compact_axes: Optional group of shared-x axes to pack tight *after*
+            ``tight_layout`` (which would otherwise re-space them); see
+            :func:`pack_shared_x`.
+        dpi (int): Resolution for the saved figure.
+    """
+    fig.tight_layout()
+    if compact_axes is not None:
+        pack_shared_x(compact_axes)
+    if save_fig is not None:
+        fig.savefig(save_fig, dpi=dpi, bbox_inches="tight")
+        print(f"Figure saved to: {save_fig}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def fig_path(name, subdir):
+    """Centralized figure location under the repo-external output root.
+
+    Routes through :func:`data_analysis.io.paths.output_path`, so figures land in
+    ``$DATA_ANALYSIS_OUTPUT/figures/<subdir>/`` (default ``~/data-analysis-output``)
+    rather than next to the raw data or in the repo.  ``name`` is the filename
+    stem already including any run/tip/figure tags (e.g. ``"02-tipR-line"``); a
+    ``.png`` extension is added if absent.
+
+    Drivers follow the convention: ``save_fig is True`` -> ``fig_path(name, subdir)``;
+    a string -> that explicit path; anything falsey -> don't save.
+    """
+    import os
+    from data_analysis.io.paths import output_path
+
+    if not os.path.splitext(name)[1]:
+        name += ".png"
+    return output_path("figures", subdir, name)
+
+
+def resolve_save(save_fig, name, subdir):
+    """Resolve a plot driver's ``save_fig`` convention (see :func:`fig_path`).
+
+    ``True`` -> the centralized ``fig_path(name, subdir)``; a string -> that
+    explicit path; anything falsey -> ``None`` (don't save).
+    """
+    return fig_path(name, subdir) if save_fig is True else (save_fig or None)
+
+
+def pack_shared_x(axes, gap=0.012):
+    """Stack ``axes`` so they abut vertically with only ``gap`` between them.
+
+    For a group of panels that share one x-axis the default ``subplots`` spacing
+    leaves wasted blank rows between them.  This repositions the panels to fill
+    their *current* combined top->bottom extent, split into equal heights with a
+    thin ``gap`` (figure fraction) between neighbours.  Only the passed ``axes``
+    move, so any other panels on the same figure keep their original positions
+    and stay visually separated.
+    """
+    boxes = [ax.get_position() for ax in axes]
+    top = max(b.y1 for b in boxes)
+    bottom = min(b.y0 for b in boxes)
+    left = boxes[0].x0
+    width = boxes[0].width
+    n = len(axes)
+    h = (top - bottom - gap * (n - 1)) / n
+    for i, ax in enumerate(axes):
+        y0 = top - (i + 1) * h - i * gap
+        ax.set_position([left, y0, width, h])
+
+#==============================================================================
+# Style
+#==============================================================================
+
+# Okabe-Ito colorblind-safe categorical palette.
+OKABE_ITO = ['#0072B2', '#D55E00', '#009E73', '#CC79A7', '#E69F00',
+             '#56B4E9', '#F0E442', '#000000']
+
+
+def configure_publication_style():
+    """Set rcParams for compact publication-quality figures (Arial, inward
+    ticks on all four sides, thin lines)."""
+    plt.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans'],
+        'font.size': 9,
+        'axes.labelsize': 10,
+        'axes.titlesize': 10,
+        'xtick.labelsize': 9,
+        'ytick.labelsize': 9,
+        'legend.fontsize': 9,
+        'axes.linewidth': 0.8,
+        'lines.linewidth': 0.9,
+        'xtick.direction': 'in',
+        'ytick.direction': 'in',
+        'xtick.top': True,
+        'ytick.right': True,
+    })
+
+#==============================================================================
+# Plane Maps and Animation
+#==============================================================================
+
+def grid_by_position(pos_x, pos_y, values):
+    """Scatter per-position ``values`` onto a regular (y, x) grid for ``imshow``.
+
+    ``pos_x`` / ``pos_y`` / ``values`` are 1-D, one entry per probe position.
+    Returns ``(grid, extent)`` where ``grid`` is ``(ny, nx)`` (NaN at any unvisited
+    cell) laid out for ``imshow(origin="lower")`` and ``extent`` is
+    ``(xmin, xmax, ymin, ymax)`` in cm.  Positions are snapped to the sorted unique
+    x / y axes, so an irregular visiting order still lands on the right cell.
+    """
+    xs = np.unique(np.round(pos_x, 3))
+    ys = np.unique(np.round(pos_y, 3))
+    grid = np.full((ys.size, xs.size), np.nan)
+    ix = np.searchsorted(xs, np.round(pos_x, 3))
+    iy = np.searchsorted(ys, np.round(pos_y, 3))
+    grid[iy, ix] = values
+
+    # extent spans cell centers +/- half a step so pixels are centered on positions.
+    def _halfspan(a):
+        step = np.diff(a).mean() if a.size > 1 else 1.0
+        return a[0] - step / 2, a[-1] + step / 2
+    xmin, xmax = _halfspan(xs)
+    ymin, ymax = _halfspan(ys)
+    return grid, (xmin, xmax, ymin, ymax)
+
+
+class Player:
+    """Play/pause controller that steps a matplotlib Slider through frame ticks.
+
+    Wire the actual drawing to the slider's ``on_changed`` callback; each play
+    tick just sets the slider value, so play mode and manual scrubbing share
+    one draw path.  Connect :meth:`toggle` to a ``Button`` for play/pause.
+
+    Args:
+        slider: matplotlib.widgets.Slider whose on_changed callback redraws.
+        frame_ticks (np.ndarray): The slider values to step through.
+        fig: The figure (its canvas event loop paces the playback).
+        interval_s (float): Delay between frames while playing.
+    """
+
+    def __init__(self, slider, frame_ticks, fig, interval_s=0.1):
+        self.play = False
+        self.idx = 0
+        self.slider = slider
+        self.frame_ticks = np.asarray(frame_ticks)
+        self.fig = fig
+        self.interval_s = interval_s
+
+    def toggle(self, event=None):
+        self.play = not self.play
+        if self.play:
+            self.idx = int(np.argmin(np.abs(self.frame_ticks - self.slider.val)))
+            self.loop()
+
+    def loop(self):
+        # Iterative, not recursive: playback can run indefinitely (the ticks
+        # wrap around), so recursing per frame would exhaust the stack.
+        while self.play:
+            self.slider.set_val(self.frame_ticks[self.idx])
+            self.idx = (self.idx + 1) % len(self.frame_ticks)
+            self.fig.canvas.start_event_loop(self.interval_s)
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>

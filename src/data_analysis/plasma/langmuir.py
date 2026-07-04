@@ -12,10 +12,18 @@ batch callers use ``analyze_IV_safe``. ``derivative``, ``find_sweep_indices`` an
 are alternative/legacy analysis methods kept available pending robustness work
 (the routine is subject to change).
 
+The batch-pipeline section at the bottom (``prepare_sweep_data``,
+``process_iv_and_save``, ``sweep_npz_paths`` and the ``load_*`` npz loaders) is
+the campaign-independent half of the Mar-2026 / Jun-2026 sweep workflow: each
+experiment script keeps only its raw-read step and hands the arrays here.
+
 Authors: Jia Han (orig. 2018), Google Gemini (IV analyzer, 2026)
 """
 
+import datetime
 import math
+import os
+import time
 import warnings
 
 import numpy as np
@@ -24,6 +32,7 @@ from scipy.signal import find_peaks, peak_widths
 from scipy.optimize import curve_fit
 from scipy import integrate, constants
 from scipy.ndimage import gaussian_filter1d
+from tqdm import tqdm
 
 # np.trapz was renamed np.trapezoid in numpy 2.0 (np.trapz deprecated).
 # Prefer the new name, fall back for numpy < 2.0.
@@ -675,6 +684,194 @@ def analyze_IV_safe(voltage, current, file_name="", verbose=False):
         # flagged as NaN inside analyze_IV, not raised, so it returns normally.)
         if verbose:
             print(f"[{file_name}] Analysis failed: {e}")
-        
+
         # Return NaNs so the main loop can store them and safely move on
         return np.nan, np.nan, np.nan
+
+#=== batch pipeline: campaign-independent sweep processing + npz I/O =========
+# The raw read (which board/scope/channel, scaling) stays in each experiment
+# script; everything from sweep detection onwards is shared here.
+
+def prepare_sweep_data(tarr, Vswp_arr, Iswp_arr, padding=10, trim_percent=10,
+                       smooth_sigma=10):
+    """Detect sweeps in the voltage trace, reshape both arrays, smooth the current.
+
+    ``find_sweep_indices`` on the first position's voltage -> per-sweep middle
+    timestamps -> ``reshape_IV`` -> Gaussian smoothing of the current along the
+    sample axis.  ``Vswp_arr`` is ``(npos, nsamples)`` (shot-averaged) and
+    ``Iswp_arr`` is ``(npos, nshot, nsamples)``.
+
+    Returns ``(Vswp_arr_rs, Iswp_arr_rs, data_timestamp)`` -- the reshaped sweep
+    arrays ready for :func:`process_iv_and_save` plus one representative
+    timestamp per sweep (the middle of each detected sweep).
+    """
+    start_t_ls, stop_t_ls = find_sweep_indices(Vswp_arr[0], padding=padding)
+
+    mid_indices = [(start + stop) // 2 for start, stop in zip(start_t_ls, stop_t_ls)]
+    data_timestamp = tarr[mid_indices]
+    print(f"Number of sweeps: {len(data_timestamp)}")
+
+    Vswp_arr_rs, Iswp_arr_rs = reshape_IV(Vswp_arr, Iswp_arr,
+                                          start_t_ls, stop_t_ls, trim_percent)
+
+    print("Applying smoothing to current array...")
+    Iswp_arr_rs = gaussian_filter1d(Iswp_arr_rs, smooth_sigma, axis=-1)
+    return Vswp_arr_rs, Iswp_arr_rs, data_timestamp
+
+
+def mean_sem(vals):
+    """Mean and standard error of the valid (non-NaN) entries of ``vals``.
+
+    Returns ``(nan, nan)`` when nothing is valid and a ``nan`` SEM for a single
+    sample (no spread to estimate).  Shared by the Vp/Te/ne averaging in
+    :func:`process_iv_and_save` so the three quantities are reduced identically.
+    """
+    vals = [v for v in vals if not np.isnan(v)]
+    if not vals:
+        return np.nan, np.nan
+    sem = np.std(vals, ddof=1) / np.sqrt(len(vals)) if len(vals) > 1 else np.nan
+    return np.mean(vals), sem
+
+
+def process_iv_and_save(voltage_data, current_data, save_path):
+    """
+    Loops through the multi-dimensional Langmuir probe dataset, extracting
+    plasma parameters. Averages the valid shots for each location/sweep combination,
+    calculates the standard error, and outputs 2D arrays.
+    Saves progress incrementally to prevent data loss.
+
+    ``voltage_data`` is ``(n_locs, n_sweeps, nsamples)`` and ``current_data`` is
+    ``(n_locs, n_shots, n_sweeps, nsamples)`` -- the reshaped arrays from
+    :func:`prepare_sweep_data`.  Returns
+    ``(Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err)``.
+    """
+    n_locs, n_shots, n_sweeps, _ = current_data.shape
+
+    # Pre-allocate the (mean, err) output pair per quantity, NaN-filled
+    # (locs, sweeps); everything downstream (averaging, incremental save,
+    # return) is driven off this dict so adding a quantity is one key.
+    arrs = {k: (np.full((n_locs, n_sweeps), np.nan),
+                np.full((n_locs, n_sweeps), np.nan))
+            for k in ("Vp", "Te", "ne")}
+
+    total_traces = n_locs * n_shots * n_sweeps
+    print(f"Starting batch processing of {total_traces} traces across {n_locs} locations...")
+    print(f"Averaging {n_shots} shots per sweep...")
+
+    start_time = time.time()
+    fail_count = 0
+
+    # Progress bar over locations; the per-trace fail rate is shown in the postfix
+    # and refreshed each location.  tqdm provides the %, elapsed, ETA and rate.
+    pbar = tqdm(range(n_locs), desc="Analyzing", unit="loc")
+    for loc in pbar:
+        for swp in range(n_sweeps):
+            # The voltage trace applies to all shots at this location/sweep
+            V_trace = voltage_data[loc, swp, :]
+
+            # Per-shot results for this sweep, keyed like `arrs`.
+            temp = {"Vp": [], "Te": [], "ne": []}
+            for sht in range(n_shots):
+                I_trace = current_data[loc, sht, swp, :]
+                trace_id = f"Loc:{loc}|Shot:{sht}|Swp:{swp}"
+
+                # Analyze trace
+                Vp, Te, ne = analyze_IV_safe(V_trace, I_trace, file_name=trace_id)
+
+                # A NaN Vp marks a failed fit; ne can also be NaN if Te was forced
+                # to 0, so mean_sem filters NaNs per-quantity below.
+                if np.isnan(Vp):
+                    fail_count += 1
+                else:
+                    temp["Vp"].append(Vp)
+                    temp["Te"].append(Te)
+                    temp["ne"].append(ne)
+
+            # Mean + standard error of the valid shots, identically for each quantity.
+            for key, (arr, err) in arrs.items():
+                arr[loc, swp], err[loc, swp] = mean_sem(temp[key])
+
+        # Incremental save of all 6 arrays after every location.
+        np.savez(save_path,
+                 **{f"{k}_arr": arr for k, (arr, _) in arrs.items()},
+                 **{f"{k}_err": err for k, (_, err) in arrs.items()})
+
+        # Live running fail rate alongside the progress bar
+        traces_done = (loc + 1) * n_sweeps * n_shots
+        pbar.set_postfix(fails=f"{fail_count} ({fail_count / traces_done * 100:.1f}%)")
+
+    total_time = time.time() - start_time
+    final_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    final_fail_rate = (fail_count / total_traces) * 100
+
+    print("\n" + "=" * 55)
+    print("BATCH PROCESSING COMPLETE")
+    print("=" * 55)
+    print(f"Total Time:    {final_time_str}")
+    print(f"Total Traces:  {total_traces}")
+    print(f"Total Fails:   {fail_count}")
+    print(f"Fail Rate:     {final_fail_rate:.2f}%")
+    print(f"Data saved to: {save_path}")
+    print("=" * 55)
+
+    (Vp_arr, Vp_err), (Te_arr, Te_err), (ne_arr, ne_err) = (
+        arrs[k] for k in ("Vp", "Te", "ne"))
+    return Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err
+
+
+def tip_tag(tip):
+    """Filename fragment for a probe tip (``"-tipR"``); empty for the untagged
+    single-tip case.  Used in the npz names (:func:`sweep_npz_paths`) and in
+    figure names built from them."""
+    return f"-tip{tip}" if tip else ""
+
+
+def sweep_npz_paths(data_dir, run_num, tip=None):
+    """The saved-npz pair for one run/tip: ``(sweep_path, plasma_path)``.
+
+    The one home of the ``<run>[-tip<T>]-sweep-data.npz`` /
+    ``<run>[-tip<T>]-plasma-data.npz`` co-located filename convention (the npz
+    sit beside the raw HDF5).  ``tip=None`` gives the untagged names used by
+    single-probe campaigns.
+    """
+    tag = tip_tag(tip)
+    return (os.path.join(data_dir, f"{run_num}{tag}-sweep-data.npz"),
+            os.path.join(data_dir, f"{run_num}{tag}-plasma-data.npz"))
+
+
+def load_sweep_data(data_dir, run_num, tip=None):
+    """Load the reshaped sweep arrays + axes saved by the campaign's save step.
+
+    Expects the single-current-array key layout (``Vswp_arr_rs`` /
+    ``Iswp_arr_rs``); campaigns that store several current arrays per npz keep
+    their own loader.
+    """
+    sweep_path, _ = sweep_npz_paths(data_dir, run_num, tip)
+    with np.load(sweep_path) as data:
+        return (data["Vswp_arr_rs"], data["Iswp_arr_rs"], data["data_timestamp"],
+                data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"]))
+
+
+def load_sweep_axes(data_dir, run_num, tip=None):
+    """Just the position axes + shot layout from a saved sweep npz.
+
+    ``np.load`` reads npz entries lazily, so this skips the multi-hundred-MB
+    sweep arrays -- for plot drivers that only need ``(xpos, ypos, npos, nshot)``.
+    """
+    sweep_path, _ = sweep_npz_paths(data_dir, run_num, tip)
+    with np.load(sweep_path) as data:
+        return data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"])
+
+
+def load_plasma_data(data_dir, run_num, tip=None):
+    """Load saved plasma parameters + sweep timestamps for plotting.
+
+    Returns ``(Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls)``.
+    """
+    sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
+    with np.load(sweep_path) as data:
+        t_ls = data["data_timestamp"]
+
+    with np.load(plasma_path) as ps_data:
+        return (ps_data["Vp_arr"], ps_data["Te_arr"], ps_data["ne_arr"],
+                ps_data["Vp_err"], ps_data["Te_err"], ps_data["ne_err"], t_ls)

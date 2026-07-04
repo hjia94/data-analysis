@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 import copy
 
 from data_analysis.io import open_lapd
+from data_analysis.utils import run_num_of
 
 
 def get_emissive_data(sess, adc, npos, nshot):
@@ -262,7 +263,7 @@ if __name__ == '__main__':
     
     # Extract directory and run number from filename
     data_dir = os.path.dirname(ifn)
-    run_num = os.path.basename(ifn).split('-')[0]  # Extract "10" from filename
+    run_num = run_num_of(ifn)  # Extract "10" from filename
     
     # Define output file path
     save_path = os.path.join(data_dir, f"{run_num}-emissive-data.npz")

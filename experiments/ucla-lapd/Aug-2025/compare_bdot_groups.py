@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 
 from lapd_io import log, get_bdot_data
 from data_analysis.io.scope_reader import read_hdf5_all_scopes_channels
+from data_analysis.viz.plot_utils import plot_stft
 from process_bdot import calculate_bdot_stft
 from plot_bdot import plot_bdot_stft_comparison
 
@@ -248,7 +249,6 @@ def show_example_shot(shot_map):
 	)
 	stft_mat = stft_mats[first_ch]
 
-	import matplotlib.colors as mcolors
 	fig, axes = plt.subplots(2, 1, figsize=(8, 7),
 							 num=f"Example_{os.path.basename(hdf5_path)}_shot{shot_num}_{first_ch}")
 	axes[0].plot(tarr_B * 1e3, sig, lw=0.5)
@@ -256,19 +256,8 @@ def show_example_shot(shot_map):
 	axes[0].set_ylabel(f"{first_ch} signal")
 	axes[0].set_title(descs.get(first_ch, first_ch))
 
-	safe = stft_mat.copy()
-	pos = safe[safe > 0]
-	vmin = pos.min() if pos.size else 1e-10
-	safe[safe <= 0] = vmin
-	im = axes[1].imshow(
-		safe.T, aspect="auto", origin="lower",
-		extent=[stft_t[0] * 1e3, stft_t[-1] * 1e3, freq[0] / 1e6, freq[-1] / 1e6],
-		interpolation="None", cmap="jet",
-		norm=mcolors.LogNorm(vmin=vmin, vmax=safe.max()),
-	)
+	plot_stft(stft_t, freq, stft_mat, ax=axes[1], fig=fig)
 	axes[1].set_xlabel("Time (ms)")
-	axes[1].set_ylabel("Frequency (MHz)")
-	fig.colorbar(im, ax=axes[1], label="Magnitude")
 	plt.tight_layout()
 	plt.show(block=True)
 

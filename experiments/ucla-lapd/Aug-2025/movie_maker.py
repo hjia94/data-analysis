@@ -19,6 +19,7 @@ from matplotlib.animation import FuncAnimation
 from data_analysis.tracking.generate_tracking import count_y_passes
 from data_analysis.plasma.photons import counts_per_bin
 from data_analysis.io.paths import output_path as resolve_output_path
+from data_analysis.viz.plot_utils import Player
 from tracking_utils import (
     analysis_key_for_basename,
     evaluate_y_cm,
@@ -83,42 +84,6 @@ def draw_coverage_frame(ax, fig, y_centers_cm, coverage_counts, t_ms, ymax=None)
     )
     ax.set_title(f't = {t_ms:.1f} ms')
     fig.canvas.draw_idle()
-
-
-class Player:
-    def __init__(self, slider, frame_ticks, fig, ax, all_t_ms, all_r_cm, all_c,
-                 ymax=None, all_m=None):
-        self.play = False
-        self.idx = 0
-        self.slider = slider
-        self.frame_ticks = frame_ticks
-        self.fig = fig
-        self.ax = ax
-        self.all_t_ms = all_t_ms
-        self.all_r_cm = all_r_cm
-        self.all_c = all_c
-        self.ymax = ymax
-        self.all_m = all_m
-
-    def toggle(self, event=None):
-        self.play = not self.play
-        if self.play:
-            self.idx = int(np.argmin(np.abs(self.frame_ticks - self.slider.val)))
-            self.loop()
-
-    def loop(self):
-        if not self.play:
-            return
-        t_ms = self.frame_ticks[self.idx]
-        self.slider.set_val(t_ms)
-        frame_step_ms = self.frame_ticks[1] - self.frame_ticks[0] if len(self.frame_ticks) > 1 else 1.0
-        draw_frame(
-            self.ax, self.fig, self.all_t_ms, self.all_r_cm, self.all_c,
-            t_ms, frame_step_ms / 2, ymax=self.ymax, all_m=self.all_m,
-        )
-        self.idx = (self.idx + 1) % len(self.frame_ticks)
-        self.fig.canvas.start_event_loop(0.1)
-        self.loop()
 
 
 def _assemble_xray_points(base_dir, uw_start, frame_step_ms):
@@ -193,24 +158,34 @@ def _assemble_xray_points(base_dir, uw_start, frame_step_ms):
     }
 
 
-def _save_xray_animation(points, output_path, fps):
+def _save_animation(output_path, fps, n_frames, make_update):
+    """Render ``n_frames`` via FuncAnimation and save an mp4 (requires ffmpeg).
+
+    ``make_update(fig, ax)`` returns the per-frame draw callback -- the only
+    part that differs between the x-ray and coverage movies.
+    """
     fig, ax = plt.subplots(figsize=(12, 8))
-
-    def update(frame_idx):
-        draw_frame(
-            ax, fig,
-            points["all_t_ms"], points["all_r_cm"], points["all_c"],
-            points["frame_ticks"][frame_idx], points["half_width"],
-            ymax=points["ymax"], all_m=points["all_m"],
-        )
-
-    anim = FuncAnimation(fig, update, frames=len(points["frame_ticks"]), blit=False)
+    anim = FuncAnimation(fig, make_update(fig, ax), frames=n_frames, blit=False)
 
     print(f"Saving animation to {output_path}...")
     anim.save(output_path, writer='ffmpeg', fps=fps)
     print(f"Animation saved successfully to {output_path}")
     plt.close(fig)
     return output_path
+
+
+def _save_xray_animation(points, output_path, fps):
+    def make_update(fig, ax):
+        def update(frame_idx):
+            draw_frame(
+                ax, fig,
+                points["all_t_ms"], points["all_r_cm"], points["all_c"],
+                points["frame_ticks"][frame_idx], points["half_width"],
+                ymax=points["ymax"], all_m=points["all_m"],
+            )
+        return update
+
+    return _save_animation(output_path, fps, len(points["frame_ticks"]), make_update)
 
 
 def _show_xray_animation(points):
@@ -240,11 +215,8 @@ def _show_xray_animation(points):
         ymax=points["ymax"], all_m=points["all_m"],
     )
 
-    player = Player(
-        slider, points["frame_ticks"], fig, ax,
-        points["all_t_ms"], points["all_r_cm"], points["all_c"],
-        ymax=points["ymax"], all_m=points["all_m"],
-    )
+    # Play mode steps the slider; on_slide above does the actual drawing.
+    player = Player(slider, points["frame_ticks"], fig)
     ax_btn = plt.axes([0.85, 0.1, 0.1, 0.05])
     btn = Button(ax_btn, 'Play/Pause')
     btn.on_clicked(player.toggle)
@@ -331,20 +303,15 @@ def _assemble_coverage_grid(base_dir, frame_step_ms, y_min, y_max,
 
 
 def _save_coverage_animation(grid, output_path, fps):
-    fig, ax = plt.subplots(figsize=(12, 8))
+    def make_update(fig, ax):
+        def update(frame_idx):
+            draw_coverage_frame(
+                ax, fig, grid["y_centers_cm"], grid["coverage_by_frame"][frame_idx],
+                grid["frame_ticks"][frame_idx], ymax=grid["ymax"],
+            )
+        return update
 
-    def update(frame_idx):
-        draw_coverage_frame(
-            ax, fig, grid["y_centers_cm"], grid["coverage_by_frame"][frame_idx],
-            grid["frame_ticks"][frame_idx], ymax=grid["ymax"],
-        )
-
-    anim = FuncAnimation(fig, update, frames=len(grid["frame_ticks"]), blit=False)
-    print(f"Saving trajectory coverage animation to {output_path}...")
-    anim.save(output_path, writer='ffmpeg', fps=fps)
-    print(f"Trajectory coverage animation saved successfully to {output_path}")
-    plt.close(fig)
-    return output_path
+    return _save_animation(output_path, fps, len(grid["frame_ticks"]), make_update)
 
 
 def _show_coverage_animation(grid):

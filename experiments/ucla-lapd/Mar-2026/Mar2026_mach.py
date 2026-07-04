@@ -32,10 +32,7 @@ Processing Pipeline:
 Author: Data analysis pipeline for LAPD Mar2026 campaign
 """
 
-import nt
 import os
-import re
-from jellyfish import nysiis
 import numpy as np
 import copy
 import matplotlib.pyplot as plt
@@ -45,6 +42,7 @@ from tqdm import tqdm
 
 from data_analysis.io import open_lapd
 from data_analysis.signal import butter_bandpass
+from data_analysis.utils import run_num_of
 
 
 def get_mach_data(sess, adc, npos, nshot):
@@ -125,11 +123,12 @@ def save_mach_data(ifn, save_path):
 
         tarr, Vxp_arr, Vxm_arr, Vyp_arr, Vym_arr = get_mach_data(sess, adc, npos, nshot)
         print('Applying Gaussian smoothing to raw data')
+        # One sigma=50 pass per channel. Earlier versions accidentally smoothed
+        # Vxm/Vyp/Vym a second time (effective sigma ~71, and asymmetric vs
+        # Vxp), so npz files generated before Jul 2026 differ slightly from
+        # regenerated ones for those three channels.
         for i in tqdm(range(npos), desc="Smoothing (Gaussian)"):
             Vxp_arr[i] = ndimage.gaussian_filter1d(Vxp_arr[i], sigma=50, axis=-1)
-            Vxm_arr[i] = ndimage.gaussian_filter1d(Vxm_arr[i], sigma=50, axis=-1)
-            Vyp_arr[i] = ndimage.gaussian_filter1d(Vyp_arr[i], sigma=50, axis=-1)
-            Vym_arr[i] = ndimage.gaussian_filter1d(Vym_arr[i], sigma=50, axis=-1)
             Vxm_arr[i] = ndimage.gaussian_filter1d(Vxm_arr[i], sigma=50, axis=-1)
             Vyp_arr[i] = ndimage.gaussian_filter1d(Vyp_arr[i], sigma=50, axis=-1)
             Vym_arr[i] = ndimage.gaussian_filter1d(Vym_arr[i], sigma=50, axis=-1)
@@ -576,7 +575,7 @@ if __name__ == '__main__':
     
     # Extract directory and run number from ifn
     data_dir = os.path.dirname(ifn)
-    run_num = os.path.basename(ifn).split('-')[0]
+    run_num = run_num_of(ifn)
     
     # Define file paths
     envelope_save_path = os.path.join(data_dir, f"{run_num}-mach-envelope-data.npz")
@@ -591,8 +590,8 @@ if __name__ == '__main__':
     # Load IV/Plasma data (run 11)
     # =========================================================================
     print("Loading IV/Plasma data...")
-    from Mar2026_IV import load_data
-    Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls = load_data(data_dir, '11')
+    from data_analysis.plasma.langmuir import load_plasma_data
+    Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls = load_plasma_data(data_dir, '11')
     
     # =========================================================================
     # Plot combined: electron density with Mach probe contours

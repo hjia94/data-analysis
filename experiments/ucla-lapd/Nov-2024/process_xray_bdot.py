@@ -12,7 +12,6 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-from matplotlib import colors
 from screeninfo import get_monitors
 import tkinter as tk
 import cv2
@@ -24,7 +23,10 @@ from data_analysis.io.scope_reader import read_trc_data
 from data_analysis.io.paths import output_path
 from data_analysis.signal.core import calculate_stft
 from data_analysis.plasma.photons import Photons, counts_per_bin
-from data_analysis.viz.plot_utils import select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline, plot_subtracted_signal
+from data_analysis.viz.plot_utils import (
+    select_monitor, plot_stft_wt_photon_counts, plot_original_and_baseline,
+    plot_subtracted_signal, plot_stft, finalize_figure,
+)
 from data_analysis.io.cine import read_cine, convert_cine_to_avi
 from data_analysis.tracking.track_object import track_object_per_frame, get_chamber
 from scipy.constants import g
@@ -689,67 +691,24 @@ def plot_averaged_bdot_stft(avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3
     Plot averaged STFT matrices for the three Bdot signals.
     """
     print("\nCreating averaged Bdot STFT plots...")
-    
+
     # Create figure with 3 subplots (similar to notebook)
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15), num="Averaged_Bdot_STFT", sharex=True)
-    
-    # Plot averaged STFT for By_P21 with log scale
-    if avg_stft_matrix1 is not None:
-        im1 = ax1.imshow(avg_stft_matrix1.T,
-                         aspect='auto',
-                         origin='lower',
-                         extent=[stft_tarr[0]*1e3, stft_tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
-                         interpolation='None',
-                         cmap='jet',
-                         norm=colors.LogNorm(vmin=avg_stft_matrix1.T[avg_stft_matrix1.T > 0].min(), 
-                                           vmax=avg_stft_matrix1.T.max()))
-        ax1.set_ylabel('Frequency (MHz)')
-        ax1.text(0.98, 0.95, 'By_P21 (x=8cm, y=0cm)', transform=ax1.transAxes, 
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), 
-                 horizontalalignment='right', verticalalignment='top')
-        fig.colorbar(im1, ax=ax1, label='Magnitude')
-    
-    if avg_stft_matrix2 is not None:
-        im2 = ax2.imshow(avg_stft_matrix2.T,
-                         aspect='auto',
-                         origin='lower',
-                         extent=[stft_tarr[0]*1e3, stft_tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
-                         interpolation='None',
-                         cmap='jet',
-                         norm=colors.LogNorm(vmin=avg_stft_matrix2.T[avg_stft_matrix2.T > 0].min(), 
-                                           vmax=avg_stft_matrix2.T.max()))
-        ax2.set_ylabel('Frequency (MHz)')
-        ax2.text(0.98, 0.95, 'Bx_P20 (x=0cm, y=0cm)', transform=ax2.transAxes, 
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), 
-                 horizontalalignment='right', verticalalignment='top')
-        fig.colorbar(im2, ax=ax2, label='Magnitude')
+    fig, axes = plt.subplots(3, 1, figsize=(12, 15), num="Averaged_Bdot_STFT", sharex=True)
 
-    if avg_stft_matrix3 is not None:
-        im3 = ax3.imshow(avg_stft_matrix3.T,
-                         aspect='auto',
-                         origin='lower',
-                         extent=[stft_tarr[0]*1e3, stft_tarr[-1]*1e3, freq_arr[0]/1e6, freq_arr[-1]/1e6],
-                         interpolation='None',
-                         cmap='jet',
-                         norm=colors.LogNorm(vmin=avg_stft_matrix3.T[avg_stft_matrix3.T > 0].min(), 
-                                           vmax=avg_stft_matrix3.T.max()))
-        ax3.set_xlabel('Time (ms)')
-        ax3.set_ylabel('Frequency (MHz)')
-        ax3.text(0.98, 0.95, 'By_P20 (x=0cm, y=0cm)', transform=ax3.transAxes, 
-                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), 
-                 horizontalalignment='right', verticalalignment='top')
-        fig.colorbar(im3, ax=ax3, label='Magnitude')
+    labels = ['By_P21 (x=8cm, y=0cm)', 'Bx_P20 (x=0cm, y=0cm)', 'By_P20 (x=0cm, y=0cm)']
+    matrices = [avg_stft_matrix1, avg_stft_matrix2, avg_stft_matrix3]
+    for ax, matrix, label in zip(axes, matrices, labels):
+        if matrix is None:
+            continue
+        plot_stft(stft_tarr, freq_arr, matrix, ax=ax, fig=fig)
+        ax.text(0.98, 0.95, label, transform=ax.transAxes,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+                horizontalalignment='right', verticalalignment='top')
+    axes[-1].set_xlabel('Time (ms)')
 
-    
-    # Adjust layout
-    plt.tight_layout()
-    
-    # Save the figure as PNG
+    # Save the figure as PNG and free the memory
     output_filename = output_path("figures", "bdot", "averaged_bdot_stft.png")
-    fig.savefig(output_filename, dpi=300, bbox_inches='tight')
-    print(f"Saved averaged Bdot STFT plot to: {output_filename}")
-    
-    plt.close(fig)  # Close the figure to free memory
+    finalize_figure(fig, save_fig=output_filename, dpi=300)
 
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>

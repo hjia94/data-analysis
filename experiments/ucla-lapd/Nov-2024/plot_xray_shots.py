@@ -9,35 +9,14 @@ import matplotlib.pyplot as plt
 from data_analysis.io.scope_reader import read_trc_data
 from data_analysis.io.cine import read_cine, convert_cine_to_avi, overlay_motion_frames
 from data_analysis.tracking.track_object import track_object_per_frame, get_chamber
+from data_analysis.viz.plot_utils import OKABE_ITO, configure_publication_style
 
 
 PATH_A = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30\background\C3--E-ring-p30-z13-x200-xray--00003.trc"
 PATH_B = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30\C3--E-ring-p30-z13-x200-xray--00022.trc"
 CINE_PATH = r"E:\good_data\He3kA_B250G500G_pl0t20_uw15t35_P30\Y20241102_P30_z13_x200_y0@-40_022.cine"
 
-OKABE_ITO = ['#0072B2', '#D55E00', '#009E73', '#CC79A7', '#E69F00',
-             '#56B4E9', '#F0E442', '#000000']
-
 FN = None   # set to a frame number to mark the ball position with a red square
-
-
-def configure_style():
-    plt.rcParams.update({
-        'font.family': 'sans-serif',
-        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans'],
-        'font.size': 9,
-        'axes.labelsize': 10,
-        'axes.titlesize': 10,
-        'xtick.labelsize': 9,
-        'ytick.labelsize': 9,
-        'legend.fontsize': 9,
-        'axes.linewidth': 0.8,
-        'lines.linewidth': 0.9,
-        'xtick.direction': 'in',
-        'ytick.direction': 'in',
-        'xtick.top': True,
-        'ytick.right': True,
-    })
 
 
 def _file_number(path):
@@ -111,7 +90,7 @@ def plot_panels(save_path=None):
 
 
 def main(save=False):
-    configure_style()
+    configure_publication_style()
     out_path = None
     if save:
         out_dir = r"C:\Users\hjia9\Documents\lapd\e-ring\diagnostic_fig"
