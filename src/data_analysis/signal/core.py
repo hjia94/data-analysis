@@ -11,6 +11,10 @@ Date: 2024-02-28
 import numpy as np
 from scipy import signal, ndimage
 
+# np.trapz was renamed np.trapezoid in numpy 2.0 (np.trapz deprecated).
+# Prefer the new name, fall back for numpy < 2.0.
+trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 
 def first_and_last_zerocrossings(cur):
     """
@@ -441,6 +445,20 @@ def finite_row_mask(*stacks):
     for s in stacks[1:]:
         good &= np.all(np.isfinite(s), axis=1)
     return good
+
+
+def line_average(profile, x):
+    """Chord (line) average of ``profile(x)``: ``trapezoid(profile, x) / span``.
+
+    NaN-tolerant: integrates over the finite subset of points (a probe scan
+    routinely has failed-fit NaNs); fewer than two finite points -> ``nan``.
+    """
+    profile = np.asarray(profile, dtype=float)
+    x = np.asarray(x, dtype=float)
+    ok = np.isfinite(profile) & np.isfinite(x)
+    if ok.sum() < 2:
+        return np.nan
+    return trapezoid(profile[ok], x[ok]) / (x[ok][-1] - x[ok][0])
 
 
 def amplitude_spectrum(x, dt, detrend=True, drop_dc=True):

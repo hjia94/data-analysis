@@ -34,6 +34,8 @@ from scipy import integrate, constants
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 
+from data_analysis.signal import line_average
+
 # np.trapz was renamed np.trapezoid in numpy 2.0 (np.trapz deprecated).
 # Prefer the new name, fall back for numpy < 2.0.
 trapezoid = getattr(np, "trapezoid", None) or np.trapz
@@ -875,3 +877,58 @@ def load_plasma_data(data_dir, run_num, tip=None):
     with np.load(plasma_path) as ps_data:
         return (ps_data["Vp_arr"], ps_data["Te_arr"], ps_data["ne_arr"],
                 ps_data["Vp_err"], ps_data["Te_err"], ps_data["ne_err"], t_ls)
+
+
+def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
+                               interf_ne_line, t_offset=0.0):
+    """Per-sweep calibration of a probe profile against interferometer density.
+
+    Programmatic version of the legacy recipe (LP_analysis Langmuir_Iisat.ipynb):
+    line-average the probe profile along the interferometer chord and ratio it
+    against the interferometer line-averaged ne.  Works for any probe quantity
+    proportional to ne -- IV-derived ne [cm^-3] (factor is a dimensionless
+    correction) or raw Isat [A/cm^2] (factor converts to cm^-3).
+
+    profile_arr : (n_locs, n_sweeps) probe quantity proportional to ne
+    x           : (n_locs,) positions [cm] along the interferometer chord
+    t_start, t_stop : (n_sweeps,) sweep time windows [s]
+    interf_t    : (nt,) interferometer time [s] (file stores ms -- caller converts)
+    interf_ne_line : (nt,) line-averaged ne [cm^-3], already shot-averaged
+    t_offset    : scope trigger time relative to the interferometer's t=0
+                  (plasma breakdown), [s].  Added to ``t_start``/``t_stop``
+                  here to express the sweep windows on the interferometer time
+                  base; the caller's scope-timed arrays stay untouched.
+
+    For each sweep ``k``::
+
+        factor[k] = mean(interf_ne_line over the window
+                         [t_start[k], t_stop[k]] + t_offset)
+                    / line_average(profile_arr[:, k], x)
+
+    An empty window or a non-finite line average gives a ``nan`` factor (no
+    exception).  Returns ``(factor, profile_arr * factor, chord_avg)`` --
+    per-sweep factors ``(n_sweeps,)`` broadcast across locations, plus the
+    probe chord averages ``(n_sweeps,)`` used in the ratio (for plotting
+    against the interferometer trace).
+
+    Caveats: the probe chord average only spans the measured ``x`` range while
+    the interferometer averages its full beam path (through the 40 cm plasma
+    length baked into the phase->ne factor); any trigger-time difference
+    between the two diagnostics must be supplied via ``t_offset``; and the
+    merged interferometer traces come from only the first/last shots of the
+    run, so plasma conditions are assumed stationary across it.
+    """
+    profile_arr = np.asarray(profile_arr, dtype=float)
+    interf_t = np.asarray(interf_t, dtype=float)
+    interf_ne_line = np.asarray(interf_ne_line, dtype=float)
+    t_start = np.asarray(t_start, dtype=float) + t_offset
+    t_stop = np.asarray(t_stop, dtype=float) + t_offset
+
+    n_sweeps = profile_arr.shape[1]
+    factor = np.full(n_sweeps, np.nan)
+    chord_avg = np.array([line_average(profile_arr[:, k], x) for k in range(n_sweeps)])
+    for k in range(n_sweeps):
+        in_win = (interf_t >= t_start[k]) & (interf_t <= t_stop[k])
+        if in_win.any() and np.isfinite(chord_avg[k]) and chord_avg[k] != 0:
+            factor[k] = np.nanmean(interf_ne_line[in_win]) / chord_avg[k]
+    return factor, profile_arr * factor, chord_avg
