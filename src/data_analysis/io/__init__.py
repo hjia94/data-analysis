@@ -11,7 +11,8 @@ backends under :mod:`data_analysis.io._backends` are private implementation deta
 
 from .interferometer import InterferometerChannel, read_interferometer
 from .lapd_hdf5 import (open_lapd, LapdRun, LapdSession, compare_runs,
-                        gas_puff, parse_gas_puff, position_shots)
+                        gas_puff, parse_gas_puff, position_shots,
+                        list_all_channels, print_run_description)
 from .prompts import choose_from_list
 
 __all__ = [
@@ -22,6 +23,8 @@ __all__ = [
     "gas_puff",
     "parse_gas_puff",
     "position_shots",
+    "list_all_channels",
+    "print_run_description",
     "choose_from_list",
     "read_interferometer",
     "InterferometerChannel",

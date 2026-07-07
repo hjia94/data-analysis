@@ -51,7 +51,8 @@ import numpy as np
 # opening a pydaq/legacy file. Matches the lazy-import convention in io/scope_reader.py.
 
 __all__ = ["open_lapd", "LapdRun", "LapdSession", "detect_backend", "compare_runs",
-           "gas_puff", "parse_gas_puff", "position_shots"]
+           "gas_puff", "parse_gas_puff", "position_shots",
+           "list_all_channels", "print_run_description"]
 
 
 # --------------------------------------------------------------------------- #
@@ -180,6 +181,43 @@ def gas_puff(path):
     (via :meth:`LapdRun.description`).
     """
     return parse_gas_puff(open_lapd(path).description().raw)
+
+
+def list_all_channels(fn):
+    """Print every scope group's channel descriptions -> ``{scope: {chan: description}}``.
+
+    Printing wrapper around :meth:`LapdRun.channel_descriptions` (which returns
+    the same dict silently), to be read alongside :func:`print_run_description`
+    when deciding which scope + channel carries the signal you want -- nothing
+    is classified or guessed.
+    """
+    out = open_lapd(fn).channel_descriptions()
+    print("Scope groups and channel descriptions:")
+    for scope_name, desc in out.items():
+        print(f"\n  scope '{scope_name}':")
+        for chan in sorted(desc):
+            print(f"    {chan}: {desc[chan]!r}")
+    if not out:
+        print("  (no scope groups with channel descriptions found)")
+    return out
+
+
+def print_run_description(fn):
+    """Print the run's hand-written description (plasma / bias / probe settings).
+
+    Reads the pydaq ``description`` attribute via ``open_lapd(fn).description()``
+    and prints its raw text so the probe wiring / bias settings the operator
+    wrote are visible alongside the channel list.  Returns the parsed
+    ``RunDescription`` (or ``None`` if it can't be read).
+    """
+    try:
+        desc = open_lapd(fn).description()
+    except (OSError, ValueError, NotImplementedError, KeyError) as e:
+        print(f"(could not read run description -- {e})")
+        return None
+    print("=== Run description ===")
+    print(desc.raw)
+    return desc
 
 
 def position_shots(pos_index, nshot):
@@ -342,6 +380,25 @@ class LapdRun:
         """
         self._require_pydaq("scope_channels()")
         return self._pydaq().print_scope_channels(self.path, scope_name)
+
+    def channel_descriptions(self):
+        """Every scope group's channel descriptions (LAPD_DAQ pydaq files only).
+
+        One pass over the file -> ``{scope: {chan: description}}``, silently
+        (scope groups are the top-level groups holding ``shot_*`` subgroups,
+        the same test as :meth:`scope_names`; groups without descriptions are
+        omitted). :func:`list_all_channels` is the printing wrapper. Raises
+        ``NotImplementedError`` for bapsflib/legacy files.
+        """
+        self._require_pydaq("channel_descriptions()")
+        from . import scope_reader as scope
+        out = {}
+        with h5py.File(self.path, "r") as f:
+            for scope_name in (k for k in f if _has_shot_groups(f[k])):
+                desc = scope.read_scope_channel_descriptions(f, scope_name)
+                if desc:
+                    out[scope_name] = dict(desc)
+        return out
 
     def description(self):
         """Parse the run's ``description`` attribute (LAPD_DAQ pydaq files only).

@@ -6,8 +6,9 @@ ion-saturation channel** and looks at how the Isat signal *fluctuates* in time
 (raw trace + FFT), rather than fitting an IV curve.
 
 Which channel is Isat is **not** guessed here -- you read the printed channel
-descriptions (:func:`list_all_channels`) and the run's probe description
-(:func:`print_run_description`) and name the scope + channel yourself.
+descriptions and the run's probe description
+(``data_analysis.io.list_all_channels`` / ``print_run_description``, driven from
+``Jun2026_run_overview.ipynb``) and name the scope + channel yourself.
 
 Reading
 -------
@@ -29,11 +30,9 @@ import glob
 import os
 
 import numpy as np
-import h5py
 from tqdm import tqdm
 
 from data_analysis.io import open_lapd, position_shots
-from data_analysis.io.scope_reader import read_scope_channel_descriptions
 from data_analysis.signal import avg_amplitude_spectrum, clip_time_window
 
 # --- Batch FFT configuration (runs 00-06) -----------------------------------
@@ -51,49 +50,6 @@ FFT_TMIN_MS = 1.5                      # FFT time window start (ms)
 FFT_TMAX_MS = 5.0                      # FFT time window stop  (ms)
 
 FFT_CHUNK_SHOTS = 50                   # shots per read in run_avg_fft (caps peak memory)
-
-
-def list_all_channels(fn):
-    """Print every scope group's channel descriptions and return them.
-
-    Returns ``{scope_name: {chan: description}}`` for every scope group in the
-    file (:meth:`LapdRun.scope_names` -- top-level groups holding ``shot_*``
-    subgroups).  Use the printout to decide which scope + channel is the Isat
-    channel you want -- nothing is classified or guessed.
-    """
-    out = {}
-    scope_groups = open_lapd(fn).scope_names()
-    with h5py.File(fn, "r") as f:
-        print("Scope groups and channel descriptions:")
-        for scope_name in scope_groups:
-            desc = read_scope_channel_descriptions(f, scope_name)
-            if not desc:
-                continue
-            out[scope_name] = dict(desc)
-            print(f"\n  scope '{scope_name}':")
-            for chan in sorted(desc):
-                print(f"    {chan}: {desc[chan]!r}")
-    if not out:
-        print("  (no scope groups with channel descriptions found)")
-    return out
-
-
-def print_run_description(fn):
-    """Print the run's hand-written description (plasma / bias / probe settings).
-
-    Reads the pydaq ``description`` attribute via ``open_lapd(fn).description()``
-    and prints its raw text so the probe wiring / bias settings the operator
-    wrote are visible alongside the channel list.  Returns the parsed
-    ``RunDescription`` (or ``None`` if it can't be read).
-    """
-    try:
-        desc = open_lapd(fn).description()
-    except (OSError, ValueError, NotImplementedError, KeyError) as e:
-        print(f"(could not read run description -- {e})")
-        return None
-    print("=== Run description ===")
-    print(desc.raw)
-    return desc
 
 
 def get_isat_at_position(run, scope_name, chan, npos, nshot, pos_index):
