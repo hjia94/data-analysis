@@ -703,14 +703,20 @@ def prepare_sweep_data(tarr, Vswp_arr, Iswp_arr, padding=10, trim_percent=10,
     sample axis.  ``Vswp_arr`` is ``(npos, nsamples)`` (shot-averaged) and
     ``Iswp_arr`` is ``(npos, nshot, nsamples)``.
 
-    Returns ``(Vswp_arr_rs, Iswp_arr_rs, data_timestamp)`` -- the reshaped sweep
-    arrays ready for :func:`process_iv_and_save` plus one representative
-    timestamp per sweep (the middle of each detected sweep).
+    Returns ``(Vswp_arr_rs, Iswp_arr_rs, data_timestamp, sweep_t_start,
+    sweep_t_stop)`` -- the reshaped sweep arrays ready for
+    :func:`process_iv_and_save`, one representative timestamp per sweep (the
+    middle of each detected sweep), and each sweep's start/stop time on the
+    scope time base.  The windows let :func:`calibrate_plasma_npz` average the
+    interferometer over the exact extent of each sweep; ``data_timestamp`` is
+    still their midpoint.
     """
     start_t_ls, stop_t_ls = find_sweep_indices(Vswp_arr[0], padding=padding)
 
     mid_indices = [(start + stop) // 2 for start, stop in zip(start_t_ls, stop_t_ls)]
     data_timestamp = tarr[mid_indices]
+    sweep_t_start = tarr[start_t_ls]
+    sweep_t_stop = tarr[stop_t_ls]
     print(f"Number of sweeps: {len(data_timestamp)}")
 
     Vswp_arr_rs, Iswp_arr_rs = reshape_IV(Vswp_arr, Iswp_arr,
@@ -718,7 +724,7 @@ def prepare_sweep_data(tarr, Vswp_arr, Iswp_arr, padding=10, trim_percent=10,
 
     print("Applying smoothing to current array...")
     Iswp_arr_rs = gaussian_filter1d(Iswp_arr_rs, smooth_sigma, axis=-1)
-    return Vswp_arr_rs, Iswp_arr_rs, data_timestamp
+    return Vswp_arr_rs, Iswp_arr_rs, data_timestamp, sweep_t_start, sweep_t_stop
 
 
 def mean_sem(vals):
@@ -828,6 +834,15 @@ def tip_tag(tip):
     return f"-tip{tip}" if tip else ""
 
 
+def _require_npz_key(npz, key, path, hint):
+    """Membership check for an expected npz key, with a uniform 'regenerate it'
+    error.  ``npz`` is an open ``NpzFile`` (``in`` reads the zip directory, not
+    the array); raises ``KeyError`` naming ``path`` and how to produce ``key``.
+    """
+    if key not in npz:
+        raise KeyError(f"{path} has no {key!r} -- {hint}")
+
+
 def sweep_npz_paths(data_dir, run_num, tip=None):
     """The saved-npz pair for one run/tip: ``(sweep_path, plasma_path)``.
 
@@ -877,6 +892,20 @@ def load_plasma_data(data_dir, run_num, tip=None):
     with np.load(plasma_path) as ps_data:
         return (ps_data["Vp_arr"], ps_data["Te_arr"], ps_data["ne_arr"],
                 ps_data["Vp_err"], ps_data["Te_err"], ps_data["ne_err"], t_ls)
+
+
+def load_ne_calibrated(data_dir, run_num, tip=None):
+    """The interferometer-calibrated density written by :func:`calibrate_plasma_npz`.
+
+    Returns ``(ne_cal_arr (n_locs, n_sweeps) [cm^-3], cal_factor (n_sweeps,))``.
+    Raises ``KeyError`` if the plasma npz has not been calibrated yet -- run
+    :func:`calibrate_plasma_npz` first.
+    """
+    _, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
+    with np.load(plasma_path) as ps_data:
+        _require_npz_key(ps_data, "ne_cal_arr", plasma_path,
+                         "run calibrate_plasma_npz(ifn, interf_chan) first.")
+        return ps_data["ne_cal_arr"], ps_data["cal_factor"]
 
 
 def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
@@ -932,3 +961,62 @@ def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
         if in_win.any() and np.isfinite(chord_avg[k]) and chord_avg[k] != 0:
             factor[k] = np.nanmean(interf_ne_line[in_win]) / chord_avg[k]
     return factor, profile_arr * factor, chord_avg
+
+
+def calibrate_plasma_npz(ifn, interf_chan, tip=None, t_offset=0.0):
+    """Calibrate a run's batch IV density against the interferometer, in place.
+
+    Wires the three pieces together for one run + tip: loads the batch
+    ``ne_arr`` and probe positions (from the co-located sweep/plasma npz written
+    by :func:`process_iv_and_save`), reads the merged interferometer chord
+    ``interf_chan`` (:func:`data_analysis.io.read_interferometer`), runs
+    :func:`interferometer_calibration` over each sweep's true time window, and
+    **writes the calibrated density back into the plasma npz** so downstream
+    line-data analysis loads an absolutely-scaled ``ne`` without recomputing.
+
+    ``ifn``          : raw datarun HDF5 (its directory + run number locate the npz).
+    ``interf_chan``  : interferometer channel to calibrate against, e.g. ``"phase_p29"``.
+    ``tip``          : probe tip whose npz pair to calibrate (``None`` = untagged).
+    ``t_offset``     : scope-vs-interferometer trigger offset [s], forwarded to
+                       :func:`interferometer_calibration` (interferometer t=0 is
+                       plasma breakdown; the scope's sweep windows are shifted
+                       onto that base, the stored arrays are not).
+
+    The plasma npz gains two keys alongside the existing ``*_arr``/``*_err``:
+    ``ne_cal_arr`` (``(n_locs, n_sweeps)`` calibrated density [cm^-3]) and
+    ``cal_factor`` (``(n_sweeps,)`` per-sweep factor; ``nan`` where a sweep
+    window caught no interferometer samples or the probe chord average was
+    non-finite).  The 6 original arrays are re-saved unchanged.  Returns
+    ``(cal_factor, ne_cal_arr, chord_avg)``.
+
+    Requires the sweep npz to carry ``sweep_t_start``/``sweep_t_stop`` (added by
+    :func:`prepare_sweep_data`); npz written before that must be regenerated
+    with :func:`process_iv_and_save`'s driver.
+    """
+    from data_analysis.io import read_interferometer
+    from data_analysis.utils import run_num_of
+
+    data_dir = os.path.dirname(ifn)
+    run_num = run_num_of(ifn)
+    sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
+
+    with np.load(sweep_path) as sw:
+        xpos = sw["xpos"]
+        _require_npz_key(sw, "sweep_t_start", sweep_path,
+                         "regenerate it (prepare_sweep_data now saves the "
+                         "per-sweep windows sweep_t_start/sweep_t_stop).")
+        t_start, t_stop = sw["sweep_t_start"], sw["sweep_t_stop"]
+
+    with np.load(plasma_path) as ps:
+        saved = dict(ps)             # keep the 6 arrays to re-save alongside
+    ne_arr = saved["ne_arr"]
+
+    ch = read_interferometer(ifn, channels=[interf_chan])[interf_chan]
+
+    factor, ne_cal_arr, chord_avg = interferometer_calibration(
+        ne_arr, xpos, t_start, t_stop,
+        ch.t_ms * 1e-3, ch.ne_line_avg_cm3(), t_offset=t_offset)
+
+    np.savez(plasma_path, **saved, ne_cal_arr=ne_cal_arr, cal_factor=factor)
+    print(f"Calibrated ne against {interf_chan} -> {plasma_path}")
+    return factor, ne_cal_arr, chord_avg

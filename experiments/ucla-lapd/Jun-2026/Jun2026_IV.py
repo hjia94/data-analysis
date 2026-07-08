@@ -66,6 +66,7 @@ from data_analysis.io.scope_reader import read_scope_channel_descriptions
 from data_analysis.plasma.langmuir import (
     find_sweep_indices, reshape_IV, analyze_IV_safe,
     prepare_sweep_data, process_iv_and_save, sweep_npz_paths,
+    calibrate_plasma_npz,
 )
 from data_analysis.utils import run_num_of
 
@@ -413,11 +414,12 @@ def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=No
     tarr, Vswp_arr, Iswp_arr = get_IV_arr(run, scope_name, I_chan, V_chan, npos, nshot)
 
     # Sweep detection -> reshape -> smoothing (shared batch pipeline).
-    Vswp_arr_rs, Iswp_arr_rs, data_timestamp = prepare_sweep_data(
-        tarr, Vswp_arr, Iswp_arr)
+    Vswp_arr_rs, Iswp_arr_rs, data_timestamp, sweep_t_start, sweep_t_stop = \
+        prepare_sweep_data(tarr, Vswp_arr, Iswp_arr)
 
     np.savez(save_path, Vswp_arr_rs=Vswp_arr_rs, Iswp_arr_rs=Iswp_arr_rs,
-             data_timestamp=data_timestamp, xpos=xpos, ypos=ypos,
+             data_timestamp=data_timestamp, sweep_t_start=sweep_t_start,
+             sweep_t_stop=sweep_t_stop, xpos=xpos, ypos=ypos,
              npos=npos, nshot=nshot, I_chan=I_chan, V_chan=V_chan)
     print(f"Saved to: {save_path}")
     return Vswp_arr_rs, Iswp_arr_rs
@@ -480,9 +482,21 @@ def process_run(ifn):
 
 if __name__ == '__main__':
 
-    ifn = r"D:\data\LAPD\jun2026-jia\25-He-800G-bias40V-LP-p29-line_2026-06-12.hdf5"
+    ifn = r"D:\data\LAPD\jun2026-jia\06-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
 
     # Batch-process every complete-pair tip and save the .npz results.  Draw the
     # figures afterwards from the saved .npz with Jun2026_plot.plot_iv_line_run(ifn).
-    process_run(ifn)
+    results = process_run(ifn)
+
+    # Calibrate each processed tip's ne against the interferometer chord and
+    # write ne_cal_arr/cal_factor back into its plasma npz.  INTERF_CHAN picks
+    # the chord (see the run-overview notebook for the available phase_* names);
+    # T_OFFSET is the scope-vs-interferometer trigger offset [s] (interferometer
+    # t=0 is plasma breakdown).
+    INTERF_CHAN = "phase_p29"
+    T_OFFSET = 0.012
+    for tip in results:
+        calibrate_plasma_npz(ifn, INTERF_CHAN,
+                             tip=None if tip == "override" else tip,
+                             t_offset=T_OFFSET)
 

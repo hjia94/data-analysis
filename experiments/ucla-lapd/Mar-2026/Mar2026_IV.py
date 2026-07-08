@@ -52,9 +52,9 @@ def save_IV_data(ifn, save_path):
         # Sweep detection -> reshape -> smoothing (shared batch pipeline), once
         # per current array; the detected sweeps/timestamps are identical since
         # both use the same voltage trace.
-        Vswp_arr_rs, IswpL_arr_rs, data_timestamp = prepare_sweep_data(
+        Vswp_arr_rs, IswpL_arr_rs, data_timestamp, *_ = prepare_sweep_data(
             tarr, Vswp_arr, IswpL_arr, trim_percent=5)
-        _, IswpR_arr_rs, _ = prepare_sweep_data(
+        _, IswpR_arr_rs, *_ = prepare_sweep_data(
             tarr, Vswp_arr, IswpR_arr, trim_percent=5)
 
     # Save everything into a .npz file for later analysis
