@@ -934,11 +934,15 @@ def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
                          [t_start[k], t_stop[k]] + t_offset)
                     / line_average(profile_arr[:, k], x)
 
-    An empty window or a non-finite line average gives a ``nan`` factor (no
-    exception).  Returns ``(factor, profile_arr * factor, chord_avg)`` --
-    per-sweep factors ``(n_sweeps,)`` broadcast across locations, plus the
-    probe chord averages ``(n_sweeps,)`` used in the ratio (for plotting
-    against the interferometer trace).
+    A sweep with an empty window or a non-finite line average gets a ``nan``
+    factor (no exception), and the count of calibrated sweeps is printed.  But
+    if *no* sweep window overlaps the interferometer trace at all -- the usual
+    symptom of a wrong ``t_offset`` -- this raises ``ValueError`` rather than
+    silently returning an all-``nan`` calibration.  Returns
+    ``(factor, profile_arr * factor, chord_avg)`` -- per-sweep factors
+    ``(n_sweeps,)`` broadcast across locations, plus the probe chord averages
+    ``(n_sweeps,)`` used in the ratio (for plotting against the interferometer
+    trace).
 
     Caveats: the probe chord average only spans the measured ``x`` range while
     the interferometer averages its full beam path (through the 40 cm plasma
@@ -956,10 +960,20 @@ def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
     n_sweeps = profile_arr.shape[1]
     factor = np.full(n_sweeps, np.nan)
     chord_avg = np.array([line_average(profile_arr[:, k], x) for k in range(n_sweeps)])
+    n_hit = 0
     for k in range(n_sweeps):
         in_win = (interf_t >= t_start[k]) & (interf_t <= t_stop[k])
         if in_win.any() and np.isfinite(chord_avg[k]) and chord_avg[k] != 0:
             factor[k] = np.nanmean(interf_ne_line[in_win]) / chord_avg[k]
+            n_hit += 1
+    if n_hit == 0:
+        raise ValueError(
+            f"No sweep window overlapped the interferometer trace: sweeps span "
+            f"{t_start.min():.4g}..{t_stop.max():.4g} s (after t_offset={t_offset:g}), "
+            f"interferometer spans {interf_t.min():.4g}..{interf_t.max():.4g} s. "
+            "Check t_offset (interferometer t=0 is plasma breakdown).")
+    print(f"Calibrated {n_hit}/{n_sweeps} sweeps ({n_sweeps - n_hit} had no "
+          "interferometer overlap or a non-finite chord average).")
     return factor, profile_arr * factor, chord_avg
 
 
@@ -986,7 +1000,10 @@ def calibrate_plasma_npz(ifn, interf_chan, tip=None, t_offset=0.0):
     ``ne_cal_arr`` (``(n_locs, n_sweeps)`` calibrated density [cm^-3]) and
     ``cal_factor`` (``(n_sweeps,)`` per-sweep factor; ``nan`` where a sweep
     window caught no interferometer samples or the probe chord average was
-    non-finite).  The 6 original arrays are re-saved unchanged.  Returns
+    non-finite).  Raises ``ValueError`` if ``interf_chan`` has no usable shots,
+    or (via :func:`interferometer_calibration`) if *no* sweep window overlaps
+    the interferometer trace -- the usual sign of a wrong ``t_offset``.  The 6
+    original arrays are re-saved unchanged.  Returns
     ``(cal_factor, ne_cal_arr, chord_avg)``.
 
     Requires the sweep npz to carry ``sweep_t_start``/``sweep_t_stop`` (added by
@@ -1012,6 +1029,16 @@ def calibrate_plasma_npz(ifn, interf_chan, tip=None, t_offset=0.0):
     ne_arr = saved["ne_arr"]
 
     ch = read_interferometer(ifn, channels=[interf_chan])[interf_chan]
+    if ch.phase.shape[0] == 0:
+        raise ValueError(
+            f"interferometer channel {interf_chan!r} in {ifn} has no usable "
+            f"shots (all skipped: {ch.skipped}); cannot calibrate.")
+    if ch.phase.shape[0] >= 2:
+        # First/last merged shots bracket the run; a large gap flags that the
+        # stationarity assumption behind the two-shot average is shaky.
+        spread = np.nanmax(np.abs(ch.ne_line_cm3[0] - ch.ne_line_cm3[-1]))
+        print(f"  interferometer first/last-shot line-ne differ by up to "
+              f"{spread:.3g} cm^-3 (two-shot stationarity assumption).")
 
     factor, ne_cal_arr, chord_avg = interferometer_calibration(
         ne_arr, xpos, t_start, t_stop,
