@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from data_analysis.io.cine import read_cine, convert_cine_to_avi
-from .track_object import track_object_sparse
+from data_analysis.tracking.track_object import track_object_sparse
 
 
 def _resolve_calibration(base_dir, calibration_file):
@@ -262,7 +262,10 @@ def plot_tracking_comparison(cine_path, cm_per_px, uw_start=0, show=True):
         (fig, ax) so the caller can further annotate or save the figure.
     """
     from data_analysis.io.cine import read_cine_header
-    from .track_object import track_object_sparse, track_object_per_frame
+    from data_analysis.tracking.track_object import (
+        track_object_sparse,
+        track_object_per_frame,
+    )
 
     avi_path = os.path.splitext(cine_path)[0] + ".avi"
     if not os.path.exists(avi_path):
@@ -297,15 +300,14 @@ def plot_tracking_comparison(cine_path, cm_per_px, uw_start=0, show=True):
 
     fig, ax = plt.subplots(figsize=(10, 5))
 
-    ax.scatter(pf_t_ms, pf_y_cm, s=10, color="grey", alpha=0.5, label="per-frame")
-    ax.scatter(sp_t_ms, sp_y_cm, s=60, color="red", zorder=3, label="sparse samples")
+    ax.scatter(pf_t_ms, pf_y_cm, s=50, color="grey", alpha=0.8, label="per-frame")
+    ax.scatter(sp_t_ms, sp_y_cm, s=100, color="red", zorder=3, label="sparse samples")
     if t_line_ms is not None:
         ax.plot(t_line_ms, y_line_cm, color="tab:blue", linewidth=1.5, label="linear fit")
 
-    ax.set_xlabel("t (ms)")
-    ax.set_ylabel("y (cm)")
-    ax.set_title(os.path.basename(cine_path))
-    ax.legend()
+    ax.set_xlabel("t (ms)", fontsize=18)
+    ax.set_ylabel("y (cm)", fontsize=18)
+    ax.legend(fontsize=18)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
