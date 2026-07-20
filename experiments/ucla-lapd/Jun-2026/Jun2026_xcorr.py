@@ -251,22 +251,25 @@ def _iter_run_positions(ifn, ch_a, ch_b, tmin_ms, tmax_ms, desc):
 
 def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
                 nperseg=NPERSEG):
-    """Per-position ensemble coherence/cross-phase/lag for ONE run -> co-located npz.
+    """Per-position ensemble coherence + cross-phase for ONE run -> co-located npz.
 
-    Reads each probe position's ``nshot`` shots for ``ch_a`` / ``ch_b`` and
-    incoherently averages the Welch cross/auto spectra over **only that position's
-    shots** (the tqdm bar ticks per shot), then forms that position's ensemble
-    coherence ``gamma2`` and cross-phase ``phase``, plus the time-lag
-    cross-correlation of the two shot-averaged traces (:func:`_ensemble_xcorr`).
-    The spatial dimension is kept: results are stored per position, indexed the
-    same way as ``positions_array`` (position ``p`` is ``pos_array[p*nshot]``), so
-    a plane run can be drawn as an xy map.
+    The Smith (1974) FFT cross-spectral estimator: reads each probe position's
+    ``nshot`` shots for ``ch_a`` / ``ch_b`` and incoherently averages the Welch
+    cross/auto spectra over **only that position's shots** (the tqdm bar ticks per
+    shot), then forms that position's ensemble coherence
+    ``gamma2 = |<Pxy>|**2 / (<Pxx><Pyy>)`` and cross-phase ``phase = angle(<Pxy>)``
+    (:func:`avg_cross_spectrum`). The spatial dimension is kept: results are stored
+    per position, indexed the same way as ``positions_array`` (position ``p`` is
+    ``pos_array[p*nshot]``), so a plane run can be drawn as an xy map.
+
+    The time-lag cross-correlation is intentionally **not** part of the batch: it
+    is the Blackman-Tukey correlogram Smith's method supersedes. It stays available
+    for interactive use via :func:`xcorr_averaged` / :func:`xcorr_per_shot`.
 
     Writes into the run's co-located npz (:func:`xcorr_npz_path`), keyed by the
-    channel pair (:func:`_pair_key`): ``freq`` and ``lags`` (shared axes),
+    channel pair (:func:`_pair_key`): ``freq`` (shared axis),
     ``pos_x`` / ``pos_y`` (the (x, y) of each of the ``npos`` positions),
     ``<pair>__gamma2`` ``(npos, nf)``, ``<pair>__phase`` ``(npos, nf)``,
-    ``<pair>__xcorr`` ``(npos, nlag)`` (the full per-position lag trace),
     ``<pair>__nshots`` ``(npos,)``. An existing npz for the run is **merged** (its
     other pairs are kept), so several pairs accumulate in one file. Returns the npz
     path.
@@ -275,9 +278,9 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
         ifn, ch_a, ch_b, tmin_ms, tmax_ms, "xcorr")
 
     # One ensemble result PER position: average that position's shots, keep the
-    # per-position gamma2/phase/xcorr so the spatial (x, y) structure is preserved.
-    freq = lags = None
-    gamma2 = phase = xcorr = None   # (npos, n*), filled as positions complete
+    # per-position gamma2/phase so the spatial (x, y) structure is preserved.
+    freq = None
+    gamma2 = phase = None   # (npos, nf), filled as positions complete
     nshots = np.zeros(npos, dtype=int)
     for p, sa, sb, dt in positions:
         try:
@@ -286,15 +289,12 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
             # No finite shot pair at this position: leave its row NaN so one
             # dead position doesn't abort the whole plane.
             continue
-        lag, xc = _ensemble_xcorr(sa, sb, dt)
         if gamma2 is None:
-            freq, lags = f, lag
+            freq = f
             gamma2 = np.full((npos, f.size), np.nan)
             phase = np.full((npos, f.size), np.nan)
-            xcorr = np.full((npos, lag.size), np.nan)
         gamma2[p] = g2
         phase[p] = ph
-        xcorr[p] = xc
         nshots[p] = n_used
 
     if freq is None or nshots.sum() == 0:
@@ -310,13 +310,13 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
                                  "(different window / sampling rate)")
     key = _pair_key(ch_a, ch_b)
     merge_save_npz(out_path, {
-        "freq": freq, "lags": lags, "pos_x": pos_x, "pos_y": pos_y,
+        "freq": freq, "pos_x": pos_x, "pos_y": pos_y,
         f"{key}__gamma2": gamma2, f"{key}__phase": phase,
-        f"{key}__xcorr": xcorr, f"{key}__nshots": nshots,
+        f"{key}__nshots": nshots,
     })
     print(f"\nWrote {out_path}: pair '{key}', {npos} positions "
           f"({int(nshots.sum())} shots total), {freq.size} freq bins, "
-          f"{lags.size} lags, window {tmin_ms}-{tmax_ms} ms")
+          f"window {tmin_ms}-{tmax_ms} ms")
     return out_path
 
 

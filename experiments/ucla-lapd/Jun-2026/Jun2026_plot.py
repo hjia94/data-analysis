@@ -15,8 +15,8 @@ Figure functions (each reads the relevant run's saved ``.npz`` -- process first)
 * ``plot_iv_isat_combined`` -- 6-panel combined figure: the IV line scan
   (panels 1-4, Vp/Te/ne/Te*ne, calibrated ne by default) plus the Isat trace and
   its FFT (panels 5-6) from a separate Isat run.
-* ``plot_xcorr_plane_run`` -- two-channel cross-correlation over an xy-plane run:
-  broadband coherence, cross-phase, and peak time-lag as side-by-side imshow maps.
+* ``plot_xcorr_plane_run`` -- two-channel cross-spectrum over an xy-plane run:
+  broadband coherence and cross-phase as side-by-side imshow maps (Smith-1974).
 * ``plot_xcorr_band_plane_run`` -- the narrow-band version: band-averaged
   coherence and phase-difference (+ tracked peak frequency) xy-plane maps.
 """
@@ -569,21 +569,20 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
 #  Figure: cross-correlation xy-plane map for a channel pair
 #
 #  Jun2026_xcorr.batch_xcorr stores one ensemble coherence/cross-phase spectrum
-#  and one time-lag cross-correlation trace per (x, y) probe position.  This
-#  section collapses each to a per-position scalar and draws three imshow maps
-#  over the xy plane (coherence, cross-phase, peak lag) -- the only xcorr figure
-#  kept here.  (The per-shot / position-averaged spectrum figures were removed;
-#  the notebook can still call the analysis in Jun2026_xcorr directly if a
-#  single-position spectrum is wanted.)
+#  per (x, y) probe position (the Smith-1974 FFT estimator).  This section
+#  collapses each to a per-position scalar and draws two imshow maps over the xy
+#  plane (coherence, cross-phase) -- the only xcorr figure kept here.  (The
+#  time-lag cross-correlation / Blackman-Tukey correlogram is no longer part of
+#  the batch; the notebook can still call the analysis in Jun2026_xcorr directly
+#  if a single-position spectrum or lag is wanted.)
 # =========================================================================== #
 
 def _load_xcorr_run(ifn, ch_a, ch_b, npz_path=None):
     """Load a pair's per-position xcorr result from the run's co-located npz.
 
-    Returns ``(freq, gamma2, phase, lags, xcorr, pos_x, pos_y)`` where
-    ``gamma2``/``phase`` are ``(npos, nf)`` and ``xcorr`` is ``(npos, nlag)`` (one
-    ensemble spectrum / lag trace per probe position, from
-    :func:`Jun2026_xcorr.batch_xcorr`); ``freq``/``lags`` are the shared axes and
+    Returns ``(freq, gamma2, phase, pos_x, pos_y)`` where ``gamma2``/``phase`` are
+    ``(npos, nf)`` (one ensemble spectrum per probe position, from
+    :func:`Jun2026_xcorr.batch_xcorr`); ``freq`` is the shared axis and
     ``pos_x``/``pos_y`` are each position's (x, y).  Returns ``None`` (after
     printing why) if the npz or this pair's entry is missing, so callers can skip
     drawing.
@@ -594,7 +593,7 @@ def _load_xcorr_run(ifn, ch_a, ch_b, npz_path=None):
     try:
         with np.load(npz_path) as d:
             return (d["freq"], d[f"{key}__gamma2"], d[f"{key}__phase"],
-                    d["lags"], d[f"{key}__xcorr"], d["pos_x"], d["pos_y"])
+                    d["pos_x"], d["pos_y"])
     except (OSError, KeyError) as e:
         print(f"  (xcorr: no saved entry for pair '{key}' in {npz_path} -- {e})")
         return None
@@ -620,25 +619,25 @@ def _draw_plane_maps(fig, axs, panels, extent):
 def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
                          fmin_khz=0.0, fmax_khz=80.0, gamma2_floor=0.2,
                          save_fig=True, show=False):
-    """Draw coherence + cross-phase + peak-lag as xy-plane ``imshow`` maps.
+    """Draw coherence + cross-phase as xy-plane ``imshow`` maps.
 
     For a plane run, :func:`Jun2026_xcorr.batch_xcorr` stores one ensemble
-    coherence/cross-phase spectrum and one time-lag cross-correlation trace per
-    (x, y) position.  This collapses each to a per-position scalar and lays it on
-    the xy grid (:func:`data_analysis.viz.plot_utils.grid_by_position`), drawing three maps side by side:
+    coherence/cross-phase spectrum (the Smith-1974 FFT estimator) per (x, y)
+    position.  This collapses each to a per-position scalar and lays it on the xy
+    grid (:func:`data_analysis.viz.plot_utils.grid_by_position`), drawing two maps
+    side by side:
 
-    * mean coherence ``gamma2`` (0..1) over the ``[fmin_khz, fmax_khz]`` band,
-    * mean cross-phase ``Delta-phi`` (deg) over that band, and
-    * peak lag (us) -- the lag at which each position's cross-correlation peaks.
+    * mean coherence ``gamma2`` (0..1) over the ``[fmin_khz, fmax_khz]`` band, and
+    * mean cross-phase ``Delta-phi`` (deg) over that band.
 
-    Cross-phase and peak lag are only trustworthy where the channels are coherent,
-    so positions with band coherence ``< gamma2_floor`` are blanked (NaN) in those
-    two maps.  ``save_fig`` True routes through :func:`fig_path`.
+    Cross-phase is only trustworthy where the channels are coherent, so positions
+    with band coherence ``< gamma2_floor`` are blanked (NaN) in the phase map.
+    ``save_fig`` True routes through :func:`fig_path`.
     """
     loaded = _load_xcorr_run(ifn, ch_a, ch_b, npz_path)
     if loaded is None:
         return
-    freq, gamma2, phase, lags, xcorr, pos_x, pos_y = loaded
+    freq, gamma2, phase, pos_x, pos_y = loaded
 
     # Per-position scalars over the frequency band: coherence is a plain mean;
     # cross-phase is averaged as a unit vector (angle of <e^{i phi}>) so the wrap
@@ -647,31 +646,17 @@ def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     g2_band = np.nanmean(gamma2[:, band], axis=1)
     ph_band = np.degrees(np.angle(np.nanmean(np.exp(1j * phase[:, band]), axis=1)))
 
-    # Peak lag per position (us): lag of the largest cross-correlation value in
-    # each position's stored lag trace.  NaN rows (dead positions) -> NaN lag.
-    lags_us = lags * 1e6
-    peak_lag = np.full(xcorr.shape[0], np.nan)
-    finite = np.all(np.isfinite(xcorr), axis=1)
-    peak_lag[finite] = lags_us[np.argmax(xcorr[finite], axis=1)]
-
-    # Blank phase + peak lag where the channels aren't coherent (both are noise
-    # there) so the maps show structure only in the coherent region.
-    incoherent = g2_band < gamma2_floor
-    ph_band = np.where(incoherent, np.nan, ph_band)
-    peak_lag = np.where(incoherent, np.nan, peak_lag)
+    # Blank phase where the channels aren't coherent (it's noise there) so the map
+    # shows structure only in the coherent region.
+    ph_band = np.where(g2_band < gamma2_floor, np.nan, ph_band)
 
     g2_grid, extent = grid_by_position(pos_x, pos_y, g2_band)
     ph_grid, _ = grid_by_position(pos_x, pos_y, ph_band)
-    lag_grid, _ = grid_by_position(pos_x, pos_y, peak_lag)
 
-    # Symmetric lag color range about 0 so +/- delay reads at a glance.
-    lag_max = np.nanmax(np.abs(lag_grid)) if np.isfinite(lag_grid).any() else 1.0
-
-    fig, axs = plt.subplots(1, 3, figsize=(20, 6))
+    fig, axs = plt.subplots(1, 2, figsize=(14, 6))
     _draw_plane_maps(fig, axs, [
         (g2_grid, r"coherence $\gamma^2$", "viridis", (0, 1)),
         (ph_grid, r"cross-phase $\Delta\phi$ [deg]", "twilight", (-180, 180)),
-        (lag_grid, r"peak lag [$\mu$s]", "RdBu_r", (-lag_max, lag_max)),
     ], extent)
 
     title = run_title(ifn, run_num_of(ifn)) or f"{run_num_of(ifn)} xcorr"
