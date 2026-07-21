@@ -16,9 +16,8 @@ Figure functions (each reads the relevant run's saved ``.npz`` -- process first)
   (panels 1-4, Vp/Te/ne/Te*ne, calibrated ne by default) plus the Isat trace and
   its FFT (panels 5-6) from a separate Isat run.
 * ``plot_xcorr_plane_run`` -- two-channel cross-spectrum over an xy-plane run:
-  broadband coherence and cross-phase as side-by-side imshow maps (Smith-1974).
-* ``plot_xcorr_band_plane_run`` -- the narrow-band version: band-averaged
-  coherence and phase-difference (+ tracked peak frequency) xy-plane maps.
+  coherence and cross-phase at a single frequency as side-by-side imshow maps
+  (Smith-1974).
 """
 
 import glob
@@ -569,12 +568,12 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
 #  Figure: cross-correlation xy-plane map for a channel pair
 #
 #  Jun2026_xcorr.batch_xcorr stores one ensemble coherence/cross-phase spectrum
-#  per (x, y) probe position (the Smith-1974 FFT estimator).  This section
-#  collapses each to a per-position scalar and draws two imshow maps over the xy
-#  plane (coherence, cross-phase) -- the only xcorr figure kept here.  (The
-#  time-lag cross-correlation / Blackman-Tukey correlogram is no longer part of
-#  the batch; the notebook can still call the analysis in Jun2026_xcorr directly
-#  if a single-position spectrum or lag is wanted.)
+#  per (x, y) probe position (the Smith-1974 FFT estimator).  This section picks
+#  ONE frequency, samples each position's spectrum at that bin, and draws two
+#  imshow maps over the xy plane (coherence, cross-phase) -- the only xcorr figure
+#  kept here.  (The time-lag cross-correlation / Blackman-Tukey correlogram is no
+#  longer part of the batch; the notebook can still call the analysis in
+#  Jun2026_xcorr directly if a single-position spectrum or lag is wanted.)
 # =========================================================================== #
 
 def _load_xcorr_run(ifn, ch_a, ch_b, npz_path=None):
@@ -617,41 +616,45 @@ def _draw_plane_maps(fig, axs, panels, extent):
 
 
 def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
-                         fmin_khz=0.0, fmax_khz=80.0, gamma2_floor=0.2,
+                         freq_khz=10.0, gamma2_floor=0.2,
                          save_fig=True, show=False):
-    """Draw coherence + cross-phase as xy-plane ``imshow`` maps.
+    """Draw coherence + cross-phase as xy-plane ``imshow`` maps at ONE frequency.
 
     For a plane run, :func:`Jun2026_xcorr.batch_xcorr` stores one ensemble
     coherence/cross-phase spectrum (the Smith-1974 FFT estimator) per (x, y)
-    position.  This collapses each to a per-position scalar and lays it on the xy
-    grid (:func:`data_analysis.viz.plot_utils.grid_by_position`), drawing two maps
-    side by side:
+    position.  This samples each position's spectrum at the single frequency bin
+    nearest ``freq_khz`` and lays that value on the xy grid
+    (:func:`data_analysis.viz.plot_utils.grid_by_position`), drawing two maps side
+    by side:
 
-    * mean coherence ``gamma2`` (0..1) over the ``[fmin_khz, fmax_khz]`` band, and
-    * mean cross-phase ``Delta-phi`` (deg) over that band.
+    * coherence ``gamma2`` (0..1) at ``freq_khz``, and
+    * cross-phase ``Delta-phi`` (deg) at ``freq_khz``.
 
-    Cross-phase is only trustworthy where the channels are coherent, so positions
-    with band coherence ``< gamma2_floor`` are blanked (NaN) in the phase map.
-    ``save_fig`` True routes through :func:`fig_path`.
+    No frequency averaging is done -- the maps are the plane structure of a single
+    spectral line.  ``freq_khz`` is snapped to the nearest available bin (the
+    actual bin used is reported in the title).  Cross-phase is only trustworthy
+    where the channels are coherent, so positions with coherence ``< gamma2_floor``
+    at that frequency are blanked (NaN) in the phase map.  ``save_fig`` True routes
+    through :func:`fig_path`.
     """
     loaded = _load_xcorr_run(ifn, ch_a, ch_b, npz_path)
     if loaded is None:
         return
     freq, gamma2, phase, pos_x, pos_y = loaded
 
-    # Per-position scalars over the frequency band: coherence is a plain mean;
-    # cross-phase is averaged as a unit vector (angle of <e^{i phi}>) so the wrap
-    # at +-180 deg is handled instead of a raw mean jumping across it.
-    band = (freq >= fmin_khz * 1e3) & (freq <= fmax_khz * 1e3)
-    g2_band = np.nanmean(gamma2[:, band], axis=1)
-    ph_band = np.degrees(np.angle(np.nanmean(np.exp(1j * phase[:, band]), axis=1)))
+    # Pick the single frequency bin nearest freq_khz; sample every position's
+    # spectrum there (no averaging). fbin is the actual bin frequency used.
+    fi = int(np.argmin(np.abs(freq - freq_khz * 1e3)))
+    fbin_khz = freq[fi] * 1e-3
+    g2_f = gamma2[:, fi]
+    ph_f = np.degrees(phase[:, fi])
 
-    # Blank phase where the channels aren't coherent (it's noise there) so the map
-    # shows structure only in the coherent region.
-    ph_band = np.where(g2_band < gamma2_floor, np.nan, ph_band)
+    # Blank phase where the channels aren't coherent at this frequency (it's noise
+    # there) so the map shows structure only in the coherent region.
+    ph_f = np.where(g2_f < gamma2_floor, np.nan, ph_f)
 
-    g2_grid, extent = grid_by_position(pos_x, pos_y, g2_band)
-    ph_grid, _ = grid_by_position(pos_x, pos_y, ph_band)
+    g2_grid, extent = grid_by_position(pos_x, pos_y, g2_f)
+    ph_grid, _ = grid_by_position(pos_x, pos_y, ph_f)
 
     fig, axs = plt.subplots(1, 2, figsize=(14, 6))
     _draw_plane_maps(fig, axs, [
@@ -661,96 +664,10 @@ def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
 
     title = run_title(ifn, run_num_of(ifn)) or f"{run_num_of(ifn)} xcorr"
     fig.suptitle(f"{title}  —  {ch_a[0]}/{ch_a[1]} vs {ch_b[0]}/{ch_b[1]} "
-                 f"({fmin_khz:g}-{fmax_khz:g} kHz band)",
+                 f"(f = {fbin_khz:.3g} kHz)",
                  fontsize=12, fontweight="bold")
-    name = f"{run_num_of(ifn)}-xcorr-plane-{ch_a[0]}{ch_a[1]}-{ch_b[0]}{ch_b[1]}"
-    finalize_figure(fig, save_fig=_resolve_save(save_fig, name), show=show)
-
-
-def _load_xcorr_band_run(ifn, ch_a, ch_b, npz_path=None):
-    """Load a pair's per-position narrow-band scalar coherence/phase from the npz.
-
-    Reads what :func:`Jun2026_xcorr.batch_xcorr_band` wrote: one scalar coherence,
-    one scalar cross-phase (radians), and the band-center frequency per probe
-    position.  Returns ``(gamma2, phase, fpeak, nshots, fband, pos_x, pos_y)``
-    where ``gamma2``/``phase``/``fpeak``/``nshots`` are ``(npos,)``, ``fpeak`` is
-    the per-position band center in Hz (tracked peak or fixed band center), and
-    ``fband`` is the ``(f_lo, f_hi)`` search/fixed window in Hz.  ``fpeak`` falls
-    back to all-NaN for older npz files written before peak-tracking.  Returns
-    ``None`` (after printing why) if the npz or this pair's band entry is missing.
-    """
-    if npz_path is None:
-        npz_path = jxc.xcorr_npz_path(ifn)
-    key = jxc._pair_key(ch_a, ch_b)
-    try:
-        with np.load(npz_path) as d:
-            gamma2 = d[f"{key}__band_gamma2"]
-            fpeak = (d[f"{key}__band_fpeak"] if f"{key}__band_fpeak" in d.files
-                     else np.full(gamma2.shape, np.nan))
-            return (gamma2, d[f"{key}__band_phase"], fpeak,
-                    d[f"{key}__band_nshots"], d[f"{key}__band_fband"],
-                    d["pos_x"], d["pos_y"])
-    except (OSError, KeyError) as e:
-        print(f"  (xcorr band: no saved entry for pair '{key}' in {npz_path} -- {e})")
-        return None
-
-
-def plot_xcorr_band_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
-                              gamma2_floor=0.2, save_fig=True, show=False):
-    """Draw narrow-band coherence + phase-difference (+ peak-freq) xy-plane maps.
-
-    Uses the per-position scalars from :func:`Jun2026_xcorr.batch_xcorr_band` (one
-    band-averaged coherence + cross-phase per (x, y) position, collapsed the
-    statistically correct way over the band's complex spectra).  Draws
-    (:func:`data_analysis.viz.plot_utils.grid_by_position`):
-
-    * band coherence ``gamma2`` (0..1),
-    * band cross-phase ``Delta-phi`` (deg) -- the phase-difference map, and
-    * (peak-tracking runs only) the tracked peak frequency ``f_peak`` (kHz) --
-      how the mode frequency moves across the plane.
-
-    The ``f_peak`` panel is added only when the per-position band center varies
-    (a ``track_peak=True`` batch); a fixed-band batch has a constant center and
-    draws just the two maps.  Cross-phase (and ``f_peak``) are only trustworthy
-    where the channels are coherent, so positions with band coherence
-    ``< gamma2_floor`` are blanked (NaN) in those maps.  ``save_fig`` True routes
-    through :func:`fig_path`.
-    """
-    loaded = _load_xcorr_band_run(ifn, ch_a, ch_b, npz_path)
-    if loaded is None:
-        return
-    gamma2, phase, fpeak, _nshots, fband, pos_x, pos_y = loaded
-    fmin_khz, fmax_khz = fband[0] * 1e-3, fband[1] * 1e-3
-
-    incoherent = gamma2 < gamma2_floor
-    ph_deg = np.where(incoherent, np.nan, np.degrees(phase))
-
-    g2_grid, extent = grid_by_position(pos_x, pos_y, gamma2)
-    ph_grid, _ = grid_by_position(pos_x, pos_y, ph_deg)
-
-    panels = [(g2_grid, r"coherence $\gamma^2$", "viridis", (0, 1)),
-              (ph_grid, r"cross-phase $\Delta\phi$ [deg]", "twilight", (-180, 180))]
-
-    # Peak-frequency map: only when the tracked center actually varies across the
-    # plane (a fixed-band batch stores a constant center -- no map to draw).
-    fp_khz = np.where(incoherent, np.nan, fpeak * 1e-3)
-    peak_varies = np.nanstd(fp_khz) > 0
-    if peak_varies:
-        fp_grid, _ = grid_by_position(pos_x, pos_y, fp_khz)
-        vlo, vhi = np.nanmin(fp_khz), np.nanmax(fp_khz)
-        panels.append((fp_grid, r"peak $f$ [kHz]", "plasma", (vlo, vhi)))
-
-    fig, axs = plt.subplots(1, len(panels), figsize=(7 * len(panels), 6))
-    _draw_plane_maps(fig, np.atleast_1d(axs), panels, extent)
-
-    band_desc = (f"peak in {fmin_khz:g}-{fmax_khz:g} kHz"
-                 if peak_varies else f"{fmin_khz:g}-{fmax_khz:g} kHz band")
-    title = run_title(ifn, run_num_of(ifn)) or f"{run_num_of(ifn)} xcorr"
-    fig.suptitle(f"{title}  —  {ch_a[0]}/{ch_a[1]} vs {ch_b[0]}/{ch_b[1]} "
-                 f"({band_desc})",
-                 fontsize=12, fontweight="bold")
-    name = (f"{run_num_of(ifn)}-xcorr-band-plane-"
-            f"{ch_a[0]}{ch_a[1]}-{ch_b[0]}{ch_b[1]}")
+    name = (f"{run_num_of(ifn)}-xcorr-plane-{ch_a[0]}{ch_a[1]}-{ch_b[0]}{ch_b[1]}"
+            f"-{fbin_khz:.3g}kHz")
     finalize_figure(fig, save_fig=_resolve_save(save_fig, name), show=show)
 
 

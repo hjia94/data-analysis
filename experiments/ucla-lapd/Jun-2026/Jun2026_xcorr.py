@@ -27,8 +27,6 @@ from data_analysis.signal import (
     coherence_spectrum,
     cross_phase_spectrum,
     avg_cross_spectrum,
-    band_cross_spectrum,
-    peak_cross_spectrum,
     clip_time_window,
     finite_row_mask,
 )
@@ -42,11 +40,6 @@ CH_A        = ("machscope", "C2")      # e.g. LP@P29 Isat-L
 CH_B        = ("machscope", "C3")      # e.g. LP@P29 Isat-R
 TMIN_MS, TMAX_MS = 1.5, 5.0            # analysis time window (ms)
 NPERSEG     = 4096                     # Welch segment length (freq res vs variance)
-FBAND_KHZ   = (10.0, 14.0)            # fixed narrow band for band_xcorr maps (kHz)
-# Peak-tracking (for a mode whose frequency drifts across the plane): find the
-# per-position coherence peak inside SEARCH_KHZ, then integrate +-DELTAF_KHZ.
-SEARCH_KHZ  = (5.0, 30.0)             # window to locate the per-position peak (kHz)
-DELTAF_KHZ  = 2.0                     # half-width integrated around each peak (kHz)
 
 
 # =========================================================================== #
@@ -219,13 +212,13 @@ def _position_xy(pos_array, npos, nshot):
     """(x, y) of each of the ``npos`` positions: the first shot of each block.
 
     Kept with the spectra so a plane map has real axes (not just a position
-    index). Shared by :func:`batch_xcorr` and :func:`batch_xcorr_band`.
+    index). Used by :func:`batch_xcorr`.
     """
     return pos_array["x"][::nshot][:npos], pos_array["y"][::nshot][:npos]
 
 
 def _iter_run_positions(ifn, ch_a, ch_b, tmin_ms, tmax_ms, desc):
-    """Per-position read loop shared by the two batch drivers.
+    """Per-position read loop for :func:`batch_xcorr`.
 
     Reads the run's positions, opens the file, and returns ``(pos_x, pos_y,
     npos, gen)`` where ``gen`` yields ``(p, sa, sb, dt)`` for each position --
@@ -317,85 +310,6 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
     print(f"\nWrote {out_path}: pair '{key}', {npos} positions "
           f"({int(nshots.sum())} shots total), {freq.size} freq bins, "
           f"window {tmin_ms}-{tmax_ms} ms")
-    return out_path
-
-
-def batch_xcorr_band(ifn, ch_a=CH_A, ch_b=CH_B, fband_khz=FBAND_KHZ,
-                     track_peak=False, search_khz=SEARCH_KHZ, deltaf_khz=DELTAF_KHZ,
-                     tmin_ms=TMIN_MS, tmax_ms=TMAX_MS, nperseg=NPERSEG):
-    """Per-position **narrow-band** scalar coherence + cross-phase -> co-located npz.
-
-    Like :func:`batch_xcorr`, but collapses each position's ensemble spectrum to
-    one scalar coherence and one scalar cross-phase (the shot-averaged complex
-    spectra are averaged over a band *before* the coherence ratio / phase angle --
-    the statistically correct band estimate). Keeps the spatial dimension so a
-    plane run becomes a single-frequency coherence map and phase-difference map.
-
-    Two band modes:
-
-    * ``track_peak=False`` (default): a **fixed** band ``fband_khz = (f_lo, f_hi)``
-      (kHz) at every position, via :func:`band_cross_spectrum`.
-    * ``track_peak=True``: **peak-tracking** for a mode whose frequency drifts
-      across the plane -- at each position the coherence peak is located inside
-      ``search_khz`` and the band ``peak +- deltaf_khz`` is integrated, via
-      :func:`peak_cross_spectrum`. The located peak per position is stored too.
-
-    Writes into the run's co-located npz (:func:`xcorr_npz_path`), keyed by the
-    pair (:func:`_pair_key`) with a ``band`` suffix so it coexists with the full
-    spectra from :func:`batch_xcorr`: ``pos_x`` / ``pos_y`` (shared),
-    ``<pair>__band_gamma2`` ``(npos,)``, ``<pair>__band_phase`` ``(npos,)`` (rad),
-    ``<pair>__band_nshots`` ``(npos,)``, ``<pair>__band_fpeak`` ``(npos,)`` (the
-    per-position band-center frequency in Hz -- the tracked peak, or the fixed
-    band center), and ``<pair>__band_fband`` ``(2,)`` (the search/fixed window in
-    Hz). An existing npz is **merged**. Returns the npz path.
-    """
-    # Select the per-position spectrum function (and its band args) once, then call
-    # it uniformly in the loop. peak_cross_spectrum tracks the coherence peak;
-    # band_cross_spectrum uses the fixed band. Both return (f_c, gamma2, phase, n).
-    if track_peak:
-        win = (search_khz[0] * 1e3, search_khz[1] * 1e3)
-        spectrum_fn = peak_cross_spectrum
-        band_args = (win, deltaf_khz * 1e3)
-        desc = f"peak {search_khz[0]:g}-{search_khz[1]:g}kHz +-{deltaf_khz:g}"
-    else:
-        win = (fband_khz[0] * 1e3, fband_khz[1] * 1e3)
-        spectrum_fn = band_cross_spectrum
-        band_args = (win,)
-        desc = f"band {fband_khz[0]:g}-{fband_khz[1]:g}kHz"
-
-    pos_x, pos_y, npos, positions = _iter_run_positions(
-        ifn, ch_a, ch_b, tmin_ms, tmax_ms, "xcorr-band")
-
-    # One scalar (coherence, phase, band-center) PER position. Dead positions (no
-    # finite shot pair) stay NaN so one bad point doesn't abort the whole plane.
-    gamma2 = np.full(npos, np.nan)
-    phase = np.full(npos, np.nan)
-    fpeak = np.full(npos, np.nan)
-    nshots = np.zeros(npos, dtype=int)
-    for p, sa, sb, dt in positions:
-        try:
-            f_c, g2, ph, n_used = spectrum_fn(
-                sa, sb, dt, *band_args, nperseg=nperseg)
-        except ValueError:
-            continue
-        gamma2[p] = g2
-        phase[p] = ph
-        fpeak[p] = f_c
-        nshots[p] = n_used
-
-    if nshots.sum() == 0:
-        raise ValueError("no finite shot pairs to correlate")
-
-    out_path = xcorr_npz_path(ifn)
-    key = _pair_key(ch_a, ch_b)
-    merge_save_npz(out_path, {
-        "pos_x": pos_x, "pos_y": pos_y,
-        f"{key}__band_gamma2": gamma2, f"{key}__band_phase": phase,
-        f"{key}__band_nshots": nshots, f"{key}__band_fpeak": fpeak,
-        f"{key}__band_fband": np.array(win),
-    })
-    print(f"\nWrote {out_path}: pair '{key}' {desc}, {npos} positions "
-          f"({int(nshots.sum())} shots total), window {tmin_ms}-{tmax_ms} ms")
     return out_path
 
 
