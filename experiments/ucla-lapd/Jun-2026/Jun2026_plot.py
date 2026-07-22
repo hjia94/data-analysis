@@ -646,19 +646,28 @@ def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     # spectrum there (no averaging). fbin is the actual bin frequency used.
     fi = int(np.argmin(np.abs(freq - freq_khz * 1e3)))
     fbin_khz = freq[fi] * 1e-3
-    g2_f = gamma2[:, fi]
+
+    # TESTING (hard-coded): coherence is averaged over the center bin +- 2 bins
+    # (5 bins total, clipped to the array edges); phase stays at the single center
+    # bin. Remove / parameterize this once the comparison is settled.
+    _NBIN_HALF = 2
+    lo = max(fi - _NBIN_HALF, 0)
+    hi = min(fi + _NBIN_HALF + 1, freq.size)
+    g2_f = np.nanmean(gamma2[:, lo:hi], axis=1)
     ph_f = np.degrees(phase[:, fi])
 
     # Blank phase where the channels aren't coherent at this frequency (it's noise
-    # there) so the map shows structure only in the coherent region.
-    ph_f = np.where(g2_f < gamma2_floor, np.nan, ph_f)
+    # there) so the map shows structure only in the coherent region.  Gate on the
+    # single-bin coherence so the phase floor matches its own frequency.
+    ph_f = np.where(gamma2[:, fi] < gamma2_floor, np.nan, ph_f)
 
     g2_grid, extent = grid_by_position(pos_x, pos_y, g2_f)
     ph_grid, _ = grid_by_position(pos_x, pos_y, ph_f)
 
     fig, axs = plt.subplots(1, 2, figsize=(14, 6))
     _draw_plane_maps(fig, axs, [
-        (g2_grid, r"coherence $\gamma^2$", "viridis", (0, 1)),
+        (g2_grid, rf"coherence $\gamma^2$ ($\pm${_NBIN_HALF} bins)",
+         "viridis", (0, 1)),
         (ph_grid, r"cross-phase $\Delta\phi$ [deg]", "twilight", (-180, 180)),
     ], extent)
 
