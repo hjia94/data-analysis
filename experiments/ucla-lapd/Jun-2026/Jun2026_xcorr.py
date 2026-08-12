@@ -35,10 +35,10 @@ import Jun2026_IV as jiv
 
 
 # --- Configuration (edit-in-place, like Jun2026_Isat.py) --------------------
-IFN = r"D:\data\LAPD\jun2026-jia\07-He-800G-bias40V-Isat-p29-plane_2026-06-10.hdf5"
-CH_A        = ("machscope", "C2")      # e.g. LP@P29 Isat-L
-CH_B        = ("machscope", "C3")      # e.g. LP@P29 Isat-R
-TMIN_MS, TMAX_MS = 1.5, 5.0            # analysis time window (ms)
+IFN = r"D:\data\LAPD\jun2026-jia\26-He-800G-bias40V-Bdot-LP-plane_2026-06-12.hdf5"
+CH_A        = ("bdotscope", "C1")
+CH_B        = ("lpscope", "C3")
+TMIN_MS, TMAX_MS = 1.5, 4.5            # analysis time window (ms)
 NPERSEG     = 4096                     # Welch segment length (freq res vs variance)
 
 
