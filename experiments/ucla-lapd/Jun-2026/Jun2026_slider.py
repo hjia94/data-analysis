@@ -30,6 +30,8 @@ Every adapter follows the same five steps:
 
 One page or many
 --------------------------------------------------------------------------
+:func:`emit_iv_line_slider_all` puts **every IV run on one page**, the runs
+behind the dropdown and both probe tips overlaid in each frame.
 :func:`emit_xcorr_slider` renders one channel pair per page.
 :func:`emit_xcorr_slider_all` puts **every pair of a run on one page** behind a
 dropdown, which is the one to reach for when the question is "which channel pair
@@ -43,6 +45,8 @@ import os
 
 import numpy as np
 
+from data_analysis.io import parse_gas_puff
+from data_analysis.plasma.langmuir import load_plasma_data, load_sweep_axes
 from data_analysis.utils import run_num_of
 from data_analysis.viz.plot_utils import fig_path, grid_frames
 from data_analysis.viz.slider_html import SCHEMA_VERSION, write_slider_html
@@ -304,6 +308,185 @@ def emit_xcorr_sliders(ifn, npz_path=None, **kwargs):
         if path is not None:
             paths.append(path)
     return paths
+
+
+# =========================================================================== #
+#  IV line scan: runs behind the dropdown, both tips overlaid per frame
+# =========================================================================== #
+
+#: Fields drawn per frame, in panel order. ``Te*ne`` is derived rather than
+#: stored, matching how ``Jun2026_plot._draw_iv_panels`` computes it. The two
+#: lists are deliberately separate: that one carries mathtext labels for
+#: matplotlib, this one plain text for a canvas. Keep the quantities in step.
+IV_FIELDS = (("Vp", "V"), ("Te", "eV"), ("ne", "cm^-3"), ("Te*ne", "eV cm^-3"))
+
+#: How far two tips' recorded sweep times may differ and still count as the
+#: same acquisition [ms]. The tips are timed independently, so their timestamps
+#: carry ~1e-4 ms of clock jitter against a sweep spacing of ~0.4 ms; this sits
+#: well above the jitter and well below one sweep, so a genuinely offset run
+#: still fails. A property of the DAQ clock, not of any one run's spacing.
+IV_TIP_JITTER_MS = 0.02
+
+
+def _iv_run_group(data_dir, run_num, tips, calibrated=True):
+    """One run as a slider *group*: per-tip traces of each field, vs position.
+
+    Returns ``(group, xpos)``, or ``None`` when the run cannot be read. Each
+    field carries one trace per tip, so a frame shows both tips of the same
+    quantity against one y-axis -- the comparison the static figure could only
+    make by drawing separate lines per timestamp.
+    """
+    traces_by_field = {name: [] for name, _ in IV_FIELDS}
+    axis_values, xpos = None, None
+
+    for tip in tips:
+        try:
+            Vp, Te, ne, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=tip)
+            xs, *_ = load_sweep_axes(data_dir, run_num, tip=tip)
+        except (FileNotFoundError, OSError, KeyError) as exc:
+            print(f"  (IV: run {run_num} tip {tip} unreadable: {exc})")
+            return None
+        ne = jpl._load_ne(data_dir, run_num, tip, ne, calibrated)
+
+        # Some runs store one more timestamp than they have sweeps. The static
+        # figure indexes t_ls[t_idx] for t_idx < n_sweeps, i.e. it uses the
+        # leading timestamps and ignores the trailing one; match that exactly
+        # so the page and the PNG label the same frame with the same time.
+        n_sweeps = Vp.shape[1]
+        times_ms = np.asarray(t_ls, float)[:n_sweeps] * 1e3
+
+        # Tips of one run are the same acquisition, so they agree on the time
+        # axis and the probe line. Checked rather than assumed: silently
+        # adopting one tip's axis for the other's data would mislabel every
+        # frame with no visible symptom. Checked *before* accumulating, so a
+        # rejected tip never leaves half-built traces behind.
+        #
+        # Compared to a tolerance, not bit-for-bit: the two tips are timed
+        # independently and their recorded sweep times differ by roughly
+        # IV_TIP_JITTER_MS. That is the same instant recorded twice, so
+        # requiring equality would reject every real run; a *sweep* apart is a
+        # different acquisition and still fails.
+        if axis_values is None:
+            axis_values, xpos, first_tip = times_ms, np.asarray(xs, float), tip
+        else:
+            same_time = (times_ms.shape == axis_values.shape
+                         and np.allclose(times_ms, axis_values, rtol=0,
+                                         atol=IV_TIP_JITTER_MS))
+            if not (same_time and np.array_equal(np.asarray(xs, float), xpos)):
+                print(f"  (IV: run {run_num} tip {tip} disagrees with tip "
+                      f"{first_tip} on the time axis or probe line; skipping "
+                      "the run)")
+                return None
+
+        # Saved as (npos, n_sweeps); the schema wants (n_axis, nx). Zipped
+        # against IV_FIELDS so the panel order is stated once.
+        for (name, _), cube in zip(IV_FIELDS,
+                                   (Vp.T, Te.T, ne.T, (Te * ne).T)):
+            traces_by_field[name].append({"name": f"tip {tip}", "frames": cube})
+
+    group = {
+        "name": "",                      # filled in by the caller (delay time)
+        # The first tip's timestamps label the frames; the check above has
+        # established the others match to well within a sweep.
+        "axis": {"name": "time", "unit": "ms", "values": axis_values},
+        "fields": [{"name": name, "unit": unit, "cmap": "viridis",
+                    # No natural physical scale, and the per-frame range varies
+                    # by ~10x across a run, so these follow the page's toggle.
+                    "vmin": None, "vmax": None,
+                    "traces": traces_by_field[name]}
+                   for name, unit in IV_FIELDS],
+    }
+    return group, xpos
+
+
+def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
+    """Every IV run on **one** page: runs in the dropdown, tips overlaid.
+
+    Replaces the ``IV_line_*.png`` family, where each figure fixed a handful of
+    timestamps and each run needed its own file. Here the slider scrubs the
+    timestamps and the dropdown switches runs, so "how does this profile evolve,
+    and how does that differ between fill delays?" is two controls rather than
+    seven files.
+
+    Args:
+        ifns: The run ``.hdf5`` paths, in dropdown order. Each needs its saved
+            ``-tip*-plasma-data.npz`` beside it (:func:`Jun2026_IV.process_run`).
+        out: Destination ``.html``; defaults under :func:`slider_path`.
+        calibrated (bool): Prefer interferometer-calibrated ne, falling back to
+            raw with a note -- the rule :func:`Jun2026_plot._load_ne` applies.
+        name (str): Output stem, when the default is not wanted.
+
+    Runs keep their own time axes: they differ in both sweep count and span, so
+    the slider holds the frame *index* across a switch and the readout shows the
+    real time for the run now selected.
+    """
+    groups, xpos, shared_label = [], None, None
+    for ifn in ifns:
+        data_dir = os.path.dirname(ifn)
+        run_num = run_num_of(ifn)
+        tips = [t for t in jpl.discover_tips(ifn) if t != "override"]
+        if not tips:
+            print(f"  (IV: run {run_num} has no saved tip data; skipping)")
+            continue
+
+        prepared = _iv_run_group(data_dir, run_num, tips, calibrated)
+        if prepared is None:
+            continue
+        group, xs = prepared
+
+        # The delay time is the knob that distinguishes these runs, so it is
+        # what the dropdown says -- "23 ms", not "run 24".
+        delay = _delay_label(ifn)
+        group["name"] = f"{delay}  (run {run_num})" if delay else f"run {run_num}"
+
+        # One page carries one probe line for every run. As with the tips, a
+        # page that adopted one run's positions and drew another run's data
+        # against them would be wrong invisibly.
+        if xpos is None:
+            xpos, shared_label = xs, group["name"]
+        elif not np.array_equal(xs, xpos):
+            raise ValueError(
+                f"{group['name']} was measured on a different probe line than "
+                f"{shared_label}; they cannot share one page's x-axis.")
+        groups.append(group)
+
+    if not groups:
+        print("  (IV: no run could be read; nothing to render)")
+        return None
+
+    bundle = {
+        "schema": SCHEMA_VERSION,
+        "title": "Jun-2026 IV line scans - Vp, Te, ne by fill delay",
+        "geometry": "line",
+        # Bundle-level axis: a fallback only, since every group overrides it.
+        "axis": groups[0]["axis"],
+        "x": {"label": "X Position", "unit": "cm", "values": xpos},
+        "groups": groups,
+        "provenance": {
+            "source": f"{len(groups)} runs, {os.path.basename(os.path.dirname(ifns[0]))}",
+            "params": {"ne": "interferometer-calibrated" if calibrated else "raw",
+                       "tips": "overlaid per frame",
+                       "positions": xpos.size},
+        },
+        "warning": None,
+    }
+    return write_slider_html(bundle, out or slider_path(name or "IV-line-all-runs"))
+
+
+def _delay_label(ifn):
+    """A run's fill delay as a dropdown entry: ``'23 ms'``.
+
+    Read from the parsed description rather than by regexing a formatted title
+    back apart: :func:`data_analysis.io.parse_gas_puff` is the one declaration
+    of the operator's puff phrasing, and going through it also avoids
+    :func:`Jun2026_plot.puff_title`'s no-puff fallback, which returns the bare
+    run number -- a label of "24" that reads as a delay but is a run number.
+    Returns ``""`` when there is no puff line, so the caller shows the run
+    alone instead of a wrong delay.
+    """
+    desc = jpl._run_description(ifn)
+    puff = parse_gas_puff(desc.raw) if desc is not None else None
+    return f"{puff[1]:g} ms" if puff else ""
 
 
 if __name__ == "__main__":

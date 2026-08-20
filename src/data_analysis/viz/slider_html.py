@@ -19,18 +19,32 @@ bundle is exactly those three:
 self-describing* (``name``/``unit``/``values``). Frequency (a cross-spectral
 estimator) and time (an IV sweep, an emissive trace) come from different
 analysis schemas at different time scales; they are never interchangeable and
-never share a generic dimension name. One bundle carries exactly one axis.
+never share a generic dimension name. A bundle carries one axis, which a
+group may override with its own when groups were recorded over different spans
+(IV runs differ in both sweep count and duration).
 
 **fields** -- named physical quantities, one frame cube each, *all* sharing that
 one geometry and that one axis. Each field draws as its own panel, and every
 panel moves together on the single slider.
 
 A bundle may carry several **groups** of those fields -- one per channel, probe
-pair, or tip -- selected by a dropdown on the page. A group is *not* a fourth
-dimension: every group shares the one geometry and the one axis, and differs
-only in which physical signal was measured. That is what makes them comparable
-by switching rather than by opening two files, and it is why the schema keeps
-one shared ``axis`` rather than letting each group carry its own.
+pair, tip, or run -- selected by a dropdown on the page. A group is *not* a
+fourth dimension: every group shares the one geometry, and differs only in which
+signal was measured or when. That is what makes them comparable by switching
+rather than by opening two files.
+
+Groups share the *spatial* axes always -- they are measured on the same probe
+line or plane, which is what makes switching a comparison rather than a change
+of subject. The *scan* axis is per group: a group may carry its own ``axis``,
+falling back to the bundle's. Where groups differ in length the slider keeps the
+**index** across a switch and the readout shows the real value for the group now
+selected.
+
+A field draws one curve by default (``frames``). For ``line`` geometry it may
+instead carry several named **traces** (``traces``), drawn on one panel against
+one shared y-axis -- two probe tips of the same quantity, say. Overlaying is
+what makes them comparable; that is also why traces are refused for ``plane``
+geometry, where stacked heatmaps would simply hide one another.
 
 Schema v1
 --------------------------------------------------------------------------
@@ -51,10 +65,16 @@ Schema v1
              "frames": (n_axis, ny, nx) | (n_axis, nx) float,
              "cmap": "viridis",             # any matplotlib colormap name
              "vmin": 0.0, "vmax": 1.0},     # both None -> page scale toggle
+            # ... OR "traces" instead of "frames" (line geometry only):
+            {"name": "Vp", "unit": "V", "cmap": "viridis",
+             "vmin": None, "vmax": None,
+             "traces": [{"name": "tip L", "frames": ndarray},
+                        {"name": "tip R", "frames": ndarray}]},
         ],
         # ... OR, for a multi-channel page, "groups" instead of "fields":
         "groups": [                         # order = dropdown order
             {"name": "bdotscope-C1 vs lpscope-C3",   # dropdown entry
+             "axis": {...},                 # optional; defaults to the above
              "fields": [...]},              # same field list as above
         ],
         "provenance": {"source": str, "params": {...}},   # rendered as a banner
@@ -63,17 +83,20 @@ Schema v1
 
 Rules, all enforced by :func:`validate_bundle`:
 
-* Exactly one axis. Every field's ``frames.shape[0]`` equals ``axis.values.size``.
+* One axis per group (the bundle's, unless the group overrides it). Every
+  field's ``frames.shape[0]`` equals that axis's ``values.size``.
+* ``frames`` XOR ``traces`` on a field. ``traces`` needs ``line`` geometry, and
+  every trace carries a full frame cube of the same shape.
 * Every field shares the geometry: ``(n_axis, ny, nx)`` for a plane,
   ``(n_axis, nx)`` for a line, matching ``x`` (and ``y``).
 * ``fields`` and ``groups`` are alternatives -- exactly one of the two. A bare
   ``fields`` list is the single-group case, and is normalized to one unnamed
   group internally, so the page has one code path rather than two.
-* Groups need matching field *layouts*: same count, same names, same units, in
-  the same order. This is structural, not stylistic: the panel row (names,
-  units, colormaps, fixed scales) is serialized **once** for the whole page and
-  the page builds its canvases from it, so a group whose layout differed would
-  be drawn under another group's captions and colorbars. Fields carrying a
+* Groups need matching field *layouts*: same count, same names, same units,
+  same trace names, in the same order. This is structural, not stylistic: the
+  panel row (names, units, colormaps, fixed scales) is serialized **once** for
+  the whole page and the page builds its canvases from it, so a group whose
+  layout differed would be drawn under another group's captions and colorbars. Fields carrying a
   fixed ``vmin``/``vmax`` are additionally comparable across a switch;
   autoscaled ones are rescaled per group and are not.
 * ``vmin``/``vmax`` both set -> that fixed physical scale is used (coherence
@@ -145,6 +168,32 @@ def bundle_groups(bundle):
     return [{"name": "", "fields": bundle.get("fields")}]
 
 
+def group_axis(bundle, group):
+    """The axis a group scrubs: its own if it has one, else the bundle's.
+
+    Groups that were recorded separately need not share a sweep -- the IV runs
+    differ in both sweep count and time span -- so the axis is per group, with
+    the bundle-level one as the shared default. The *spatial* axes stay
+    bundle-level: every group is measured on the same probe line, which is what
+    makes switching between them a comparison rather than a change of subject.
+    """
+    return group.get("axis") or bundle["axis"]
+
+
+def field_traces(field):
+    """A field's curves as a ``[{"name", "frames"}, ...]`` list.
+
+    One accessor for both spellings, mirroring :func:`bundle_groups`: a field
+    carrying a bare ``frames`` cube is the single-curve case and comes back as
+    one unnamed trace, so validation, serialization and drawing walk the same
+    structure whichever the adapter wrote.
+    """
+    traces = field.get("traces")
+    if traces is not None:
+        return list(traces)
+    return [{"name": "", "frames": field.get("frames")}]
+
+
 def validate_bundle(bundle):
     """Check a bundle against schema v1; raise ``ValueError`` naming the key.
 
@@ -164,19 +213,24 @@ def validate_bundle(bundle):
     _require(geometry in _GEOMETRIES,
              f"'geometry' must be one of {list(_GEOMETRIES)}, got {geometry!r}")
 
-    axis = bundle.get("axis")
-    _require(isinstance(axis, dict), "'axis' must be a dict {name, unit, values}")
-    for k in ("name", "unit", "values"):
-        _require(k in axis, f"'axis' is missing '{k}'")
-    axis_values = np.asarray(axis["values"], float)
-    _require(axis_values.ndim == 1 and axis_values.size > 0,
-             f"'axis.values' must be 1-D and non-empty, got shape {axis_values.shape}")
-    # The slider steps through these in order, so an unsorted axis would scrub
-    # to frames that jump around the scan rather than sweeping it.
-    _require(np.all(np.diff(axis_values) > 0) or np.all(np.diff(axis_values) < 0),
-             f"'axis.values' must be monotonic (it is the slider's order); "
-             f"got {axis_values[:4]}...")
-    n_axis = axis_values.size
+    def _check_axis(axis, where):
+        """Validate one axis dict and return its length. Shared by the
+        bundle-level axis and any per-group override, so both are held to the
+        same rules instead of the override being the lenient path."""
+        _require(isinstance(axis, dict), f"'{where}' must be a dict {{name, unit, values}}")
+        for k in ("name", "unit", "values"):
+            _require(k in axis, f"'{where}' is missing '{k}'")
+        values = np.asarray(axis["values"], float)
+        _require(values.ndim == 1 and values.size > 0,
+                 f"'{where}.values' must be 1-D and non-empty, got shape {values.shape}")
+        # The slider steps through these in order, so an unsorted axis would
+        # scrub to frames that jump around the scan rather than sweeping it.
+        _require(np.all(np.diff(values) > 0) or np.all(np.diff(values) < 0),
+                 f"'{where}.values' must be monotonic (it is the slider's order); "
+                 f"got {values[:4]}...")
+        return values.size
+
+    n_axis = _check_axis(bundle.get("axis"), "axis")
 
     # Spatial axes: 'x' always; 'y' only (and always) for a plane.
     spatial = ["x", "y"] if geometry == "plane" else ["x"]
@@ -192,9 +246,6 @@ def validate_bundle(bundle):
         sizes[key] = values.size
     if geometry == "line":
         _require("y" not in bundle, "'y' is meaningless for geometry 'line'; drop it")
-
-    want = ((n_axis, sizes["y"], sizes["x"]) if geometry == "plane"
-            else (n_axis, sizes["x"]))
 
     _require(("fields" in bundle) != ("groups" in bundle),
              "set exactly one of 'fields' (single channel) or 'groups' "
@@ -220,20 +271,51 @@ def validate_bundle(bundle):
             _require(group.get("name"), f"{stem} is missing a non-empty 'name' "
                                         "(it labels the dropdown entry)")
 
+        # A group may scrub its own axis (runs of differing length), so the
+        # expected cube shape is per group, not per bundle.
+        group_ax = group.get("axis")
+        n = _check_axis(group_ax, f"{stem}.axis") if group_ax else n_axis
+        want = (n, sizes["y"], sizes["x"]) if geometry == "plane" else (n, sizes["x"])
+
         fields = group.get("fields")
         _require(isinstance(fields, (list, tuple)) and len(fields) > 0,
                  f"{stem}: 'fields' must be a non-empty list")
         for i, field in enumerate(fields):
             where = f"{prefix}[{i}]"
             _require(isinstance(field, dict), f"{where} must be a dict")
-            for k in ("name", "unit", "frames", "cmap"):
+            for k in ("name", "unit", "cmap"):
                 _require(k in field, f"{where} is missing '{k}'")
-            # np.shape reads the shape without materializing/copying the cube.
-            shape = np.shape(field["frames"])
-            _require(shape == want,
-                     f"{where} ('{field['name']}') frames have shape {shape}, "
-                     f"expected {want} = (n_axis, "
-                     + ("ny, nx)" if geometry == "plane" else "nx)"))
+            _require(("frames" in field) != ("traces" in field),
+                     f"{where} ('{field['name']}') must set exactly one of "
+                     "'frames' (one curve) or 'traces' (several curves on one "
+                     "panel), not both and not neither")
+            if "traces" in field:
+                _require(geometry == "line",
+                         f"{where} ('{field['name']}') uses 'traces', which "
+                         "only draws for geometry 'line' -- overlaid heatmaps "
+                         "would hide one another")
+                _require(field["traces"],
+                         f"{where}: 'traces' must be a non-empty list of "
+                         "{name, frames}")
+            traces = field_traces(field)
+            # Both are properties of the field, not of the trace being checked.
+            labelled = "traces" in field
+            named = len(traces) > 1
+            for t, trace in enumerate(traces):
+                spot = f"{where}.traces[{t}]" if labelled else where
+                _require(isinstance(trace, dict), f"{spot} must be a dict {{name, frames}}")
+                # A name labels a legend entry, so it is required exactly when
+                # there is a legend to label.
+                if named:
+                    _require(trace.get("name"),
+                             f"{spot} is missing a non-empty 'name' "
+                             "(it labels the trace in the legend)")
+                # np.shape reads the shape without materializing/copying the cube.
+                shape = np.shape(trace["frames"])
+                _require(shape == want,
+                         f"{spot} ('{field['name']}') frames have shape {shape}, "
+                         f"expected {want} = (n_axis, "
+                         + ("ny, nx)" if geometry == "plane" else "nx)"))
             # A colormap typo is the likeliest adapter mistake; catch it here rather
             # than as a KeyError from deep inside rendering.
             _require(field["cmap"] in matplotlib.colormaps,
@@ -251,7 +333,9 @@ def validate_bundle(bundle):
         # page builds its canvases from that row. A group whose layout differed
         # would therefore render under another group's captions and colorbars,
         # so the layouts must agree.
-        signature = [(f["name"], f.get("unit", "")) for f in fields]
+        signature = [(f["name"], f.get("unit", ""),
+                      tuple(t.get("name", "") for t in field_traces(f)))
+                     for f in fields]
         if layout is None:
             layout, layout_name = signature, group.get("name")
         else:
@@ -306,6 +390,19 @@ def _jsonable(value):
 #: formatted to 3 significant figures, and they are ~0.3% of the payload either
 #: way, so exempting them would buy precision nothing downstream reads.
 PAYLOAD_DECIMALS = 4
+
+
+def _frames_array(frames):
+    """A frame cube as a plain float array, masked entries becoming NaN.
+
+    ``np.asarray`` on a masked array drops the mask and hands back the values
+    *underneath* it, so a masked point would plot as whatever was there rather
+    than as the gap the mask asked for -- wrong, and silently so. NaN is what
+    both the page and the colormap already treat as missing.
+    """
+    if np.ma.isMaskedArray(frames):
+        return np.ma.filled(frames.astype(float), np.nan)
+    return np.asarray(frames, float)
 
 
 def _round_floats(value):
@@ -364,28 +461,43 @@ def _payload(bundle):
             # None/None tells the page this field follows the scale toggle.
             "vmin": None if vmin is None else float(vmin),
             "vmax": None if vmax is None else float(vmax),
+            # Trace *names* are panel furniture (the legend) and identical
+            # across groups by the layout rule, so they ride with the panel;
+            # only the cubes below vary per group.
+            "traces": [t.get("name", "") for t in field_traces(field)],
         })
 
+    def _axis_payload(axis):
+        return {"name": axis["name"], "unit": axis["unit"],
+                "values": _jsonable(np.asarray(axis["values"], float))}
+
+    # A group ships its own axis only when it actually overrides the bundle's;
+    # the page falls back to the bundle axis otherwise. Emitting it
+    # unconditionally duplicated one identical array per group -- on a
+    # many-channel xcorr page that is the frequency axis serialized N times.
+    def _group_payload(group):
+        entry = {"name": group.get("name", "")}
+        if group.get("axis"):
+            entry["axis"] = _round_floats(_axis_payload(group["axis"]))
+        entry["frames"] = [[_jsonable(np.round(_frames_array(t["frames"]),
+                                               PAYLOAD_DECIMALS))
+                            for t in field_traces(f)]
+                           for f in group["fields"]]
+        return entry
+
+    # Rounding is applied per part rather than to the finished payload: the
+    # cubes are already rounded by np.round above, and re-walking them in
+    # Python costs ~15x the serialization itself to provably change nothing.
     payload = {
         "geometry": bundle["geometry"],
-        "axis": {"name": bundle["axis"]["name"],
-                 "unit": bundle["axis"]["unit"],
-                 "values": _jsonable(np.asarray(bundle["axis"]["values"], float))},
-        "x": _jsonable(bundle["x"]),
-        "panels": panels,
-        "groups": [
-            {"name": group.get("name", ""),
-             "frames": [_jsonable(np.round(np.asarray(f["frames"], float),
-                                          PAYLOAD_DECIMALS))
-                        for f in group["fields"]]}
-            for group in groups
-        ],
+        "axis": _round_floats(_axis_payload(bundle["axis"])),
+        "x": _round_floats(_jsonable(bundle["x"])),
+        "panels": _round_floats(panels),
+        "groups": [_group_payload(group) for group in groups],
     }
     if bundle["geometry"] == "plane":
-        payload["y"] = _jsonable(bundle["y"])
-    # Frame cubes were rounded above as arrays; this catches the axis, the
-    # coordinates and the panel scales, which are few enough to walk.
-    return _round_floats(payload)
+        payload["y"] = _round_floats(_jsonable(bundle["y"]))
+    return payload
 
 
 def _script_json(obj):
@@ -446,9 +558,23 @@ def save_bundle(bundle, path):
     spine["groups"] = []
     for g, group in enumerate(bundle_groups(bundle)):
         entry = {"name": group.get("name", ""), "fields": []}
+        # A per-group axis is stored like the bundle's: values to an array, the
+        # rest to the spine.
+        if group.get("axis"):
+            arrays[f"__axis_{g}__"] = np.asarray(group["axis"]["values"], float)
+            entry["axis"] = {k: v for k, v in group["axis"].items() if k != "values"}
         for i, field in enumerate(group["fields"]):
-            arrays[f"__frames_{g}_{i}__"] = np.asarray(field["frames"], float)
-            entry["fields"].append({k: v for k, v in field.items() if k != "frames"})
+            spec = {k: v for k, v in field.items() if k not in ("frames", "traces")}
+            # Cubes are always keyed per trace, so there is one array layout on
+            # disk. The *spine* keeps the field's own spelling: a plane field
+            # is single-curve by rule, and handing it back as 'traces' would
+            # make a reloaded plane bundle fail its own validation.
+            traces = field_traces(field)
+            for t, trace in enumerate(traces):
+                arrays[f"__frames_{g}_{i}_{t}__"] = _frames_array(trace["frames"])
+            if "traces" in field:
+                spec["traces"] = [{"name": t.get("name", "")} for t in traces]
+            entry["fields"].append(spec)
         spine["groups"].append(entry)
 
     # Through _jsonable first: adapters routinely put values read back from an
@@ -463,8 +589,14 @@ def load_bundle(path):
     """Read back a bundle written by :func:`save_bundle`.
 
     Also reads the pre-groups layout (a ``fields`` spine with ``__frames_{i}__``
-    keys), which existing files on disk still use -- the only place the old
-    format is understood, so the rest of the module sees one shape.
+    keys) and the pre-traces one (``__frames_{g}_{i}__``), which files written
+    by earlier versions still use -- the only place the old formats are
+    understood, so the rest of the module sees one shape.
+
+    Groups are normalized (a ``fields`` bundle comes back as one group), but a
+    field keeps the spelling it was saved with -- ``frames`` stays ``frames``.
+    Cubes are keyed per trace on disk either way; only the spine records which
+    spelling applies, so a reloaded bundle re-validates exactly as it was.
     """
     with np.load(path, allow_pickle=False) as data:
         bundle = json.loads(str(data["__spine__"]))
@@ -478,8 +610,16 @@ def load_bundle(path):
                 field["frames"] = data[f"__frames_{i}__"]
         else:
             for g, group in enumerate(bundle["groups"]):
+                if "axis" in group:
+                    group["axis"]["values"] = data[f"__axis_{g}__"]
                 for i, field in enumerate(group["fields"]):
-                    field["frames"] = data[f"__frames_{g}_{i}__"]
+                    if "traces" in field:
+                        for t, trace in enumerate(field["traces"]):
+                            trace["frames"] = data[f"__frames_{g}_{i}_{t}__"]
+                    elif f"__frames_{g}_{i}_0__" in data:
+                        field["frames"] = data[f"__frames_{g}_{i}_0__"]
+                    else:                       # pre-traces npz: one cube/field
+                        field["frames"] = data[f"__frames_{g}_{i}__"]
     return bundle
 
 
@@ -532,7 +672,7 @@ def write_slider_html(bundle, out_path, save_bundle_npz=True):
     channels = f"{len(groups)} channel(s) x " if len(groups) > 1 else ""
     print(f"Slider page: {out_path}  ({size_mb:.2f} MB, {channels}"
           f"{len(groups[0]['fields'])} field(s) x "
-          f"{np.size(bundle['axis']['values'])} frames)")
+          f"{np.size(group_axis(bundle, groups[0])['values'])} frames)")
 
     if save_bundle_npz:
         npz_path = save_bundle(bundle, out_path.with_name(out_path.stem + "-bundle.npz"))

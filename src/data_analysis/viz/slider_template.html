@@ -75,11 +75,19 @@
     font-weight: 600;
     min-width: 11ch;
   }
-  #panels { display: flex; flex-wrap: wrap; gap: 1rem; }
+  /* A grid, not a flex row: with flex, a trailing panel that wrapped onto its
+     own row was the only item there and grew to the full width, scaling its
+     fixed-size canvas bitmap up ~2x and visibly softening the lines. Grid
+     tracks are sized by the container, so every panel is the same width
+     whether its row is full or not. */
+  #panels {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 1rem;
+  }
   figure {
     margin: 0;
-    flex: 1 1 380px;
-    min-width: 300px;
+    min-width: 0;
     background: var(--panel);
     border: 1px solid var(--rule);
     border-radius: 8px;
@@ -91,7 +99,10 @@
     margin-bottom: 0.35rem;
     text-align: center;
   }
-  canvas { width: 100%; height: auto; display: block; }
+  /* The width/height attributes are the device-pixel backing store (see
+     resizeCanvas), so they no longer give the element its display ratio --
+     aspect-ratio does, and it is set from CANVAS_W/CANVAS_H at load. */
+  canvas { width: 100%; display: block; }
   #hover {
     color: var(--muted);
     font-size: 0.85rem;
@@ -160,9 +171,34 @@ const hoverOut = document.getElementById("hover");
 const globalLimits = new Map();
 let playTimer = null;
 
-/** Frame cube of panel `p` for the channel currently selected. */
-function cubeFor(p) {
-  return DATA.groups[+groupSelect.value].frames[p];
+/** The group (channel/run) currently selected in the dropdown. */
+function currentGroup() {
+  return DATA.groups[+groupSelect.value];
+}
+
+/**
+ * The axis the slider is scrubbing: the selected group's own if it has one,
+ * else the bundle's. Groups recorded over different spans carry their own;
+ * groups that share one (every channel of an xcorr page) leave it off, so the
+ * array ships once rather than once per group.
+ */
+function currentAxis() {
+  return currentGroup().axis || DATA.axis;
+}
+
+/** Every trace cube on panel `p`, for the selected group. */
+function cubesFor(p) {
+  return currentGroup().frames[p];
+}
+
+// Trace colours: sampled from each panel's own colormap so a two-curve panel
+// stays within the palette its single-curve form already used. Endpoints are
+// avoided -- several colormaps run to near-white or near-black there, which
+// disappears against the plot ground.
+const TRACE_STOPS = [0.62, 0.20, 0.85, 0.42];
+
+function traceColor(panel, p, t) {
+  return lutColor(lutColors(panel, p), TRACE_STOPS[t % TRACE_STOPS.length]);
 }
 
 // ---------------------------------------------------------------- utilities
@@ -213,14 +249,18 @@ function finishExtent(acc) {
  */
 function limitsFor(panel, p, i) {
   if (panel.vmin !== null && panel.vmax !== null) return [panel.vmin, panel.vmax];
-  const cube = cubeFor(p);
+  // Every trace on a panel shares one y-axis, so the limits fold over all of
+  // them: scaling to one curve would push the others off the plot.
+  const cubes = cubesFor(p);
   if (scaleSelect.value === "frame") {
-    return finishExtent(foldExtent(cube[i], [Infinity, -Infinity]));
+    const acc = [Infinity, -Infinity];
+    for (const cube of cubes) foldExtent(cube[i], acc);
+    return finishExtent(acc);
   }
   const key = `${groupSelect.value}:${p}`;
   if (!globalLimits.has(key)) {
     const acc = [Infinity, -Infinity];
-    for (const frame of cube) foldExtent(frame, acc);
+    for (const cube of cubes) for (const frame of cube) foldExtent(frame, acc);
     globalLimits.set(key, finishExtent(acc));
   }
   return globalLimits.get(key);
@@ -298,15 +338,61 @@ function drawColorbar(ctx, colors, lo, hi) {
  * scan pitch printed to one decimal renders "-0.8" twice at different
  * positions, which reads as a plotting error.
  */
-function tickDecimals(values, stride) {
-  let step = Infinity;
-  for (let i = stride; i < values.length; i += stride) {
-    const d = Math.abs(values[i] - values[i - stride]);
-    if (d > 0 && d < step) step = d;
+function tickDecimals(step) {
+  if (!Number.isFinite(step) || step <= 0) return 1;
+  // Enough digits to distinguish adjacent ticks, and no more: a step of 10
+  // prints "-30", a step of 0.5 prints "-0.5".
+  return Math.min(4, Math.max(0, -Math.floor(Math.log10(step))));
+}
+
+/**
+ * One tick's label. Plain decimal where that reads, exponential where it does
+ * not -- an ne axis stepping by 2e12 would otherwise print 13-digit runs of
+ * zeros. Same thresholds as `fmt`, so ticks and the hover readout agree.
+ */
+function tickText(v, decimals) {
+  if (Object.is(v, -0)) v = 0;                   // "-0" is never wanted
+  const a = Math.abs(v);
+  if (a !== 0 && (a < 1e-3 || a >= 1e5)) return v.toExponential(2);
+  return v.toFixed(decimals);
+}
+
+/**
+ * The densest "nice" tick step for `span` that yields at most `max` ticks.
+ *
+ * Ticks are chosen in *data* space rather than by walking the sample array,
+ * which is what puts them on round numbers and keeps them symmetric about
+ * zero. Striding the array by index instead made the labels fall wherever the
+ * samples happened to land -- a -30..30 line scan of 61 points ticked at
+ * -30, -21, -12, -3, 6, 15, 24: no zero, and not symmetric.
+ *
+ * The ladder is walked upward from below the span and the first fitting step
+ * wins, rather than rounding the average spacing up. Rounding up overshoots on
+ * spans that sit just above a rung -- the -8..8 xcorr axis took a step of 5 and
+ * showed only -5, 0, 5, dropping both endpoints. Every rung stays a 1/2/5
+ * multiple, so an integer axis never picks up fractional labels.
+ *
+ * Candidates are judged by the ticks actually drawn between `lo` and `hi`, not
+ * by the span alone. Ticks land on multiples of the step, so where they fall
+ * relative to the ends matters: -9..9 holds three multiples of 5 but -8..8
+ * holds nine multiples of 2, and a span-only estimate rates the wider axis as
+ * the denser one and picks the coarser step for both.
+ */
+function niceStep(lo, hi, max) {
+  const drawn = step =>
+    Math.floor(Math.max(lo, hi) / step + 1e-9) -
+    Math.ceil(Math.min(lo, hi) / step - 1e-9) + 1;
+  // Starting one decade below the average spacing, a fitting rung is always
+  // found within two decades -- the ladder only has to climb far enough to
+  // undo that deliberate undershoot.
+  const start = Math.floor(Math.log10(Math.abs(hi - lo) / max)) - 1;
+  for (let e = start; e <= start + 3; e++) {
+    for (const m of [1, 2, 5]) {
+      const step = m * Math.pow(10, e);
+      if (drawn(step) <= max) return step;
+    }
   }
-  if (!Number.isFinite(step)) return 1;
-  // One digit finer than the step, clamped to something readable.
-  return Math.min(4, Math.max(0, Math.ceil(-Math.log10(step)) + 1));
+  return Math.abs(hi - lo);                    // one tick per end; never hit
 }
 
 // Ticks depend only on the spatial axes and the fixed canvas geometry, neither
@@ -316,16 +402,40 @@ function tickDecimals(values, stride) {
 // placed by a different toPixel in the plane and line paths.
 const tickCache = new Map();
 
-/** Evenly spaced tick marks along a coordinate array, at most `max` of them. */
+/**
+ * Tick marks on round values along a coordinate array, at most `max` of them.
+ *
+ * `toPixel` is called with a *fractional* index, since a round value generally
+ * falls between samples. Every axis places samples linearly, so interpolating
+ * the index is exact rather than an approximation.
+ */
+function niceTicks(lo, hi, max, toPixel) {
+  if (lo === hi) {                                 // degenerate: label the one
+    return [{ text: tickText(lo, 1), pos: toPixel(lo) }];
+  }
+  const step = niceStep(lo, hi, max);
+  const decimals = tickDecimals(step);
+  const ticks = [];
+  const first = Math.ceil(Math.min(lo, hi) / step) * step;
+  for (let v = first; v <= Math.max(lo, hi) + step * 1e-9; v += step) {
+    // -0 prints as "-0"; normalize it away.
+    ticks.push({ text: tickText(v, decimals), pos: toPixel(v) });
+  }
+  return ticks;
+}
+
+/**
+ * Ticks along a sample array, cached: same as :func:`niceTicks`, but `toPixel`
+ * is the array's index-to-pixel map, so values are converted to a fractional
+ * index first. Every axis places samples linearly, so interpolating the index
+ * is exact rather than an approximation.
+ */
 function ticksFor(key, values, max, toPixel) {
   const cached = tickCache.get(key);
   if (cached) return cached;
-  const stride = Math.max(1, Math.ceil(values.length / max));
-  const decimals = tickDecimals(values, stride);
-  const ticks = [];
-  for (let i = 0; i < values.length; i += stride) {
-    ticks.push({ text: values[i].toFixed(decimals), pos: toPixel(i) });
-  }
+  const lo = values[0], hi = values[values.length - 1];
+  const sampleStep = values.length > 1 ? (hi - lo) / (values.length - 1) : 1;
+  const ticks = niceTicks(lo, hi, max, v => toPixel((v - lo) / sampleStep));
   tickCache.set(key, ticks);
   return ticks;
 }
@@ -352,7 +462,8 @@ function cellAt(mx, my) {
 
 /** A plane panel: one filled rectangle per grid cell, NaN cells grey. */
 function drawPlanePanel(ctx, panel, p, i) {
-  const frame = cubeFor(p)[i];
+  // A plane field is single-trace by validation, so there is only ever cube 0.
+  const frame = cubesFor(p)[0][i];
   const [lo, hi] = limitsFor(panel, p, i);
   const span = hi - lo || 1;
   const colors = lutColors(panel, p);
@@ -372,44 +483,81 @@ function drawPlanePanel(ctx, panel, p, i) {
   }
 
   drawAxes(ctx,
-    ticksFor("plane-x", DATA.x.values, 7, i2 => PAD.left + (i2 + 0.5) * cw),
+    ticksFor("plane-x", DATA.x.values, 9, i2 => PAD.left + (i2 + 0.5) * cw),
     `${DATA.x.label} [${DATA.x.unit}]`,
-    ticksFor("plane-y", DATA.y.values, 7, i2 => PAD.top + (ny - 1 - i2 + 0.5) * ch),
+    ticksFor("plane-y", DATA.y.values, 9, i2 => PAD.top + (ny - 1 - i2 + 0.5) * ch),
     `${DATA.y.label} [${DATA.y.unit}]`);
   drawColorbar(ctx, colors, lo, hi);
 }
 
-/** A line panel: a profile polyline, with gaps where the data is NaN. */
+/**
+ * A line panel: one profile polyline per trace, with gaps where data is NaN.
+ * Traces share the panel's y-axis (see limitsFor), which is what makes them
+ * comparable -- two tips of the same quantity read against one scale.
+ */
 function drawLinePanel(ctx, panel, p, i) {
-  const frame = cubeFor(p)[i];
+  const cubes = cubesFor(p);
   const [lo, hi] = limitsFor(panel, p, i);
   const span = hi - lo || 1;
   const xs = DATA.x.values;
   const toX = j => PAD.left + (xs.length === 1 ? PLOT_W / 2 : j * PLOT_W / (xs.length - 1));
   const toY = v => PAD.top + PLOT_H - (v - lo) * PLOT_H / span;
 
-  ctx.strokeStyle = lutColor(lutColors(panel, p), 0.62);
   ctx.lineWidth = 2;
-  ctx.beginPath();
-  let pen = false;
-  for (let j = 0; j < frame.length; j++) {
-    if (!isNum(frame[j])) { pen = false; continue; }   // NaN breaks the line
-    const px = toX(j), py = toY(frame[j]);
-    if (pen) ctx.lineTo(px, py); else ctx.moveTo(px, py);
-    pen = true;
-  }
-  ctx.stroke();
+  cubes.forEach((cube, t) => {
+    const frame = cube[i];
+    ctx.strokeStyle = traceColor(panel, p, t);
+    ctx.beginPath();
+    let pen = false;
+    for (let j = 0; j < frame.length; j++) {
+      if (!isNum(frame[j])) { pen = false; continue; }   // NaN breaks the line
+      const px = toX(j), py = toY(frame[j]);
+      if (pen) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+      pen = true;
+    }
+    ctx.stroke();
+  });
 
-  const yTicks = [];
-  for (let k = 0; k <= 4; k++) {
-    const v = lo + (hi - lo) * k / 4;
-    yTicks.push({ text: fmt(v), pos: toY(v) });
-  }
   drawAxes(ctx,
-    ticksFor("line-x", xs, 7, toX),
+    ticksFor("line-x", xs, 9, toX),
     `${DATA.x.label} [${DATA.x.unit}]`,
-    yTicks,
+    // Round values here too, not five equal divisions of the range: the y-axis
+    // is what two overlaid traces are compared against. Uncached -- unlike the
+    // spatial axes, these limits change with the frame.
+    niceTicks(lo, hi, 6, toY),
     panel.unit ? `${panel.name} [${panel.unit}]` : panel.name);
+
+  // A legend only where there is something to tell apart.
+  if (panel.traces.length > 1) drawTraceLegend(ctx, panel, p);
+}
+
+/** Key for a multi-trace panel: a short colour swatch and name per trace. */
+function drawTraceLegend(ctx, panel, p) {
+  const pad = 8, lineH = 15, swatch = 18;
+  ctx.font = "12px system-ui, sans-serif";
+  const width = swatch + 6 + Math.max(...panel.traces.map(n => ctx.measureText(n).width));
+  const x = PAD.left + PLOT_W - width - pad;
+  const y = PAD.top + pad;
+
+  ctx.fillStyle = "rgba(255,255,255,0.82)";
+  ctx.fillRect(x - 6, y - 4, width + 12, panel.traces.length * lineH + 8);
+  ctx.strokeStyle = "#c8c8c8";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x - 6, y - 4, width + 12, panel.traces.length * lineH + 8);
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  panel.traces.forEach((name, t) => {
+    const cy = y + t * lineH + lineH / 2;
+    ctx.strokeStyle = traceColor(panel, p, t);
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, cy);
+    ctx.lineTo(x + swatch, cy);
+    ctx.stroke();
+    ctx.fillStyle = "#333";
+    ctx.fillText(name, x + swatch + 6, cy);
+  });
 }
 
 // ------------------------------------------------------------ panel assembly
@@ -423,9 +571,12 @@ const contexts = DATA.panels.map((panel, p) => {
   const caption = document.createElement("figcaption");
   caption.textContent = panel.unit ? `${panel.name} [${panel.unit}]` : panel.name;
 
+  // The canvas is laid out by CSS at whatever width its grid track gives it,
+  // but its backing store is sized in device pixels: CSS width x the display's
+  // pixel ratio. Drawing at 1x and letting the browser upscale is what makes
+  // lines and text look soft on a HiDPI screen or a wide panel.
   const canvas = document.createElement("canvas");
-  canvas.width = CANVAS_W;
-  canvas.height = CANVAS_H;
+  canvas.style.aspectRatio = `${CANVAS_W} / ${CANVAS_H}`;
   canvas.addEventListener("mousemove", e => reportHover(e, canvas, panel, p));
   canvas.addEventListener("mouseleave", () => { hoverOut.textContent = ""; });
 
@@ -446,7 +597,6 @@ function reportHover(event, canvas, panel, p) {
   }
 
   const i = +frameSlider.value;
-  const frame = cubeFor(p)[i];
   const xs = DATA.x.values;
 
   if (IS_PLANE) {
@@ -462,29 +612,76 @@ function reportHover(event, canvas, panel, p) {
   } else {
     const j = Math.round((mx - PAD.left) / PLOT_W * (xs.length - 1));
     const clamped = Math.max(0, Math.min(xs.length - 1, j));
+    // Report every trace at the hovered position: with two curves on a panel,
+    // reading only the first would answer the wrong half of the question.
+    const unit = panel.unit ? " " + panel.unit : "";
+    const reads = cubesFor(p).map((cube, t) => {
+      const value = `${fmt(cube[i][clamped])}${unit}`;
+      return panel.traces.length > 1 ? `${panel.traces[t]} ${value}` : value;
+    });
     hoverOut.textContent =
       `${panel.name} at ${xs[clamped].toFixed(1)} ${DATA.x.unit} = ` +
-      `${fmt(frame[clamped])}${panel.unit ? " " + panel.unit : ""}`;
+      reads.join(",  ");
   }
 }
 
 // -------------------------------------------------------------------- render
 
 function render() {
+  const axis = currentAxis();
+  // Groups may differ in frame count, so the slider is re-bounded on every
+  // render rather than once at load. The index is preserved where it fits and
+  // clamped where it does not -- switching to a shorter run lands on its last
+  // frame instead of silently reading past the end.
+  frameSlider.max = axis.values.length - 1;
+  if (+frameSlider.value > +frameSlider.max) frameSlider.value = frameSlider.max;
   const i = +frameSlider.value;
   axisReadout.textContent =
-    `${DATA.axis.name} ${fmt(DATA.axis.values[i])} ${DATA.axis.unit}`;
+    `${axis.name} ${fmt(axis.values[i])} ${axis.unit}`;
 
   DATA.panels.forEach((panel, p) => {
     const ctx = contexts[p];
+    resizeCanvas(ctx);
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
     if (IS_PLANE) drawPlanePanel(ctx, panel, p, i);
     else drawLinePanel(ctx, panel, p, i);
   });
 }
 
+/**
+ * Match a canvas's backing store to the pixels it actually occupies, then scale
+ * the context so all drawing code keeps working in CANVAS_W x CANVAS_H units.
+ *
+ * Done per render rather than once at load because the size depends on the
+ * window: the grid re-flows from two columns to one, and the page can move
+ * between displays of different pixel ratios.
+ */
+function resizeCanvas(ctx) {
+  const canvas = ctx.canvas;
+  const cssW = canvas.clientWidth;
+  if (!cssW) return;                       // not laid out yet (display:none)
+  // Capped because the backing store costs width x height x 4 bytes per panel,
+  // and past ~2x the extra detail is beyond what a display resolves.
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const target = Math.round(cssW * dpr);
+  if (canvas.width !== target) {
+    canvas.width = target;
+    canvas.height = Math.round(target * CANVAS_H / CANVAS_W);
+  }
+  // setTransform, not scale: this runs every render and scale() would compound.
+  ctx.setTransform(canvas.width / CANVAS_W, 0, 0, canvas.width / CANVAS_W, 0, 0);
+}
+
+// Re-draw when the panel width changes: the grid re-flows at breakpoints, and
+// a stale backing store would be stretched until the next slider move.
+let resizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(render, 100);
+});
+
 function step(delta) {
-  const n = DATA.axis.values.length;
+  const n = currentAxis().values.length;
   frameSlider.value = (+frameSlider.value + delta + n) % n;
   render();
 }
@@ -504,18 +701,19 @@ function togglePlay() {
 DATA.groups.forEach((group, g) => {
   const option = document.createElement("option");
   option.value = g;
-  option.textContent = group.name || `channel ${g + 1}`;
+  option.textContent = group.name || `group ${g + 1}`;
   groupSelect.append(option);
 });
 // A one-channel page has nothing to pick between; hide the control rather than
 // showing a dropdown with a single entry.
 if (DATA.groups.length > 1) document.getElementById("groupPick").hidden = false;
 
-frameSlider.max = DATA.axis.values.length - 1;
 frameSlider.addEventListener("input", render);
-// The frame index deliberately survives a channel switch: holding the axis
-// still and swapping the channel under it is the comparison this page exists
-// to make.
+// The frame index deliberately survives a group switch: holding the slider
+// still and swapping what is under it is the comparison this page exists to
+// make. Where groups differ in length the index, not the axis value, is what
+// carries over -- render() clamps it and the readout always shows the real
+// value for the group now selected.
 groupSelect.addEventListener("change", render);
 scaleSelect.addEventListener("change", render);
 document.getElementById("playBtn").addEventListener("click", togglePlay);
