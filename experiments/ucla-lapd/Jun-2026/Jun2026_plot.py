@@ -672,7 +672,7 @@ def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     ], extent)
 
     title = run_title(ifn, run_num_of(ifn)) or f"{run_num_of(ifn)} xcorr"
-    fig.suptitle(f"{title}  —  {ch_a[0]}/{ch_a[1]} vs {ch_b[0]}/{ch_b[1]} "
+    fig.suptitle(f"{title}  —  {jxc.pair_label(ch_a, ch_b)} "
                  f"(f = {fbin_khz:.3g} kHz)",
                  fontsize=12, fontweight="bold")
     name = (f"{run_num_of(ifn)}-xcorr-plane-{ch_a[0]}{ch_a[1]}-{ch_b[0]}{ch_b[1]}"

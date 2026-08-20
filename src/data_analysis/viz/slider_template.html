@@ -108,6 +108,9 @@
   <p class="warning">__WARNING__</p>
 
   <div class="controls">
+    <label id="groupPick" hidden>Channel
+      <select id="group"></select>
+    </label>
     <button id="playBtn" type="button">▶ Play</button>
     <button id="prevBtn" type="button">‹</button>
     <button id="nextBtn" type="button">›</button>
@@ -147,13 +150,20 @@ const RULE = getComputedStyle(document.documentElement)
   .getPropertyValue("--rule").trim() || "#e3e2dc";
 
 const frameSlider = document.getElementById("frame");
+const groupSelect = document.getElementById("group");
 const scaleSelect = document.getElementById("scaleMode");
 const axisReadout = document.getElementById("axisReadout");
 const hoverOut = document.getElementById("hover");
 
-// Cache of global (all-frame) limits per field, computed once on demand.
+// Cache of global (all-frame) limits, keyed "<group>:<panel>" -- limits belong
+// to one channel's data, so they cannot be shared across the dropdown.
 const globalLimits = new Map();
 let playTimer = null;
+
+/** Frame cube of panel `p` for the channel currently selected. */
+function cubeFor(p) {
+  return DATA.groups[+groupSelect.value].frames[p];
+}
 
 // ---------------------------------------------------------------- utilities
 
@@ -194,34 +204,39 @@ function finishExtent(acc) {
 }
 
 /**
- * Colour limits for a field at frame index `i`.
- * A field carrying vmin/vmax is on a fixed physical scale (coherence 0..1,
- * phase ±180) and ignores the toggle; otherwise the toggle chooses between
- * this frame's range and the range across all frames.
+ * Colour limits for panel `p` at frame index `i`.
+ * A panel carrying vmin/vmax is on a fixed physical scale (coherence 0..1,
+ * phase ±180) and ignores the toggle -- and, being fixed, it is also the one
+ * case where two channels stay directly comparable across a switch. Otherwise
+ * the toggle chooses between this frame's range and the range across all
+ * frames, both taken within the selected channel.
  */
-function limitsFor(field, fieldIndex, i) {
-  if (field.vmin !== null && field.vmax !== null) return [field.vmin, field.vmax];
+function limitsFor(panel, p, i) {
+  if (panel.vmin !== null && panel.vmax !== null) return [panel.vmin, panel.vmax];
+  const cube = cubeFor(p);
   if (scaleSelect.value === "frame") {
-    return finishExtent(foldExtent(field.frames[i], [Infinity, -Infinity]));
+    return finishExtent(foldExtent(cube[i], [Infinity, -Infinity]));
   }
-  if (!globalLimits.has(fieldIndex)) {
+  const key = `${groupSelect.value}:${p}`;
+  if (!globalLimits.has(key)) {
     const acc = [Infinity, -Infinity];
-    for (const frame of field.frames) foldExtent(frame, acc);
-    globalLimits.set(fieldIndex, finishExtent(acc));
+    for (const frame of cube) foldExtent(frame, acc);
+    globalLimits.set(key, finishExtent(acc));
   }
-  return globalLimits.get(fieldIndex);
+  return globalLimits.get(key);
 }
 
-// Each field's LUT as ready-made CSS colors, built once. The plane raster sets
+// Each panel's LUT as ready-made CSS colors, built once. The plane raster sets
 // fillStyle per cell on every drag, so formatting the string there would churn
-// thousands of short-lived strings per frame.
+// thousands of short-lived strings per frame. Panels are shared by every
+// channel, so switching the dropdown reuses these rather than rebuilding them.
 const lutStrings = new Map();
 
-function lutColors(field, fieldIndex) {
-  if (!lutStrings.has(fieldIndex)) {
-    lutStrings.set(fieldIndex, field.lut.map(c => `rgb(${c[0]},${c[1]},${c[2]})`));
+function lutColors(panel, p) {
+  if (!lutStrings.has(p)) {
+    lutStrings.set(p, panel.lut.map(c => `rgb(${c[0]},${c[1]},${c[2]})`));
   }
-  return lutStrings.get(fieldIndex);
+  return lutStrings.get(p);
 }
 
 /** Look a normalized value up in a prepared color table. */
@@ -335,12 +350,12 @@ function cellAt(mx, my) {
   return { ix, iy };
 }
 
-/** A plane field: one filled rectangle per grid cell, NaN cells grey. */
-function drawPlanePanel(ctx, field, fieldIndex, i) {
-  const frame = field.frames[i];
-  const [lo, hi] = limitsFor(field, fieldIndex, i);
+/** A plane panel: one filled rectangle per grid cell, NaN cells grey. */
+function drawPlanePanel(ctx, panel, p, i) {
+  const frame = cubeFor(p)[i];
+  const [lo, hi] = limitsFor(panel, p, i);
   const span = hi - lo || 1;
-  const colors = lutColors(field, fieldIndex);
+  const colors = lutColors(panel, p);
   const nx = DATA.x.values.length;
   const ny = DATA.y.values.length;
   const { cw, ch } = cellSize();
@@ -364,16 +379,16 @@ function drawPlanePanel(ctx, field, fieldIndex, i) {
   drawColorbar(ctx, colors, lo, hi);
 }
 
-/** A line field: a profile polyline, with gaps where the data is NaN. */
-function drawLinePanel(ctx, field, fieldIndex, i) {
-  const frame = field.frames[i];
-  const [lo, hi] = limitsFor(field, fieldIndex, i);
+/** A line panel: a profile polyline, with gaps where the data is NaN. */
+function drawLinePanel(ctx, panel, p, i) {
+  const frame = cubeFor(p)[i];
+  const [lo, hi] = limitsFor(panel, p, i);
   const span = hi - lo || 1;
   const xs = DATA.x.values;
   const toX = j => PAD.left + (xs.length === 1 ? PLOT_W / 2 : j * PLOT_W / (xs.length - 1));
   const toY = v => PAD.top + PLOT_H - (v - lo) * PLOT_H / span;
 
-  ctx.strokeStyle = lutColor(lutColors(field, fieldIndex), 0.62);
+  ctx.strokeStyle = lutColor(lutColors(panel, p), 0.62);
   ctx.lineWidth = 2;
   ctx.beginPath();
   let pen = false;
@@ -394,21 +409,24 @@ function drawLinePanel(ctx, field, fieldIndex, i) {
     ticksFor("line-x", xs, 7, toX),
     `${DATA.x.label} [${DATA.x.unit}]`,
     yTicks,
-    field.unit ? `${field.name} [${field.unit}]` : field.name);
+    panel.unit ? `${panel.name} [${panel.unit}]` : panel.name);
 }
 
 // ------------------------------------------------------------ panel assembly
 
+// Panels are the same for every channel (validation enforces it), so the DOM is
+// built once at load. Switching channels only changes which cube is drawn into
+// these canvases -- no teardown, no re-created listeners, no layout reflow.
 const panelHost = document.getElementById("panels");
-const contexts = DATA.fields.map((field, fieldIndex) => {
+const contexts = DATA.panels.map((panel, p) => {
   const figure = document.createElement("figure");
   const caption = document.createElement("figcaption");
-  caption.textContent = field.unit ? `${field.name} [${field.unit}]` : field.name;
+  caption.textContent = panel.unit ? `${panel.name} [${panel.unit}]` : panel.name;
 
   const canvas = document.createElement("canvas");
   canvas.width = CANVAS_W;
   canvas.height = CANVAS_H;
-  canvas.addEventListener("mousemove", e => reportHover(e, canvas, field, fieldIndex));
+  canvas.addEventListener("mousemove", e => reportHover(e, canvas, panel, p));
   canvas.addEventListener("mouseleave", () => { hoverOut.textContent = ""; });
 
   figure.append(caption, canvas);
@@ -417,7 +435,7 @@ const contexts = DATA.fields.map((field, fieldIndex) => {
 });
 
 /** Report the data value under the cursor, in data coordinates. */
-function reportHover(event, canvas, field, fieldIndex) {
+function reportHover(event, canvas, panel, p) {
   const rect = canvas.getBoundingClientRect();
   const mx = (event.clientX - rect.left) * CANVAS_W / rect.width;
   const my = (event.clientY - rect.top) * CANVAS_H / rect.height;
@@ -428,7 +446,7 @@ function reportHover(event, canvas, field, fieldIndex) {
   }
 
   const i = +frameSlider.value;
-  const frame = field.frames[i];
+  const frame = cubeFor(p)[i];
   const xs = DATA.x.values;
 
   if (IS_PLANE) {
@@ -438,15 +456,15 @@ function reportHover(event, canvas, field, fieldIndex) {
     // Each coordinate carries its own unit: the schema allows x and y to
     // differ, so labelling both with x's would misreport the y position.
     hoverOut.textContent =
-      `${field.name} at (${xs[ix].toFixed(1)} ${DATA.x.unit}, ` +
+      `${panel.name} at (${xs[ix].toFixed(1)} ${DATA.x.unit}, ` +
       `${DATA.y.values[iy].toFixed(1)} ${DATA.y.unit}) ` +
-      `= ${fmt(frame[iy][ix])}${field.unit ? " " + field.unit : ""}`;
+      `= ${fmt(frame[iy][ix])}${panel.unit ? " " + panel.unit : ""}`;
   } else {
     const j = Math.round((mx - PAD.left) / PLOT_W * (xs.length - 1));
     const clamped = Math.max(0, Math.min(xs.length - 1, j));
     hoverOut.textContent =
-      `${field.name} at ${xs[clamped].toFixed(1)} ${DATA.x.unit} = ` +
-      `${fmt(frame[clamped])}${field.unit ? " " + field.unit : ""}`;
+      `${panel.name} at ${xs[clamped].toFixed(1)} ${DATA.x.unit} = ` +
+      `${fmt(frame[clamped])}${panel.unit ? " " + panel.unit : ""}`;
   }
 }
 
@@ -457,11 +475,11 @@ function render() {
   axisReadout.textContent =
     `${DATA.axis.name} ${fmt(DATA.axis.values[i])} ${DATA.axis.unit}`;
 
-  DATA.fields.forEach((field, fieldIndex) => {
-    const ctx = contexts[fieldIndex];
+  DATA.panels.forEach((panel, p) => {
+    const ctx = contexts[p];
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-    if (IS_PLANE) drawPlanePanel(ctx, field, fieldIndex, i);
-    else drawLinePanel(ctx, field, fieldIndex, i);
+    if (IS_PLANE) drawPlanePanel(ctx, panel, p, i);
+    else drawLinePanel(ctx, panel, p, i);
   });
 }
 
@@ -483,8 +501,22 @@ function togglePlay() {
   }
 }
 
+DATA.groups.forEach((group, g) => {
+  const option = document.createElement("option");
+  option.value = g;
+  option.textContent = group.name || `channel ${g + 1}`;
+  groupSelect.append(option);
+});
+// A one-channel page has nothing to pick between; hide the control rather than
+// showing a dropdown with a single entry.
+if (DATA.groups.length > 1) document.getElementById("groupPick").hidden = false;
+
 frameSlider.max = DATA.axis.values.length - 1;
 frameSlider.addEventListener("input", render);
+// The frame index deliberately survives a channel switch: holding the axis
+// still and swapping the channel under it is the comparison this page exists
+// to make.
+groupSelect.addEventListener("change", render);
 scaleSelect.addEventListener("change", render);
 document.getElementById("playBtn").addEventListener("click", togglePlay);
 document.getElementById("prevBtn").addEventListener("click", () => step(-1));

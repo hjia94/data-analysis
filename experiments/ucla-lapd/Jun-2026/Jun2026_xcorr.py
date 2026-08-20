@@ -220,16 +220,37 @@ def _pair_from_key(key):
     return tuple(tuple(part.rsplit("-", 1)) for part in key.split("__"))
 
 
+def pair_label(ch_a, ch_b):
+    """A channel pair as it reads to a human: ``'bdotscope/C1 vs lpscope/C3'``.
+
+    Beside :func:`_pair_key` because a pair has exactly two written forms -- the
+    npz key and this one -- and keeping them together is what stops a figure
+    title, a slider dropdown, and a stored key from drifting into three
+    different spellings of the same pair.
+    """
+    return f"{ch_a[0]}/{ch_a[1]} vs {ch_b[0]}/{ch_b[1]}"
+
+
 def stored_pairs(npz_path):
     """The channel-pair keys a run's xcorr npz actually holds.
 
     Reads the ``<pair>__gamma2`` entries :func:`batch_xcorr` writes, so callers
     can enumerate what was batched instead of guessing pair names.  Returns the
-    sorted key list; pass one through :func:`_pair_from_key` for the tuples.
+    sorted key list; most callers want :func:`stored_pair_tuples` instead.
     """
     with np.load(npz_path) as d:
         return sorted(k.removesuffix("__gamma2") for k in d.files
                       if k.endswith("__gamma2"))
+
+
+def stored_pair_tuples(npz_path):
+    """:func:`stored_pairs` decoded to ``[(ch_a, ch_b), ...]`` tuples.
+
+    What a caller looping over a run's pairs actually wants, so the key
+    encoding stays private to this module rather than every caller reaching
+    for :func:`_pair_from_key` itself.
+    """
+    return [_pair_from_key(key) for key in stored_pairs(npz_path)]
 
 
 def _position_xy(pos_array, npos, nshot):

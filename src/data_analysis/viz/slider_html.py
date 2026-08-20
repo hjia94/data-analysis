@@ -25,6 +25,13 @@ never share a generic dimension name. One bundle carries exactly one axis.
 one geometry and that one axis. Each field draws as its own panel, and every
 panel moves together on the single slider.
 
+A bundle may carry several **groups** of those fields -- one per channel, probe
+pair, or tip -- selected by a dropdown on the page. A group is *not* a fourth
+dimension: every group shares the one geometry and the one axis, and differs
+only in which physical signal was measured. That is what makes them comparable
+by switching rather than by opening two files, and it is why the schema keeps
+one shared ``axis`` rather than letting each group carry its own.
+
 Schema v1
 --------------------------------------------------------------------------
 ::
@@ -45,6 +52,11 @@ Schema v1
              "cmap": "viridis",             # any matplotlib colormap name
              "vmin": 0.0, "vmax": 1.0},     # both None -> page scale toggle
         ],
+        # ... OR, for a multi-channel page, "groups" instead of "fields":
+        "groups": [                         # order = dropdown order
+            {"name": "bdotscope-C1 vs lpscope-C3",   # dropdown entry
+             "fields": [...]},              # same field list as above
+        ],
         "provenance": {"source": str, "params": {...}},   # rendered as a banner
         "warning": str | None,              # optional caveat banner
     }
@@ -54,6 +66,16 @@ Rules, all enforced by :func:`validate_bundle`:
 * Exactly one axis. Every field's ``frames.shape[0]`` equals ``axis.values.size``.
 * Every field shares the geometry: ``(n_axis, ny, nx)`` for a plane,
   ``(n_axis, nx)`` for a line, matching ``x`` (and ``y``).
+* ``fields`` and ``groups`` are alternatives -- exactly one of the two. A bare
+  ``fields`` list is the single-group case, and is normalized to one unnamed
+  group internally, so the page has one code path rather than two.
+* Groups need matching field *layouts*: same count, same names, same units, in
+  the same order. This is structural, not stylistic: the panel row (names,
+  units, colormaps, fixed scales) is serialized **once** for the whole page and
+  the page builds its canvases from it, so a group whose layout differed would
+  be drawn under another group's captions and colorbars. Fields carrying a
+  fixed ``vmin``/``vmax`` are additionally comparable across a switch;
+  autoscaled ones are rescaled per group and are not.
 * ``vmin``/``vmax`` both set -> that fixed physical scale is used (coherence
   ``0..1``, phase ``-180..180``). Both ``None`` -> the page's global/per-frame
   scale toggle applies to that field.
@@ -109,6 +131,20 @@ _GEOMETRIES = ("plane", "line")
 #  Validation -- every error names the offending key
 # =========================================================================== #
 
+def bundle_groups(bundle):
+    """The bundle's groups as a ``[{"name", "fields"}, ...]`` list.
+
+    One accessor for both spellings: a bundle carrying a bare ``fields`` list is
+    the single-group case and comes back as one unnamed group, so validation,
+    serialization, and the round-trip all walk the same structure instead of
+    branching on which key the adapter happened to use.
+    """
+    groups = bundle.get("groups")
+    if groups is not None:
+        return list(groups)
+    return [{"name": "", "fields": bundle.get("fields")}]
+
+
 def validate_bundle(bundle):
     """Check a bundle against schema v1; raise ``ValueError`` naming the key.
 
@@ -160,32 +196,70 @@ def validate_bundle(bundle):
     want = ((n_axis, sizes["y"], sizes["x"]) if geometry == "plane"
             else (n_axis, sizes["x"]))
 
-    fields = bundle.get("fields")
-    _require(isinstance(fields, (list, tuple)) and len(fields) > 0,
-             "'fields' must be a non-empty list")
-    for i, field in enumerate(fields):
-        where = f"fields[{i}]"
-        _require(isinstance(field, dict), f"{where} must be a dict")
-        for k in ("name", "unit", "frames", "cmap"):
-            _require(k in field, f"{where} is missing '{k}'")
-        # np.shape reads the shape without materializing/copying the cube.
-        shape = np.shape(field["frames"])
-        _require(shape == want,
-                 f"{where} ('{field['name']}') frames have shape {shape}, "
-                 f"expected {want} = (n_axis, "
-                 + ("ny, nx)" if geometry == "plane" else "nx)"))
-        # A colormap typo is the likeliest adapter mistake; catch it here rather
-        # than as a KeyError from deep inside rendering.
-        _require(field["cmap"] in matplotlib.colormaps,
-                 f"{where} ('{field['name']}') has unknown cmap "
-                 f"{field['cmap']!r}; see matplotlib.colormaps")
-        vmin, vmax = field.get("vmin"), field.get("vmax")
-        _require((vmin is None) == (vmax is None),
-                 f"{where} ('{field['name']}') must set both 'vmin' and 'vmax' "
-                 "or neither (neither -> the page's scale toggle)")
-        _require(vmin is None or vmin < vmax,
-                 f"{where} ('{field['name']}') needs vmin < vmax, "
-                 f"got vmin={vmin}, vmax={vmax}")
+    _require(("fields" in bundle) != ("groups" in bundle),
+             "set exactly one of 'fields' (single channel) or 'groups' "
+             "(several channels behind a dropdown), not both and not neither")
+    if "groups" in bundle:
+        _require(isinstance(bundle["groups"], (list, tuple)) and bundle["groups"],
+                 "'groups' must be a non-empty list of {name, fields}")
+
+    grouped = "groups" in bundle
+    groups = bundle_groups(bundle)
+    layout = None
+    for g, group in enumerate(groups):
+        # Errors name the key the adapter actually wrote, so a single-channel
+        # bundle is not told about a 'groups' list it never set.
+        stem = f"groups[{g}]" if grouped else "fields"
+        prefix = f"{stem}.fields" if grouped else stem
+        _require(isinstance(group, dict), f"{stem} must be a dict {{name, fields}}")
+        # A name labels a dropdown entry, so it is required exactly when there
+        # is a dropdown. A lone group has nothing to label -- and requiring one
+        # there would reject a single-channel bundle read back from disk, where
+        # save_bundle writes the grouped spelling regardless.
+        if len(groups) > 1:
+            _require(group.get("name"), f"{stem} is missing a non-empty 'name' "
+                                        "(it labels the dropdown entry)")
+
+        fields = group.get("fields")
+        _require(isinstance(fields, (list, tuple)) and len(fields) > 0,
+                 f"{stem}: 'fields' must be a non-empty list")
+        for i, field in enumerate(fields):
+            where = f"{prefix}[{i}]"
+            _require(isinstance(field, dict), f"{where} must be a dict")
+            for k in ("name", "unit", "frames", "cmap"):
+                _require(k in field, f"{where} is missing '{k}'")
+            # np.shape reads the shape without materializing/copying the cube.
+            shape = np.shape(field["frames"])
+            _require(shape == want,
+                     f"{where} ('{field['name']}') frames have shape {shape}, "
+                     f"expected {want} = (n_axis, "
+                     + ("ny, nx)" if geometry == "plane" else "nx)"))
+            # A colormap typo is the likeliest adapter mistake; catch it here rather
+            # than as a KeyError from deep inside rendering.
+            _require(field["cmap"] in matplotlib.colormaps,
+                     f"{where} ('{field['name']}') has unknown cmap "
+                     f"{field['cmap']!r}; see matplotlib.colormaps")
+            vmin, vmax = field.get("vmin"), field.get("vmax")
+            _require((vmin is None) == (vmax is None),
+                     f"{where} ('{field['name']}') must set both 'vmin' and 'vmax' "
+                     "or neither (neither -> the page's scale toggle)")
+            _require(vmin is None or vmin < vmax,
+                     f"{where} ('{field['name']}') needs vmin < vmax, "
+                     f"got vmin={vmin}, vmax={vmax}")
+
+        # _payload emits the panel row once, from the first group, and the
+        # page builds its canvases from that row. A group whose layout differed
+        # would therefore render under another group's captions and colorbars,
+        # so the layouts must agree.
+        signature = [(f["name"], f.get("unit", "")) for f in fields]
+        if layout is None:
+            layout, layout_name = signature, group.get("name")
+        else:
+            _require(signature == layout,
+                     f"{stem} ('{group.get('name')}') has fields {signature}, "
+                     f"but '{layout_name}' has {layout}; every group must carry "
+                     "the same fields, in the same order, so the dropdown swaps "
+                     "data under fixed panels")
 
     return bundle
 
@@ -221,6 +295,36 @@ def _jsonable(value):
     return value
 
 
+#: Decimal places kept for floats in the page payload (the ``.npz`` beside it
+#: keeps full precision). Frames are drawn into a 256-step colormap and printed
+#: by the hover readout at far coarser resolution than a float64 carries, so
+#: full ``repr`` spends ~19 characters per cell encoding differences no reader
+#: can see. At 4 dp the worst-case error is 5e-5 -- 1/80th of one colormap step
+#: on a unit-span field, and below the last printed digit -- while a run-26
+#: payload drops 2.4x (0.38 -> 0.16 MB). Axis and coordinate values are rounded
+#: on the same terms: they are shown as tick and readout text, which is already
+#: formatted to 3 significant figures, and they are ~0.3% of the payload either
+#: way, so exempting them would buy precision nothing downstream reads.
+PAYLOAD_DECIMALS = 4
+
+
+def _round_floats(value):
+    """``value`` with every float rounded to :data:`PAYLOAD_DECIMALS`.
+
+    Applied to the whole payload rather than to the frame cubes alone, so there
+    is one precision rule to state instead of a per-key exemption list. Kept
+    apart from :func:`_jsonable`, which also serializes ``save_bundle``'s spine
+    -- the bundle is the full-precision copy and must not be rounded.
+    """
+    if isinstance(value, float):
+        return round(value, PAYLOAD_DECIMALS)
+    if isinstance(value, dict):
+        return {k: _round_floats(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_round_floats(v) for v in value]
+    return value
+
+
 def _colormap_lut(name, n=256):
     """``name`` as an ``n x 3`` uint8 RGB lookup table, as nested lists.
 
@@ -232,14 +336,30 @@ def _colormap_lut(name, n=256):
 
 
 def _payload(bundle):
-    """The JSON object the page reads, built from a validated bundle."""
-    fields = []
-    for field in bundle["fields"]:
+    """The JSON object the page reads, built from a validated bundle.
+
+    Panel *appearance* (name, unit, colormap, fixed scale) is shared by every
+    group and emitted once as ``panels``; only the frame cubes vary per group.
+    Emitting a 256x3 colormap LUT per channel instead would repeat ~6.6 kB that
+    carries no new information -- about 3.6% of a channel's cost at run-26 size,
+    where the frame cubes dominate. The point is less the bytes than that the
+    page has one panel row to build its canvases from, whichever channel is
+    selected.
+
+    Every float here is rounded to :data:`PAYLOAD_DECIMALS`; the ``.npz`` beside
+    the page keeps full precision, so the bundle -- not the page -- is what to
+    re-read for anything quantitative.
+    """
+    groups = bundle_groups(bundle)
+
+    # Validation has already established every group shares this layout, so the
+    # first group defines the panels for all of them.
+    panels = []
+    for field in groups[0]["fields"]:
         vmin, vmax = field.get("vmin"), field.get("vmax")
-        fields.append({
+        panels.append({
             "name": field["name"],
             "unit": field.get("unit", ""),
-            "frames": _jsonable(np.asarray(field["frames"], float)),
             "lut": _colormap_lut(field["cmap"]),
             # None/None tells the page this field follows the scale toggle.
             "vmin": None if vmin is None else float(vmin),
@@ -252,11 +372,20 @@ def _payload(bundle):
                  "unit": bundle["axis"]["unit"],
                  "values": _jsonable(np.asarray(bundle["axis"]["values"], float))},
         "x": _jsonable(bundle["x"]),
-        "fields": fields,
+        "panels": panels,
+        "groups": [
+            {"name": group.get("name", ""),
+             "frames": [_jsonable(np.round(np.asarray(f["frames"], float),
+                                          PAYLOAD_DECIMALS))
+                        for f in group["fields"]]}
+            for group in groups
+        ],
     }
     if bundle["geometry"] == "plane":
         payload["y"] = _jsonable(bundle["y"])
-    return payload
+    # Frame cubes were rounded above as arrays; this catches the axis, the
+    # coordinates and the panel scales, which are few enough to walk.
+    return _round_floats(payload)
 
 
 def _script_json(obj):
@@ -302,15 +431,25 @@ def save_bundle(bundle, path):
         arrays["__y_values__"] = np.asarray(bundle["y"]["values"], float)
 
     spine = {k: v for k, v in bundle.items()
-             if k not in ("axis", "x", "y", "fields")}
+             if k not in ("axis", "x", "y", "fields", "groups")}
     spine["axis"] = {"name": bundle["axis"]["name"], "unit": bundle["axis"]["unit"]}
     spine["x"] = {k: v for k, v in bundle["x"].items() if k != "values"}
     if bundle["geometry"] == "plane":
         spine["y"] = {k: v for k, v in bundle["y"].items() if k != "values"}
-    spine["fields"] = []
-    for i, field in enumerate(bundle["fields"]):
-        arrays[f"__frames_{i}__"] = np.asarray(field["frames"], float)
-        spine["fields"].append({k: v for k, v in field.items() if k != "frames"})
+
+    # Frame cubes are keyed by (group, field) so a multi-channel bundle round
+    # trips as one file. Everything is written in the grouped spelling, single
+    # channel included: back-compat is a *read* requirement (npz files written
+    # before groups existed are on disk), and honouring it on write too would
+    # mean two on-disk formats kept in sync by hand. load_bundle carries the
+    # one legacy branch instead.
+    spine["groups"] = []
+    for g, group in enumerate(bundle_groups(bundle)):
+        entry = {"name": group.get("name", ""), "fields": []}
+        for i, field in enumerate(group["fields"]):
+            arrays[f"__frames_{g}_{i}__"] = np.asarray(field["frames"], float)
+            entry["fields"].append({k: v for k, v in field.items() if k != "frames"})
+        spine["groups"].append(entry)
 
     # Through _jsonable first: adapters routinely put values read back from an
     # npz into 'provenance', and np.int64 is not JSON-serializable (np.float64
@@ -321,15 +460,26 @@ def save_bundle(bundle, path):
 
 
 def load_bundle(path):
-    """Read back a bundle written by :func:`save_bundle`."""
+    """Read back a bundle written by :func:`save_bundle`.
+
+    Also reads the pre-groups layout (a ``fields`` spine with ``__frames_{i}__``
+    keys), which existing files on disk still use -- the only place the old
+    format is understood, so the rest of the module sees one shape.
+    """
     with np.load(path, allow_pickle=False) as data:
         bundle = json.loads(str(data["__spine__"]))
         bundle["axis"]["values"] = data["__axis_values__"]
         bundle["x"]["values"] = data["__x_values__"]
         if bundle["geometry"] == "plane":
             bundle["y"]["values"] = data["__y_values__"]
-        for i, field in enumerate(bundle["fields"]):
-            field["frames"] = data[f"__frames_{i}__"]
+
+        if "groups" not in bundle:                      # pre-groups npz
+            for i, field in enumerate(bundle["fields"]):
+                field["frames"] = data[f"__frames_{i}__"]
+        else:
+            for g, group in enumerate(bundle["groups"]):
+                for i, field in enumerate(group["fields"]):
+                    field["frames"] = data[f"__frames_{g}_{i}__"]
     return bundle
 
 
@@ -378,8 +528,11 @@ def write_slider_html(bundle, out_path, save_bundle_npz=True):
               f"(> {ARTIFACT_MAX_MB:.0f} MB) "
               "-- too large to publish as an Artifact; narrow the axis range "
               "or coarsen the grid.")
-    print(f"Slider page: {out_path}  ({size_mb:.2f} MB, "
-          f"{len(bundle['fields'])} field(s) x {np.size(bundle['axis']['values'])} frames)")
+    groups = bundle_groups(bundle)
+    channels = f"{len(groups)} channel(s) x " if len(groups) > 1 else ""
+    print(f"Slider page: {out_path}  ({size_mb:.2f} MB, {channels}"
+          f"{len(groups[0]['fields'])} field(s) x "
+          f"{np.size(bundle['axis']['values'])} frames)")
 
     if save_bundle_npz:
         npz_path = save_bundle(bundle, out_path.with_name(out_path.stem + "-bundle.npz"))
