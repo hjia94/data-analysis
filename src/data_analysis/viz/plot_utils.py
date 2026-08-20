@@ -552,14 +552,18 @@ def finalize_figure(fig, save_fig=None, show=False, compact_axes=None, dpi=150):
         plt.close(fig)
 
 
-def fig_path(name, subdir):
+def fig_path(name, subdir, ext=".png"):
     """Centralized figure location under the repo-external output root.
 
     Routes through :func:`data_analysis.io.paths.output_path`, so figures land in
     ``$DATA_ANALYSIS_OUTPUT/figures/<subdir>/`` (default ``~/data-analysis-output``)
     rather than next to the raw data or in the repo.  ``name`` is the filename
-    stem already including any run/tip/figure tags (e.g. ``"02-tipR-line"``); a
-    ``.png`` extension is added if absent.
+    stem already including any run/tip/figure tags (e.g. ``"02-tipR-line"``); the
+    ``ext`` extension is added if absent.
+
+    ``ext`` covers the non-PNG renders that belong in the same place -- notably
+    the interactive ``.html`` slider pages (``data_analysis.viz.slider_html``),
+    which are figures too, just scrubbable ones.
 
     Drivers follow the convention: ``save_fig is True`` -> ``fig_path(name, subdir)``;
     a string -> that explicit path; anything falsey -> don't save.
@@ -568,7 +572,7 @@ def fig_path(name, subdir):
     from data_analysis.io.paths import output_path
 
     if not os.path.splitext(name)[1]:
-        name += ".png"
+        name += ext
     return output_path("figures", subdir, name)
 
 
@@ -644,12 +648,9 @@ def grid_by_position(pos_x, pos_y, values):
     ``(xmin, xmax, ymin, ymax)`` in cm.  Positions are snapped to the sorted unique
     x / y axes, so an irregular visiting order still lands on the right cell.
     """
-    xs = np.unique(np.round(pos_x, 3))
-    ys = np.unique(np.round(pos_y, 3))
+    xs, ys, rx, ry = position_axes(pos_x, pos_y)
     grid = np.full((ys.size, xs.size), np.nan)
-    ix = np.searchsorted(xs, np.round(pos_x, 3))
-    iy = np.searchsorted(ys, np.round(pos_y, 3))
-    grid[iy, ix] = values
+    grid[np.searchsorted(ys, ry), np.searchsorted(xs, rx)] = values
 
     # extent spans cell centers +/- half a step so pixels are centered on positions.
     def _halfspan(a):
@@ -658,6 +659,63 @@ def grid_by_position(pos_x, pos_y, values):
     xmin, xmax = _halfspan(xs)
     ymin, ymax = _halfspan(ys)
     return grid, (xmin, xmax, ymin, ymax)
+
+
+#: Decimal places positions are snapped to before they are matched to a grid
+#: cell, i.e. the tolerance that decides "did the probe revisit this column".
+#: One definition, used by every gridding helper below.
+_POSITION_DECIMALS = 3
+
+
+def position_axes(pos_x, pos_y):
+    """The sorted unique (x, y) axes a probe scan visited, in cm.
+
+    The layout rule :func:`grid_by_position` and :func:`grid_frames` snap to,
+    exposed on its own: all three share this one definition of "which grid did
+    these positions form", so the snap tolerance is stated once rather than
+    re-derived by every caller that needs the axis vectors
+    (``grid_by_position`` returns ``imshow`` cell *edges*, which are not the
+    same thing).
+
+    Returns ``(xs, ys, rx, ry)``: the two axis vectors, plus the snapped
+    positions themselves -- callers that go on to ``searchsorted`` positions
+    into those axes need the same rounding applied, and rounding a second time
+    at the call site is how the two drift apart.
+    """
+    rx = np.round(pos_x, _POSITION_DECIMALS)
+    ry = np.round(pos_y, _POSITION_DECIMALS)
+    return np.unique(rx), np.unique(ry), rx, ry
+
+
+def grid_frames(pos_x, pos_y, values):
+    """Scatter per-position spectra/time-series onto a stack of (y, x) grids.
+
+    The many-frame counterpart of :func:`grid_by_position`: ``values`` is
+    ``(npos, nframe)`` -- one column per frame of a scan axis (frequency bins,
+    sweep times, ...) -- and the result is ``(nframe, ny, nx)`` laid out for
+    ``imshow(origin="lower")``, NaN at any cell the probe never visited.
+
+    Every position-scan diagnostic in the repo produces ``(npos, nframe)``, so
+    this is the shared bridge from "one spectrum per position" to the frame cube
+    an animation or an HTML slider page
+    (:mod:`data_analysis.viz.slider_html`) needs.
+
+    The whole cube is scattered in one vectorized assignment, so the unique/
+    searchsorted layout work happens once rather than once per frame.
+
+    Returns ``(frames, xs, ys)`` with ``xs`` / ``ys`` the axes from
+    :func:`position_axes` (the cell *centers*, in cm).
+    """
+    values = np.asarray(values)
+    if values.ndim != 2:
+        raise ValueError(
+            f"grid_frames expects values with shape (npos, nframe), got shape "
+            f"{values.shape}. A single frame must be passed as (npos, 1) -- "
+            "e.g. values[:, None] -- not (npos,).")
+    xs, ys, rx, ry = position_axes(pos_x, pos_y)
+    frames = np.full((values.shape[1], ys.size, xs.size), np.nan)
+    frames[:, np.searchsorted(ys, ry), np.searchsorted(xs, rx)] = values.T
+    return frames, xs, ys
 
 
 class Player:

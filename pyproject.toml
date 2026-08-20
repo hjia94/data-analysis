@@ -37,3 +37,8 @@ version = { attr = "data_analysis.__version__" }
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["data_analysis*"]
+
+# The slider renderer loads its HTML template from beside the module at runtime,
+# so the template must ship with the package (it is not importable Python).
+[tool.setuptools.package-data]
+data_analysis = ["viz/*.html"]

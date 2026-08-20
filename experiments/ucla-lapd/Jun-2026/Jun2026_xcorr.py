@@ -208,6 +208,30 @@ def _pair_key(ch_a, ch_b):
     return f"{ch_a[0]}-{ch_a[1]}__{ch_b[0]}-{ch_b[1]}"
 
 
+def _pair_from_key(key):
+    """Inverse of :func:`_pair_key`: ``'lpscope-C2__lpscope-C3'`` -> two tuples.
+
+    Kept beside ``_pair_key`` so the encoding and its decoding cannot drift
+    apart.  Splitting on the *last* ``-`` keeps the scope name whole, since a
+    scope is the half that realistically carries one (``'bdot-scope'``); the
+    channel names it pairs with are short scope-assigned tags (``C1``..``C4``).
+    A channel containing ``-`` is the one case this encoding cannot represent.
+    """
+    return tuple(tuple(part.rsplit("-", 1)) for part in key.split("__"))
+
+
+def stored_pairs(npz_path):
+    """The channel-pair keys a run's xcorr npz actually holds.
+
+    Reads the ``<pair>__gamma2`` entries :func:`batch_xcorr` writes, so callers
+    can enumerate what was batched instead of guessing pair names.  Returns the
+    sorted key list; pass one through :func:`_pair_from_key` for the tuples.
+    """
+    with np.load(npz_path) as d:
+        return sorted(k.removesuffix("__gamma2") for k in d.files
+                      if k.endswith("__gamma2"))
+
+
 def _position_xy(pos_array, npos, nshot):
     """(x, y) of each of the ``npos`` positions: the first shot of each block.
 

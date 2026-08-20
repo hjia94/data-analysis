@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  :root {
+    --paper: #ffffff;
+    --ink: #1a1f26;
+    --muted: #6b7480;
+    --rule: #e3e2dc;
+    --panel: #fafaf7;
+    --warn-edge: #c8922e;
+    --warn-bg: #fdf6e7;
+    --nan: #b9bcc0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #14181d;
+      --ink: #e8e9e6;
+      --muted: #98a0ab;
+      --rule: #2b323b;
+      --panel: #1b2129;
+      --warn-edge: #c1a05e;
+      --warn-bg: #2a2418;
+      --nan: #4a5057;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 1.5rem 1.25rem 3rem;
+    background: var(--paper);
+    color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 1.3rem; margin: 0 0 0.4rem; font-weight: 600; }
+  .banner { color: var(--muted); font-size: 0.82rem; margin-bottom: 0.8rem; }
+  .warning {
+    border-left: 4px solid var(--warn-edge);
+    background: var(--warn-bg);
+    padding: 0.6rem 0.9rem;
+    margin: 0 0 1rem;
+    font-size: 0.88rem;
+    border-radius: 0 4px 4px 0;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem 1rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    margin-bottom: 1rem;
+  }
+  .controls label { font-size: 0.85rem; color: var(--muted); }
+  button, select {
+    font: inherit;
+    font-size: 0.85rem;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    padding: 0.22rem 0.6rem;
+    cursor: pointer;
+  }
+  button:hover, select:hover { border-color: var(--muted); }
+  #frame { flex: 1 1 240px; min-width: 180px; accent-color: #2e7d8f; }
+  #axisReadout {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    min-width: 11ch;
+  }
+  #panels { display: flex; flex-wrap: wrap; gap: 1rem; }
+  figure {
+    margin: 0;
+    flex: 1 1 380px;
+    min-width: 300px;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 0.6rem;
+  }
+  figcaption {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+    text-align: center;
+  }
+  canvas { width: 100%; height: auto; display: block; }
+  #hover {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-top: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    min-height: 1.4em;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>__TITLE__</h1>
+  <p class="banner">__BANNER__</p>
+  <p class="warning">__WARNING__</p>
+
+  <div class="controls">
+    <button id="playBtn" type="button">▶ Play</button>
+    <button id="prevBtn" type="button">‹</button>
+    <button id="nextBtn" type="button">›</button>
+    <input id="frame" type="range" min="0" value="0" step="1">
+    <span id="axisReadout"></span>
+    <label>Scale
+      <select id="scaleMode">
+        <option value="global">global</option>
+        <option value="frame">per frame</option>
+      </select>
+    </label>
+  </div>
+
+  <div id="panels"></div>
+  <p id="hover">Hover a panel for the value under the cursor.</p>
+</main>
+
+<script>
+"use strict";
+
+const DATA = __PAYLOAD__;
+const IS_PLANE = DATA.geometry === "plane";
+
+// Canvas geometry. The canvas is drawn at this fixed pixel size and scaled to
+// the panel width by CSS, so layout math never depends on the viewport.
+const PAD = { left: 58, right: 66, top: 10, bottom: 42 };
+const PLOT_W = 420;
+const PLOT_H = IS_PLANE ? 360 : 260;
+const CANVAS_W = PAD.left + PLOT_W + PAD.right;
+const CANVAS_H = PAD.top + PLOT_H + PAD.bottom;
+
+const NAN_COLOR = getComputedStyle(document.documentElement)
+  .getPropertyValue("--nan").trim() || "#b9bcc0";
+const INK = getComputedStyle(document.documentElement)
+  .getPropertyValue("--ink").trim() || "#1a1f26";
+const RULE = getComputedStyle(document.documentElement)
+  .getPropertyValue("--rule").trim() || "#e3e2dc";
+
+const frameSlider = document.getElementById("frame");
+const scaleSelect = document.getElementById("scaleMode");
+const axisReadout = document.getElementById("axisReadout");
+const hoverOut = document.getElementById("hover");
+
+// Cache of global (all-frame) limits per field, computed once on demand.
+const globalLimits = new Map();
+let playTimer = null;
+
+// ---------------------------------------------------------------- utilities
+
+function isNum(v) {
+  return v !== null && Number.isFinite(v);
+}
+
+/** Format a value for display: fixed for ordinary magnitudes, else exponential. */
+function fmt(v) {
+  if (!isNum(v)) return "—";
+  const a = Math.abs(v);
+  if (a !== 0 && (a < 1e-3 || a >= 1e5)) return v.toExponential(2);
+  return v.toFixed(a >= 100 ? 1 : 3);
+}
+
+/**
+ * Fold one frame's finite values into a running [lo, hi], allocating nothing.
+ * Frames are 2-D (plane) or 1-D (line). This runs on every slider drag for
+ * autoscaled fields, so it never builds an intermediate array.
+ */
+function foldExtent(frame, acc) {
+  const rows = IS_PLANE ? frame : [frame];
+  for (const row of rows) {
+    for (const v of row) {
+      if (!isNum(v)) continue;
+      if (v < acc[0]) acc[0] = v;
+      if (v > acc[1]) acc[1] = v;
+    }
+  }
+  return acc;
+}
+
+/** A usable [lo, hi] from a folded accumulator, widening a degenerate range. */
+function finishExtent(acc) {
+  if (acc[0] > acc[1]) return [0, 1];                 // no finite samples
+  if (acc[0] === acc[1]) return [acc[0] - 0.5, acc[1] + 0.5];
+  return acc;
+}
+
+/**
+ * Colour limits for a field at frame index `i`.
+ * A field carrying vmin/vmax is on a fixed physical scale (coherence 0..1,
+ * phase ±180) and ignores the toggle; otherwise the toggle chooses between
+ * this frame's range and the range across all frames.
+ */
+function limitsFor(field, fieldIndex, i) {
+  if (field.vmin !== null && field.vmax !== null) return [field.vmin, field.vmax];
+  if (scaleSelect.value === "frame") {
+    return finishExtent(foldExtent(field.frames[i], [Infinity, -Infinity]));
+  }
+  if (!globalLimits.has(fieldIndex)) {
+    const acc = [Infinity, -Infinity];
+    for (const frame of field.frames) foldExtent(frame, acc);
+    globalLimits.set(fieldIndex, finishExtent(acc));
+  }
+  return globalLimits.get(fieldIndex);
+}
+
+// Each field's LUT as ready-made CSS colors, built once. The plane raster sets
+// fillStyle per cell on every drag, so formatting the string there would churn
+// thousands of short-lived strings per frame.
+const lutStrings = new Map();
+
+function lutColors(field, fieldIndex) {
+  if (!lutStrings.has(fieldIndex)) {
+    lutStrings.set(fieldIndex, field.lut.map(c => `rgb(${c[0]},${c[1]},${c[2]})`));
+  }
+  return lutStrings.get(fieldIndex);
+}
+
+/** Look a normalized value up in a prepared color table. */
+function lutColor(colors, t) {
+  const clamped = Math.max(0, Math.min(1, t));
+  return colors[Math.round(clamped * (colors.length - 1))];
+}
+
+// ------------------------------------------------------------------ drawing
+
+/** Shared axis chrome: frame box, tick labels, axis titles. */
+function drawAxes(ctx, xTicks, xLabel, yTicks, yLabel) {
+  ctx.strokeStyle = RULE;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(PAD.left, PAD.top, PLOT_W, PLOT_H);
+
+  ctx.fillStyle = INK;
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  for (const tick of xTicks) {
+    ctx.fillText(tick.text, tick.pos, PAD.top + PLOT_H + 15);
+  }
+  ctx.fillText(xLabel, PAD.left + PLOT_W / 2, PAD.top + PLOT_H + 34);
+
+  ctx.textAlign = "right";
+  for (const tick of yTicks) {
+    ctx.fillText(tick.text, PAD.left - 7, tick.pos + 4);
+  }
+  ctx.save();
+  ctx.translate(13, PAD.top + PLOT_H / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center";
+  ctx.fillText(yLabel, 0, 0);
+  ctx.restore();
+}
+
+/** Vertical colorbar with its low/high labels, at the right of the plot box. */
+function drawColorbar(ctx, colors, lo, hi) {
+  const barX = PAD.left + PLOT_W + 12;
+  const barW = 13;
+  const steps = 128;
+  for (let s = 0; s < steps; s++) {
+    ctx.fillStyle = lutColor(colors, 1 - s / (steps - 1));
+    ctx.fillRect(barX, PAD.top + s * PLOT_H / steps, barW, PLOT_H / steps + 1);
+  }
+  ctx.strokeStyle = RULE;
+  ctx.strokeRect(barX, PAD.top, barW, PLOT_H);
+
+  ctx.fillStyle = INK;
+  ctx.font = "10px system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(fmt(hi), barX + barW + 4, PAD.top + 8);
+  ctx.fillText(fmt(lo), barX + barW + 4, PAD.top + PLOT_H - 1);
+}
+
+/**
+ * Decimals needed to keep neighbouring ticks distinguishable.
+ * Precision follows the *spacing* of the values, not their magnitude: a 0.1 cm
+ * scan pitch printed to one decimal renders "-0.8" twice at different
+ * positions, which reads as a plotting error.
+ */
+function tickDecimals(values, stride) {
+  let step = Infinity;
+  for (let i = stride; i < values.length; i += stride) {
+    const d = Math.abs(values[i] - values[i - stride]);
+    if (d > 0 && d < step) step = d;
+  }
+  if (!Number.isFinite(step)) return 1;
+  // One digit finer than the step, clamped to something readable.
+  return Math.min(4, Math.max(0, Math.ceil(-Math.log10(step)) + 1));
+}
+
+// Ticks depend only on the spatial axes and the fixed canvas geometry, neither
+// of which changes after load -- so they are built once rather than rebuilt on
+// every slider drag, like globalLimits and lutStrings above. `key` names which
+// axis of which panel type is being drawn, because the same values array (x) is
+// placed by a different toPixel in the plane and line paths.
+const tickCache = new Map();
+
+/** Evenly spaced tick marks along a coordinate array, at most `max` of them. */
+function ticksFor(key, values, max, toPixel) {
+  const cached = tickCache.get(key);
+  if (cached) return cached;
+  const stride = Math.max(1, Math.ceil(values.length / max));
+  const decimals = tickDecimals(values, stride);
+  const ticks = [];
+  for (let i = 0; i < values.length; i += stride) {
+    ticks.push({ text: values[i].toFixed(decimals), pos: toPixel(i) });
+  }
+  tickCache.set(key, ticks);
+  return ticks;
+}
+
+/** Cell size of the plane raster. Draw and hover must agree on this. */
+function cellSize() {
+  return { cw: PLOT_W / DATA.x.values.length, ch: PLOT_H / DATA.y.values.length };
+}
+
+/**
+ * Grid indices under a canvas point, or null outside the plot box.
+ * The inverse of drawPlanePanel's placement, including the row flip that puts
+ * row 0 (lowest y) at the bottom -- so the two share one origin convention.
+ */
+function cellAt(mx, my) {
+  const { cw, ch } = cellSize();
+  const nx = DATA.x.values.length;
+  const ny = DATA.y.values.length;
+  const ix = Math.floor((mx - PAD.left) / cw);
+  const iy = ny - 1 - Math.floor((my - PAD.top) / ch);
+  if (ix < 0 || ix >= nx || iy < 0 || iy >= ny) return null;
+  return { ix, iy };
+}
+
+/** A plane field: one filled rectangle per grid cell, NaN cells grey. */
+function drawPlanePanel(ctx, field, fieldIndex, i) {
+  const frame = field.frames[i];
+  const [lo, hi] = limitsFor(field, fieldIndex, i);
+  const span = hi - lo || 1;
+  const colors = lutColors(field, fieldIndex);
+  const nx = DATA.x.values.length;
+  const ny = DATA.y.values.length;
+  const { cw, ch } = cellSize();
+
+  for (let iy = 0; iy < ny; iy++) {
+    // Row 0 is the lowest y, drawn at the bottom (matplotlib origin="lower").
+    const top = PAD.top + (ny - 1 - iy) * ch;
+    for (let ix = 0; ix < nx; ix++) {
+      const v = frame[iy][ix];
+      ctx.fillStyle = isNum(v) ? lutColor(colors, (v - lo) / span) : NAN_COLOR;
+      // +0.5 overdraw closes hairline seams between neighbouring cells.
+      ctx.fillRect(PAD.left + ix * cw, top, cw + 0.5, ch + 0.5);
+    }
+  }
+
+  drawAxes(ctx,
+    ticksFor("plane-x", DATA.x.values, 7, i2 => PAD.left + (i2 + 0.5) * cw),
+    `${DATA.x.label} [${DATA.x.unit}]`,
+    ticksFor("plane-y", DATA.y.values, 7, i2 => PAD.top + (ny - 1 - i2 + 0.5) * ch),
+    `${DATA.y.label} [${DATA.y.unit}]`);
+  drawColorbar(ctx, colors, lo, hi);
+}
+
+/** A line field: a profile polyline, with gaps where the data is NaN. */
+function drawLinePanel(ctx, field, fieldIndex, i) {
+  const frame = field.frames[i];
+  const [lo, hi] = limitsFor(field, fieldIndex, i);
+  const span = hi - lo || 1;
+  const xs = DATA.x.values;
+  const toX = j => PAD.left + (xs.length === 1 ? PLOT_W / 2 : j * PLOT_W / (xs.length - 1));
+  const toY = v => PAD.top + PLOT_H - (v - lo) * PLOT_H / span;
+
+  ctx.strokeStyle = lutColor(lutColors(field, fieldIndex), 0.62);
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  let pen = false;
+  for (let j = 0; j < frame.length; j++) {
+    if (!isNum(frame[j])) { pen = false; continue; }   // NaN breaks the line
+    const px = toX(j), py = toY(frame[j]);
+    if (pen) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+    pen = true;
+  }
+  ctx.stroke();
+
+  const yTicks = [];
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (hi - lo) * k / 4;
+    yTicks.push({ text: fmt(v), pos: toY(v) });
+  }
+  drawAxes(ctx,
+    ticksFor("line-x", xs, 7, toX),
+    `${DATA.x.label} [${DATA.x.unit}]`,
+    yTicks,
+    field.unit ? `${field.name} [${field.unit}]` : field.name);
+}
+
+// ------------------------------------------------------------ panel assembly
+
+const panelHost = document.getElementById("panels");
+const contexts = DATA.fields.map((field, fieldIndex) => {
+  const figure = document.createElement("figure");
+  const caption = document.createElement("figcaption");
+  caption.textContent = field.unit ? `${field.name} [${field.unit}]` : field.name;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = CANVAS_W;
+  canvas.height = CANVAS_H;
+  canvas.addEventListener("mousemove", e => reportHover(e, canvas, field, fieldIndex));
+  canvas.addEventListener("mouseleave", () => { hoverOut.textContent = ""; });
+
+  figure.append(caption, canvas);
+  panelHost.append(figure);
+  return canvas.getContext("2d");
+});
+
+/** Report the data value under the cursor, in data coordinates. */
+function reportHover(event, canvas, field, fieldIndex) {
+  const rect = canvas.getBoundingClientRect();
+  const mx = (event.clientX - rect.left) * CANVAS_W / rect.width;
+  const my = (event.clientY - rect.top) * CANVAS_H / rect.height;
+  if (mx < PAD.left || mx > PAD.left + PLOT_W ||
+      my < PAD.top || my > PAD.top + PLOT_H) {
+    hoverOut.textContent = "";
+    return;
+  }
+
+  const i = +frameSlider.value;
+  const frame = field.frames[i];
+  const xs = DATA.x.values;
+
+  if (IS_PLANE) {
+    const cell = cellAt(mx, my);
+    if (!cell) { hoverOut.textContent = ""; return; }
+    const { ix, iy } = cell;
+    // Each coordinate carries its own unit: the schema allows x and y to
+    // differ, so labelling both with x's would misreport the y position.
+    hoverOut.textContent =
+      `${field.name} at (${xs[ix].toFixed(1)} ${DATA.x.unit}, ` +
+      `${DATA.y.values[iy].toFixed(1)} ${DATA.y.unit}) ` +
+      `= ${fmt(frame[iy][ix])}${field.unit ? " " + field.unit : ""}`;
+  } else {
+    const j = Math.round((mx - PAD.left) / PLOT_W * (xs.length - 1));
+    const clamped = Math.max(0, Math.min(xs.length - 1, j));
+    hoverOut.textContent =
+      `${field.name} at ${xs[clamped].toFixed(1)} ${DATA.x.unit} = ` +
+      `${fmt(frame[clamped])}${field.unit ? " " + field.unit : ""}`;
+  }
+}
+
+// -------------------------------------------------------------------- render
+
+function render() {
+  const i = +frameSlider.value;
+  axisReadout.textContent =
+    `${DATA.axis.name} ${fmt(DATA.axis.values[i])} ${DATA.axis.unit}`;
+
+  DATA.fields.forEach((field, fieldIndex) => {
+    const ctx = contexts[fieldIndex];
+    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    if (IS_PLANE) drawPlanePanel(ctx, field, fieldIndex, i);
+    else drawLinePanel(ctx, field, fieldIndex, i);
+  });
+}
+
+function step(delta) {
+  const n = DATA.axis.values.length;
+  frameSlider.value = (+frameSlider.value + delta + n) % n;
+  render();
+}
+
+function togglePlay() {
+  const button = document.getElementById("playBtn");
+  if (playTimer) {
+    clearInterval(playTimer);
+    playTimer = null;
+    button.textContent = "▶ Play";
+  } else {
+    playTimer = setInterval(() => step(1), 220);
+    button.textContent = "❚❚ Pause";
+  }
+}
+
+frameSlider.max = DATA.axis.values.length - 1;
+frameSlider.addEventListener("input", render);
+scaleSelect.addEventListener("change", render);
+document.getElementById("playBtn").addEventListener("click", togglePlay);
+document.getElementById("prevBtn").addEventListener("click", () => step(-1));
+document.getElementById("nextBtn").addEventListener("click", () => step(1));
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft") step(-1);
+  else if (e.key === "ArrowRight") step(1);
+});
+
+// An empty warning placeholder leaves a stray banner; drop it.
+const warningEl = document.querySelector(".warning");
+if (!warningEl.textContent.trim()) warningEl.remove();
+
+render();
+</script>
+</body>
+</html>
