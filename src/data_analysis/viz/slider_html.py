@@ -104,7 +104,10 @@ Schema v1
             "span": [1.5, 5.0],             # optional shaded x-range
             "span_label": "FFT window",     # optional caption for the shading
         },
-        "provenance": {"source": str, "params": {...}},   # rendered as a banner
+        "provenance": {"source": str, "params": {...},    # rendered as a banner
+                       # optional second line, for per-item text too long to
+                       # sit in the one-line params run:
+                       "details": [str] | {str: str} | str},
         "warning": str | None,              # optional caveat banner
     }
 
@@ -672,7 +675,13 @@ def _script_json(obj):
 
 
 def _banner_html(provenance):
-    """Provenance dict -> the page's banner markup (escaped, one row per item)."""
+    """Provenance dict -> the page's banner markup (escaped, one row per item).
+
+    ``params`` renders as one line of "<key> <value>" pairs. ``details`` -- a
+    list, a mapping, or a plain string -- renders as a second line below it, for
+    text too long to read as another pair on that run (a channel's description,
+    say). Both are optional.
+    """
     if not provenance:
         return ""
     rows = []
@@ -681,7 +690,20 @@ def _banner_html(provenance):
         rows.append(f"<b>source</b> {escape(str(source))}")
     for key, value in (provenance.get("params") or {}).items():
         rows.append(f"<b>{escape(str(key))}</b> {escape(str(value))}")
-    return " &nbsp;·&nbsp; ".join(rows)
+    html = " &nbsp;·&nbsp; ".join(rows)
+
+    details = provenance.get("details")
+    if details:
+        if isinstance(details, dict):
+            items = [f"<b>{escape(str(k))}</b> {escape(str(v))}"
+                     for k, v in details.items()]
+        elif isinstance(details, str):
+            items = [escape(details)]
+        else:
+            items = [escape(str(d)) for d in details]
+        html += ('<br><span class="detail">'
+                 + " &nbsp;·&nbsp; ".join(items) + "</span>")
+    return html
 
 
 # =========================================================================== #

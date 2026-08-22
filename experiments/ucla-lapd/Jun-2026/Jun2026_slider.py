@@ -48,7 +48,7 @@ import os
 
 import numpy as np
 
-from data_analysis.io import parse_gas_puff
+from data_analysis.io import open_lapd, parse_gas_puff
 from data_analysis.plasma.langmuir import load_plasma_data, load_sweep_axes
 from data_analysis.utils import run_num_of
 from data_analysis.viz.plot_utils import fig_path, grid_frames
@@ -57,6 +57,7 @@ from data_analysis.viz.slider_html import SCHEMA_VERSION, write_slider_html
 import Jun2026_xcorr as jxc
 import Jun2026_plot as jpl
 import Jun2026_Isat as jis
+import Jun2026_IV as jiv
 
 
 # Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/ -- the same place
@@ -202,7 +203,8 @@ def emit_xcorr_slider(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
         "x": {"label": "X position", "unit": "cm", "values": xs},
         "y": {"label": "Y position", "unit": "cm", "values": ys},
         "fields": fields,
-        "provenance": {"source": os.path.basename(ifn), "params": params},
+        "provenance": {"source": os.path.basename(ifn), "params": params,
+                       "details": _channel_details(ifn, [ch_a, ch_b])},
         "warning": _XCORR_WARNING if gamma2_floor is None else None,
     }
 
@@ -246,7 +248,7 @@ def emit_xcorr_slider_all(ifn, npz_path=None, pairs=None,
     if pairs is None:
         pairs = jxc.stored_pair_tuples(npz_path)
 
-    groups, shared = [], None
+    groups, shared, rendered = [], None, []
     for ch_a, ch_b in pairs:
         prepared = _xcorr_pair_fields(ifn, ch_a, ch_b, npz_path, fmax_khz,
                                       gamma2_floor)
@@ -254,6 +256,7 @@ def emit_xcorr_slider_all(ifn, npz_path=None, pairs=None,
             continue
         fields, *axes = prepared
         label = jxc.pair_label(ch_a, ch_b)
+        rendered.append((ch_a, ch_b))
 
         # One page carries one axis and one probe plane for every channel, so
         # the pairs must agree on them.  They come from the same npz and always
@@ -287,7 +290,11 @@ def emit_xcorr_slider_all(ifn, npz_path=None, pairs=None,
         "y": {"label": "Y position", "unit": "cm", "values": ys},
         "groups": groups,
         "provenance": {"source": os.path.basename(ifn),
-                       "params": _xcorr_params(freq_khz, fmax_khz, gamma2_floor)},
+                       "params": _xcorr_params(freq_khz, fmax_khz, gamma2_floor),
+                       # Every channel the dropdown's pairs are built from, each
+                       # named once however many pairs it takes part in.
+                       "details": _channel_details(
+                           ifn, [c for pair in rendered for c in pair])},
         "warning": _XCORR_WARNING if gamma2_floor is None else None,
     }
 
@@ -471,6 +478,9 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
             "params": {"ne": "interferometer-calibrated" if calibrated else "raw",
                        "tips": "overlaid per frame",
                        "positions": xpos.size},
+            # Every run on this page uses the same probe, so one run's tip
+            # channels describe them all; the first rendered run is the sample.
+            "details": _tip_details(ifns[0]),
         },
         "warning": None,
     }
@@ -567,15 +577,67 @@ def emit_isat_fft_slider(ifn, npz_path=None, chans=None,
                                f"({freq_khz.size} bins)",
                        "FFT window": (f"{window[0]:g}-{window[1]:g} ms"
                                       if window else "not recorded"),
-                       "positions": pos_x.size,
-                       "channels": ", ".join(chans),
-                       "scaling": "raw volts (RESISTOR/Aprobe not applied)"},
+                       "positions": pos_x.size},
+            "details": _channel_details(ifn, chans),
         },
         "warning": None,
     }
 
     name = f"{run_num}-isat-fft-slider-0to{fmax_khz:g}kHz"
     return write_slider_html(bundle, out or slider_path(name))
+
+
+def _channel_details(ifn, chans):
+    """``{'machscope/C2': 'MP@P33, Isat-X-'}`` for the banner's second line.
+
+    The stored key names where a trace came from in the npz; the run's own
+    description names what the tip actually measured, which is what identifies
+    it on the page. Falls back to the bare key for any channel the file does not
+    describe, so a page never loses a trace to a missing description.
+
+    ``chans`` entries are ``(scope, chan)`` tuples or ``"scope-chan"`` strings
+    -- the xcorr emitters carry pairs as tuples and the Isat one keys its npz by
+    string, and neither spelling is worth converting at the call site. Repeated
+    channels collapse (a pair list names each end several times) and order is
+    kept, so the line reads in the order the page introduces them.
+    """
+    try:
+        desc = open_lapd(ifn).channel_descriptions()
+    except (NotImplementedError, OSError):
+        return {}                       # bapsflib/legacy file, or unreadable
+    out = {}
+    for entry in chans:
+        scope, chan = (entry if isinstance(entry, tuple)
+                       else entry.rpartition("-")[::2])
+        # "scope/chan": the spelling pair_label already uses for a channel.
+        out.setdefault(f"{scope}/{chan}", desc.get(scope, {}).get(chan)
+                       or f"{scope}/{chan}")
+    return out
+
+
+def _tip_details(ifn):
+    """``{'tip L': 'I lpscope/C1 "Isat, LP@P29-L" + V lpscope/C2 ...'}``.
+
+    The IV page's counterpart to :func:`_channel_details`. A tip is a *fitted*
+    quantity, not a channel: Vp/Te/ne come from an I+V sweep pair, so what
+    identifies it is both channels and what the run says each of them was.
+    Returns ``{}`` when the map or the descriptions cannot be read, which is
+    what the caller ships when a run predates description-tagged channels.
+    """
+    try:
+        chan_map = jiv.resolve_iv_channel_map(ifn)
+        desc = open_lapd(ifn).channel_descriptions()
+    except (NotImplementedError, OSError, ValueError, FileNotFoundError):
+        return {}
+    out = {}
+    for tip, (scope, i_chan, v_chan) in chan_map.items():
+        parts = []
+        for role, chan in (("I", i_chan), ("V", v_chan)):
+            text = desc.get(scope, {}).get(chan)
+            parts.append(f"{role} {scope}/{chan}"
+                         + (f" \u2014 {text}" if text else ""))
+        out[f"tip {tip}" if tip else "tip"] = "; ".join(parts)
+    return out
 
 
 def _fft_window_context(d, chans, window):
