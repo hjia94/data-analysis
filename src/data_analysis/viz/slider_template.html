@@ -217,6 +217,18 @@ function cubesFor(p) {
   return currentGroup().frames[p];
 }
 
+/**
+ * Trace names for panel `p` in the current group.
+ *
+ * A group carries its own only when they differ from the shared panel row --
+ * groups may hold different numbers of traces (one run digitized two probe
+ * tips, another one), and the legend must name the curves actually drawn.
+ */
+function traceNamesFor(p) {
+  const own = currentGroup().traces;
+  return own ? own[p] : DATA.panels[p].traces;
+}
+
 // Trace colours: sampled from each panel's own colormap so a two-curve panel
 // stays within the palette its single-curve form already used. Endpoints are
 // avoided -- several colormaps run to near-white or near-black there, which
@@ -721,8 +733,9 @@ function drawLinePanel(ctx, panel, p, i) {
     axisLabel({ label: panel.name, unit: panel.unit }));
 
   // A legend only where there is something to tell apart.
-  if (panel.traces.length > 1)
-    drawLegend(ctx, panel.traces, t => traceColor(panel, p, t));
+  const names = traceNamesFor(p);
+  if (names.length > 1)
+    drawLegend(ctx, names, t => traceColor(panel, p, t));
 }
 
 /**
@@ -926,9 +939,10 @@ function reportHover(event, canvas, panel, p) {
     // Report every trace at the hovered position: with two curves on a panel,
     // reading only the first would answer the wrong half of the question.
     const unit = panel.unit ? " " + panel.unit : "";
+    const names = traceNamesFor(p);
     const reads = cubesFor(p).map((cube, t) => {
       const value = `${fmt(cube[i][clamped])}${unit}`;
-      return panel.traces.length > 1 ? `${panel.traces[t]} ${value}` : value;
+      return names.length > 1 ? `${names[t]} ${value}` : value;
     });
     hoverOut.textContent =
       `${panel.name} at ${fmt(xs[clamped])} ${DATA.x.unit} = ` +

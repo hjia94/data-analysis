@@ -123,7 +123,9 @@ Rules, all enforced by :func:`validate_bundle`:
   ``fields`` list is the single-group case, and is normalized to one unnamed
   group internally, so the page has one code path rather than two.
 * Groups need matching field *layouts*: same count, same names, same units,
-  same trace names, in the same order. This is structural, not stylistic: the
+  in the same order. Trace **names and count** may differ per group -- a run
+  that digitized one probe tip sits beside one that digitized three, each
+  drawing what it has. This is structural, not stylistic: the
   panel row (names, units, colormaps, fixed scales) is serialized **once** for
   the whole page and the page builds its canvases from it, so a group whose
   layout differed would be drawn under another group's captions and colorbars. Fields carrying a
@@ -446,9 +448,14 @@ def validate_bundle(bundle):
         # Everything _payload serializes into the shared panel row must be in
         # here: a key that is not (cmap, once) let a group with a different
         # colormap or fixed scale validate, then draw under group 0's colorbar.
+        #
+        # Trace names are deliberately NOT in the signature: a group carries its
+        # own (see _group_payload), because how many curves a group has is a
+        # property of that measurement -- one run digitizes two probe tips,
+        # another one. What must agree is the panel row itself, which is what
+        # the page builds its canvases from.
         signature = [(f["name"], f.get("unit", ""), f["cmap"],
-                      f.get("vmin"), f.get("vmax"), f.get("yscale", "linear"),
-                      tuple(t.get("name", "") for t in field_traces(f)))
+                      f.get("vmin"), f.get("vmax"), f.get("yscale", "linear"))
                      for f in fields]
         if layout is None:
             layout, layout_name = signature, group.get("name")
@@ -457,7 +464,7 @@ def validate_bundle(bundle):
                      f"{stem} ('{group.get('name')}') has fields {signature}, "
                      f"but '{layout_name}' has {layout}; every group must carry "
                      "the same fields, in the same order, so the dropdown swaps "
-                     "data under fixed panels")
+                     "data under fixed panels (trace COUNT may differ)")
 
     return bundle
 
@@ -644,6 +651,13 @@ def _payload(bundle):
         entry = {"name": group.get("name", "")}
         if group.get("axis"):
             entry["axis"] = _round_floats(_axis_payload(group["axis"]))
+        # Only when they differ from the panel row's: on the common page where
+        # every group has the same traces this repeats nothing, and the page
+        # falls back to the shared names.
+        names = [[t.get("name", "") for t in field_traces(f)]
+                 for f in group["fields"]]
+        if names != [panel["traces"] for panel in panels]:
+            entry["traces"] = names
         entry["frames"] = [[_jsonable(_round_frames(t["frames"], f))
                             for t in field_traces(f)]
                            for f in group["fields"]]

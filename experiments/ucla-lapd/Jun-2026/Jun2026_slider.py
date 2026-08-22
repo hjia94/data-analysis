@@ -355,10 +355,12 @@ IV_TIP_JITTER_MS = 0.02
 def _iv_run_group(data_dir, run_num, tips, calibrated=True):
     """One run as a slider *group*: per-tip traces of each field, vs position.
 
-    Returns ``(group, xpos, ne_calibrated)``, or ``None`` when the run cannot be
-    read. Each field carries one trace per tip, so a frame shows both tips of
-    the same quantity against one y-axis -- the comparison the static figure
-    could only make by drawing separate lines per timestamp.
+    Returns ``(group, xpos, ne_calibrated)``, or ``None`` when no tip of the run
+    could be read. Each field carries one trace per tip *this run digitized* --
+    one, two, three -- so a frame shows them against one shared y-axis, the
+    comparison the static figure could only make by drawing separate lines per
+    timestamp. Runs need not agree on their tips: the page's groups carry their
+    own trace names.
 
     ``ne_calibrated`` is what actually happened, not what was asked for:
     :func:`Jun2026_plot._load_ne` falls back to raw ne for any tip whose
@@ -374,8 +376,12 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
             Vp, Te, ne, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=tip)
             xs, *_ = load_sweep_axes(data_dir, run_num, tip=tip)
         except (FileNotFoundError, OSError, KeyError) as exc:
-            print(f"  (IV: run {run_num} tip {tip} unreadable: {exc})")
-            return None
+            # One tip short is a smaller page, not a lost run: the other tips
+            # are complete measurements and the schema lets this group carry
+            # fewer traces than its neighbours.
+            print(f"  (IV: run {run_num} tip {tip} unreadable: {exc}; "
+                  "skipping the tip)")
+            continue
         # _load_ne hands back the very array it was given when the run has no
         # calibration yet (it only prints a note), so identity is the signal.
         ne_cal = jpl._load_ne(data_dir, run_num, tip, ne, calibrated)
@@ -410,14 +416,19 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
             if not (same_time and np.array_equal(np.asarray(xs, float), xpos)):
                 print(f"  (IV: run {run_num} tip {tip} disagrees with tip "
                       f"{first_tip} on the time axis or probe line; skipping "
-                      "the run)")
-                return None
+                      "the tip)")
+                continue
 
         # Saved as (npos, n_sweeps); the schema wants (n_axis, nx). Zipped
         # against IV_FIELDS so the panel order is stated once.
         for (name, _), cube in zip(IV_FIELDS,
                                    (Vp.T, Te.T, ne.T, (Te * ne).T)):
-            traces_by_field[name].append({"name": f"tip {tip}", "frames": cube})
+            traces_by_field[name].append(
+                {"name": f"tip {tip}" if tip else "tip", "frames": cube})
+
+    if axis_values is None:              # every tip was skipped above
+        print(f"  (IV: run {run_num} has no readable tip; skipping the run)")
+        return None
 
     group = {
         "name": "",                      # filled in by the caller (delay time)
@@ -462,7 +473,15 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
     for ifn in ifns:
         data_dir = os.path.dirname(ifn)
         run_num = run_num_of(ifn)
-        tips = [t for t in jpl.discover_tips(ifn) if t != "override"]
+        try:
+            found = jpl.discover_tips(ifn)
+        except FileNotFoundError:
+            print(f"  (IV: run {run_num} has no saved sweep data; skipping)")
+            continue
+        # "override" marks the untagged single-tip npz -- a real tip whose files
+        # carry no tip suffix, so it is kept and load_plasma_data is asked for
+        # tip=None. Dropping it lost the whole run.
+        tips = [None if t == "override" else t for t in found]
         if not tips:
             print(f"  (IV: run {run_num} has no saved tip data; skipping)")
             continue
