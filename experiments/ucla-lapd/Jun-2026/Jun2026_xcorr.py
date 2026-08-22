@@ -253,7 +253,7 @@ def stored_pair_tuples(npz_path):
     return [_pair_from_key(key) for key in stored_pairs(npz_path)]
 
 
-def _position_xy(pos_array, npos, nshot):
+def position_xy(pos_array, npos, nshot):
     """(x, y) of each of the ``npos`` positions: the first shot of each block.
 
     Kept with the spectra so a plane map has real axes (not just a position
@@ -274,7 +274,7 @@ def _iter_run_positions(ifn, ch_a, ch_b, tmin_ms, tmax_ms, desc):
     """
     pos_array, _, _, npos, nshot = jiv.read_lp_positions(ifn)
     run = open_lapd(ifn)
-    pos_x, pos_y = _position_xy(pos_array, npos, nshot)
+    pos_x, pos_y = position_xy(pos_array, npos, nshot)
 
     def gen():
         with tqdm(total=npos * nshot, desc=desc, unit="shot") as bar:

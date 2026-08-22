@@ -33,6 +33,9 @@ One page or many
 :func:`emit_iv_line_slider_all` puts **every IV run on one page**, the runs
 behind the dropdown and both probe tips overlaid in each frame.
 :func:`emit_xcorr_slider` renders one channel pair per page.
+:func:`emit_isat_fft_slider` puts **one run's Isat tips on one page**, the
+slider scrubbing probe position and each tip a trace -- the schema's
+non-spatial case, where the panel's x-axis is frequency rather than position.
 :func:`emit_xcorr_slider_all` puts **every pair of a run on one page** behind a
 dropdown, which is the one to reach for when the question is "which channel pair
 shows this?" -- comparing pairs by switching a dropdown at a held frequency,
@@ -53,6 +56,7 @@ from data_analysis.viz.slider_html import SCHEMA_VERSION, write_slider_html
 
 import Jun2026_xcorr as jxc
 import Jun2026_plot as jpl
+import Jun2026_Isat as jis
 
 
 # Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/ -- the same place
@@ -471,6 +475,162 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
         "warning": None,
     }
     return write_slider_html(bundle, out or slider_path(name or "IV-line-all-runs"))
+
+
+# Upper edge of the Isat FFT band shipped to the page.  The stored spectra run
+# to Nyquist (25 MHz, 87500 bins); at 3 channels x 61 positions that is 16M
+# numbers, far more than a page needs -- and the fluctuation structure sits at
+# the bottom of the band.
+ISAT_FMAX_KHZ = 500.0
+
+
+def emit_isat_fft_slider(ifn, npz_path=None, chans=None,
+                         fmax_khz=ISAT_FMAX_KHZ, fmin_khz=1.0, out=None):
+    """Position-slider page of per-position Isat amplitude spectra.
+
+    Reads the per-position spectra :func:`Jun2026_Isat.batch_fft_by_position`
+    saved and renders **one panel with one trace per channel**, the slider
+    scrubbing probe position.  Every Mach tip is drawn against one shared
+    log-log axis, which is the comparison a multi-tip probe exists to support.
+
+    This is the schema's non-spatial case: the *scan* axis is position and the
+    panel's ``x`` is frequency.  ``axis.labels`` carries each position's
+    ``(x, y)``, so the readout says where the frame is rather than "position 37".
+
+    Args:
+        ifn (str): The run's raw HDF5 path (names the page, finds the npz).
+        npz_path (str): Override the co-located npz location.
+        chans (list): Channel keys to draw, as stored by
+            :func:`Jun2026_Isat.stored_channels`; default every stored channel.
+        fmax_khz, fmin_khz (float): Band shipped to the page.  ``fmin_khz`` is
+            above zero because a log frequency axis has no pixel for DC.
+        out (str): Explicit output ``.html`` path.
+
+    Returns the written ``.html`` path, or ``None`` if the run has no stored
+    channel (the reason is printed, so a caller looping over runs can continue).
+    """
+    if npz_path is None:
+        npz_path = jis.isat_npz_path(ifn)
+    if not os.path.isfile(npz_path):
+        print(f"  (Isat: no per-position npz at {npz_path})")
+        return None
+    if chans is None:
+        chans = jis.stored_channels(npz_path)
+    if not chans:
+        print(f"  (Isat: no stored channel in {npz_path})")
+        return None
+
+    with np.load(npz_path) as d:
+        # One page carries one frequency axis, so channels recorded on scopes of
+        # different sampling rates cannot share it. The axis is stored per
+        # channel; requiring them equal is what keeps a page's x-axis true of
+        # every trace on it.
+        freq_khz = d[f"{chans[0]}__freq"] / 1e3
+        for k in chans[1:]:
+            if not np.array_equal(d[f"{k}__freq"], d[f"{chans[0]}__freq"]):
+                raise ValueError(
+                    f"channel '{k}' has a different frequency axis than "
+                    f"'{chans[0]}' (different scope sampling rates?); they "
+                    "cannot share one page. Pass `chans` for one scope at a time.")
+        band = (freq_khz >= fmin_khz) & (freq_khz <= fmax_khz)
+        if not band.any():
+            raise ValueError(f"band {fmin_khz}-{fmax_khz} kHz selects no bin of "
+                             f"{freq_khz[0]:.3f}-{freq_khz[-1]:.1f} kHz")
+        # Stored as (npos, nfreq), which is already the schema's (n_axis, nx).
+        traces = [{"name": k, "frames": d[f"{k}__amp"][:, band]} for k in chans]
+        pos_x, pos_y = d["pos_x"], d["pos_y"]
+        freq_khz = freq_khz[band]
+        # Read inside the `with`: an NpzFile is a lazy zip handle, and the
+        # bundle below is built after it has closed.
+        window = ([float(d["tmin_ms"]), float(d["tmax_ms"])]
+                  if "tmin_ms" in d.files else None)
+        context = _fft_window_context(d, chans, window)
+
+    run_num = run_num_of(ifn)
+    run_label = jpl.run_title(ifn, run_num) or f"{run_num} Isat FFT"
+    bundle = {
+        "schema": SCHEMA_VERSION,
+        "title": f"{run_label} \u2014 Isat FFT by position",
+        "geometry": "line",
+        "axis": {"name": "position", "unit": "",
+                 "values": np.arange(pos_x.size, dtype=float),
+                 "labels": _position_labels(pos_x, pos_y)},
+        "x": {"label": "frequency", "unit": "kHz", "values": freq_khz,
+              "scale": "log"},
+        "fields": [{"name": "Isat amplitude", "unit": "V", "cmap": "viridis",
+                    "vmin": None, "vmax": None, "yscale": "log",
+                    "traces": traces}],
+        "context": context,
+        "provenance": {
+            "source": os.path.basename(ifn),
+            "params": {"band": f"{fmin_khz:g}-{fmax_khz:g} kHz "
+                               f"({freq_khz.size} bins)",
+                       "FFT window": (f"{window[0]:g}-{window[1]:g} ms"
+                                      if window else "not recorded"),
+                       "positions": pos_x.size,
+                       "channels": ", ".join(chans),
+                       "scaling": "raw volts (RESISTOR/Aprobe not applied)"},
+        },
+        "warning": None,
+    }
+
+    name = f"{run_num}-isat-fft-slider-0to{fmax_khz:g}kHz"
+    return write_slider_html(bundle, out or slider_path(name))
+
+
+def _fft_window_context(d, chans, window):
+    """The page's static figure: the raw record with the FFT window shaded.
+
+    Built from the decimated trace :func:`Jun2026_Isat.batch_fft_by_position`
+    stores per channel; ``window`` is the ``(tmin_ms, tmax_ms)`` pair to shade,
+    or ``None``. Returns ``None`` for an npz predating those arrays -- the page
+    omits the figure rather than failing, so an older npz still re-renders.
+
+    The traces are the raw record at ONE position, while the panels below are
+    per-position spectra; the figure answers "what was analysed", not "what does
+    this position look like", which is why it does not follow the slider.
+    """
+    # Channel keys are "<scope>-<chan>", and the time axis is stored once for
+    # the scope they share.
+    scope_key = f"{chans[0].rsplit('-', 1)[0]}__raw_t"
+    if f"{chans[0]}__raw" not in d.files or scope_key not in d.files:
+        return None
+    return {
+        "title": "raw signal, first position (shot 0)",
+        # Stored in seconds (the run's own time axis); the page reads ms.
+        "x": {"label": "time", "unit": "ms", "values": d[scope_key] * 1e3},
+        "y": {"label": "signal", "unit": "V"},
+        "traces": [{"name": k, "values": d[f"{k}__raw"]} for k in chans],
+        "span": window,
+        # The numbers are in the banner; repeating them on the shading would
+        # state one fact three times on one page.
+        "span_label": "FFT window",
+    }
+
+
+def _position_labels(pos_x, pos_y):
+    """Per-position readout text: ``'(x, y) = (-30.0, 0.0) cm'``.
+
+    Always both coordinates, including on a line scan where one of them never
+    moves. Runs 00-06 scan x only, but the probe drives are 2-D and a later run
+    on the same pipeline may scan y or both; a label that named only the moving
+    axis would then quietly describe the wrong scan, and the reader has no way
+    to tell which convention a given page used.
+    """
+    # The literal "0.0", rather than formatting: the held axis of a line scan is
+    # not exactly constant (float32 y varies by ~2e-15 cm), and f"{-1e-16:.1f}"
+    # is "-0.0", which reads as a real coordinate.
+    fmt = lambda v: f"{v:.1f}" if abs(v) >= 0.05 else "0.0"
+    return [f"(x, y) = ({fmt(x)}, {fmt(y)}) cm" for x, y in zip(pos_x, pos_y)]
+
+
+def emit_isat_fft_sliders(ifns, **kwargs):
+    """:func:`emit_isat_fft_slider` for several runs; returns the written paths.
+
+    One page per run (each run has its own probe line and npz), skipping runs
+    with nothing stored.
+    """
+    return [p for p in (emit_isat_fft_slider(f, **kwargs) for f in ifns) if p]
 
 
 def _delay_label(ifn):

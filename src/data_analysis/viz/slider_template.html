@@ -103,6 +103,9 @@
      resizeCanvas), so they no longer give the element its display ratio --
      aspect-ratio does, and it is set from CANVAS_W/CANVAS_H at load. */
   canvas { width: 100%; display: block; }
+  /* The context figure is one wide plot of the whole record, not a panel in the
+     grid: it is capped so a 1180px page does not stretch one trace edge to edge. */
+  #context { max-width: 680px; margin: 0 0 1rem; }
   #hover {
     color: var(--muted);
     font-size: 0.85rem;
@@ -117,6 +120,11 @@
   <h1>__TITLE__</h1>
   <p class="banner">__BANNER__</p>
   <p class="warning">__WARNING__</p>
+
+  <figure id="context" hidden>
+    <figcaption id="contextCaption"></figcaption>
+    <canvas id="contextCanvas"></canvas>
+  </figure>
 
   <div class="controls">
     <label id="groupPick" hidden>Channel
@@ -159,6 +167,17 @@ const INK = getComputedStyle(document.documentElement)
   .getPropertyValue("--ink").trim() || "#1a1f26";
 const RULE = getComputedStyle(document.documentElement)
   .getPropertyValue("--rule").trim() || "#e3e2dc";
+const PANEL_BG = getComputedStyle(document.documentElement)
+  .getPropertyValue("--panel").trim() || "#fafaf7";
+
+// The analysed span, drawn under the record. Semi-transparent rather than a
+// theme colour: it must read as a highlight over both themes' panel grounds,
+// and it sits beneath a trace it may not obscure.
+const SPAN_FILL = "rgba(214, 152, 44, 0.18)";
+const SPAN_EDGE = "rgba(214, 152, 44, 0.85)";
+// The context figure has no colormap of its own (it is not a panel), so its
+// traces take fixed hues that stay legible on either theme ground.
+const CONTEXT_COLORS = ["#3d7dbf", "#c4622d", "#4c9a6a", "#9a5fb0"];
 
 const frameSlider = document.getElementById("frame");
 const groupSelect = document.getElementById("group");
@@ -220,8 +239,8 @@ function fmt(v) {
  * Frames are 2-D (plane) or 1-D (line). This runs on every slider drag for
  * autoscaled fields, so it never builds an intermediate array.
  */
-function foldExtent(frame, acc) {
-  const rows = IS_PLANE ? frame : [frame];
+function foldExtent(frame, acc, isPlane = IS_PLANE) {
+  const rows = isPlane ? frame : [frame];
   for (const row of rows) {
     for (const v of row) {
       if (!isNum(v)) continue;
@@ -288,29 +307,34 @@ function lutColor(colors, t) {
 // ------------------------------------------------------------------ drawing
 
 /** Shared axis chrome: frame box, tick labels, axis titles. */
-function drawAxes(ctx, xTicks, xLabel, yTicks, yLabel) {
+function drawAxes(ctx, xTicks, xLabel, yTicks, yLabel, plotH = PLOT_H) {
   ctx.strokeStyle = RULE;
   ctx.lineWidth = 1;
-  ctx.strokeRect(PAD.left, PAD.top, PLOT_W, PLOT_H);
+  ctx.strokeRect(PAD.left, PAD.top, PLOT_W, plotH);
 
   ctx.fillStyle = INK;
   ctx.font = "11px system-ui, sans-serif";
   ctx.textAlign = "center";
   for (const tick of xTicks) {
-    ctx.fillText(tick.text, tick.pos, PAD.top + PLOT_H + 15);
+    ctx.fillText(tick.text, tick.pos, PAD.top + plotH + 15);
   }
-  ctx.fillText(xLabel, PAD.left + PLOT_W / 2, PAD.top + PLOT_H + 34);
+  ctx.fillText(xLabel, PAD.left + PLOT_W / 2, PAD.top + plotH + 34);
 
   ctx.textAlign = "right";
   for (const tick of yTicks) {
     ctx.fillText(tick.text, PAD.left - 7, tick.pos + 4);
   }
   ctx.save();
-  ctx.translate(13, PAD.top + PLOT_H / 2);
+  ctx.translate(13, PAD.top + plotH / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = "center";
   ctx.fillText(yLabel, 0, 0);
   ctx.restore();
+}
+
+/** An axis's caption: ``"time [ms]"``, or the bare label when dimensionless. */
+function axisLabel(axis) {
+  return axis.unit ? `${axis.label} [${axis.unit}]` : axis.label;
 }
 
 /** Vertical colorbar with its low/high labels, at the right of the plot box. */
@@ -402,6 +426,129 @@ function niceStep(lo, hi, max) {
 // placed by a different toPixel in the plane and line paths.
 const tickCache = new Map();
 
+/** Smallest positive entry of a coordinate array (a log axis cannot show <= 0). */
+function positiveMin(xs) {
+  let min = Infinity;
+  for (let j = 0; j < xs.length; j++) if (xs[j] > 0 && xs[j] < min) min = xs[j];
+  return min;
+}
+
+/** Largest entry of a coordinate array. Not `xs[last]`: x need not ascend. */
+function positiveMax(xs) {
+  let max = -Infinity;
+  for (let j = 0; j < xs.length; j++) if (xs[j] > max) max = xs[j];
+  return max;
+}
+
+/**
+ * Index of the sample nearest pixel `mx`, honouring `DATA.x.scale`.
+ *
+ * The inverse of `drawLinePanel`'s `toX`. Kept beside the forward maps so the
+ * two cannot drift: a log axis that draws by value must be read back by value.
+ */
+function nearestX(mx, xs) {
+  // Clamp the *pixel* first: past the plot edge the log branch would otherwise
+  // extrapolate to a value beyond the axis and pick by distance to that.
+  const frac = Math.max(0, Math.min(1, (mx - PAD.left) / PLOT_W));
+  let j;
+  if (isLogX()) {
+    const lo = Math.log10(positiveMin(xs));
+    const span = Math.log10(positiveMax(xs)) - lo || 1;
+    const target = Math.pow(10, lo + frac * span);
+    // Samples are monotonic, so a scan finds the nearest in log distance.
+    let best = Infinity;
+    for (let k = 0; k < xs.length; k++) {
+      if (!(xs[k] > 0)) continue;
+      const d = Math.abs(Math.log10(xs[k]) - Math.log10(target));
+      if (d < best) { best = d; j = k; }
+    }
+    if (j === undefined) j = 0;
+  } else {
+    j = Math.round(frac * (xs.length - 1));
+  }
+  return Math.max(0, Math.min(xs.length - 1, j));
+}
+
+/** True when this panel's y-axis / the shared x-axis is log-scaled. */
+const isLogY = panel => panel.yscale === "log";
+const isLogX = () => DATA.x.scale === "log";
+
+/**
+ * A log tick's label.
+ *
+ * `sig` significant digits, defaulting to 1 -- enough for a decade rung, which
+ * is always 1/2/5 x 10^e. The sub-decade fallback labels arbitrary endpoints
+ * and must ask for more: at 1 digit, 0.0041 and 0.00435 both print "0.004",
+ * labelling both ends of the axis identically.
+ */
+function logTickText(v, sig = 1) {
+  if (v >= 1e-3 && v < 1e5) {
+    const decimals = Math.max(0, sig - 1 - Math.floor(Math.log10(v)));
+    return tickText(v, decimals);
+  }
+  return v.toExponential(Math.max(0, sig - 1)).replace("e+", "e");
+}
+
+/**
+ * Ticks at decade (and 2/5 sub-decade) boundaries, for a log-scaled axis.
+ *
+ * The linear `niceStep` ladder is wrong here: an evenly spaced *value* step puts
+ * almost every tick in the top decade. These rungs are chosen in log space, so
+ * ticks stay visually even across decades. Unlike `niceTicks`, `toPixel` takes a
+ * VALUE -- on a log axis a fractional index is not a position.
+ */
+function decadeTicks(lo, hi, max, toPixel) {
+  if (!(lo > 0) || !(hi > lo)) return [];
+  const e0 = Math.floor(Math.log10(lo)), e1 = Math.ceil(Math.log10(hi));
+  const build = (mults, stride) => {
+    const out = [];
+    for (let e = e0; e <= e1; e += stride) {
+      for (const m of mults) {
+        const v = m * Math.pow(10, e);
+        if (v >= lo * (1 - 1e-9) && v <= hi * (1 + 1e-9)) {
+          out.push({ text: logTickText(v), pos: toPixel(v) });
+        }
+      }
+    }
+    return out;
+  };
+  // A decade per tick where that fits; sub-decade rungs where it leaves too few.
+  for (const mults of [[1], [1, 2, 5]]) {
+    const out = build(mults, 1);
+    if (out.length > 1 && out.length <= max) return out;
+  }
+  // Too many decades to label individually: thin them out.
+  for (let stride = 2; stride <= 4; stride++) {
+    const out = build([1], stride);
+    if (out.length > 1 && out.length <= max) return out;
+  }
+  // Nothing fit (a sub-decade span): label the two ends, with enough digits to
+  // tell them apart -- these are arbitrary values, not decade rungs.
+  return [{ text: logTickText(lo, 3), pos: toPixel(lo) },
+          { text: logTickText(hi, 3), pos: toPixel(hi) }];
+}
+
+/**
+ * Smallest positive value across the cubes, the floor for a log y-axis.
+ *
+ * A hardcoded epsilon would misplace a real zero; deriving the floor from the
+ * data keeps the drawn range honest. Values at or below it break the polyline
+ * exactly as NaN does.
+ */
+function positiveFloor(cubes, i, frameOnly) {
+  let min = Infinity;
+  for (const cube of cubes) {
+    const frames = frameOnly ? [cube[i]] : cube;
+    for (const frame of frames) {
+      for (let j = 0; j < frame.length; j++) {
+        const v = frame[j];
+        if (isNum(v) && v > 0 && v < min) min = v;
+      }
+    }
+  }
+  return min === Infinity ? 1e-12 : min;
+}
+
 /**
  * Tick marks on round values along a coordinate array, at most `max` of them.
  *
@@ -484,9 +631,9 @@ function drawPlanePanel(ctx, panel, p, i) {
 
   drawAxes(ctx,
     ticksFor("plane-x", DATA.x.values, 9, i2 => PAD.left + (i2 + 0.5) * cw),
-    `${DATA.x.label} [${DATA.x.unit}]`,
+    axisLabel(DATA.x),
     ticksFor("plane-y", DATA.y.values, 9, i2 => PAD.top + (ny - 1 - i2 + 0.5) * ch),
-    `${DATA.y.label} [${DATA.y.unit}]`);
+    axisLabel(DATA.y));
   drawColorbar(ctx, colors, lo, hi);
 }
 
@@ -497,11 +644,39 @@ function drawPlanePanel(ctx, panel, p, i) {
  */
 function drawLinePanel(ctx, panel, p, i) {
   const cubes = cubesFor(p);
-  const [lo, hi] = limitsFor(panel, p, i);
-  const span = hi - lo || 1;
+  let [lo, hi] = limitsFor(panel, p, i);
   const xs = DATA.x.values;
-  const toX = j => PAD.left + (xs.length === 1 ? PLOT_W / 2 : j * PLOT_W / (xs.length - 1));
-  const toY = v => PAD.top + PLOT_H - (v - lo) * PLOT_H / span;
+  const logY = isLogY(panel), logX = isLogX();
+
+  // A log y-axis has no pixel for <= 0, and limitsFor happily returns a zero or
+  // negative low end (an amplitude spectrum has empty bins). Clamp to the
+  // smallest positive value actually drawn.
+  if (logY && !(lo > 0)) lo = positiveFloor(cubes, i, scaleSelect.value === "frame");
+  if (logY && !(hi > lo)) hi = lo * 10;
+
+  const span = hi - lo || 1;
+  const logLo = logY ? Math.log10(lo) : 0;
+  const logSpan = logY ? (Math.log10(hi) - logLo) || 1 : 1;
+
+  // Linear x maps by INDEX: samples are evenly spaced, so index and value agree
+  // and the index form saves a log per point. A log x must map the VALUE --
+  // evenly spaced samples are NOT evenly spaced pixels once the axis is log.
+  // Hoisted: xs is fixed at load, and this sits inside the per-point toX below.
+  // The span is taken from the largest sample, not the last: nothing requires
+  // x to ascend (validate_bundle demands monotonicity only of the slider axis),
+  // and a descending log x would collapse the span to 0 and paint the trace
+  // hundreds of pixels outside the panel.
+  const xMin = logX ? positiveMin(xs) : 0;
+  const xMax = logX ? positiveMax(xs) : 0;
+  const xLo = logX ? Math.log10(xMin) : 0;
+  const xSpan = logX ? (Math.log10(xMax) - xLo) || 1 : 1;
+  const toXval = v => PAD.left + (Math.log10(v) - xLo) * PLOT_W / xSpan;
+  const toX = logX
+    ? j => toXval(xs[j])
+    : j => PAD.left + (xs.length === 1 ? PLOT_W / 2 : j * PLOT_W / (xs.length - 1));
+  const toY = logY
+    ? v => PAD.top + PLOT_H - (Math.log10(v) - logLo) * PLOT_H / logSpan
+    : v => PAD.top + PLOT_H - (v - lo) * PLOT_H / span;
 
   ctx.lineWidth = 2;
   cubes.forEach((cube, t) => {
@@ -510,7 +685,11 @@ function drawLinePanel(ctx, panel, p, i) {
     ctx.beginPath();
     let pen = false;
     for (let j = 0; j < frame.length; j++) {
-      if (!isNum(frame[j])) { pen = false; continue; }   // NaN breaks the line
+      // NaN breaks the line; on a log axis so does <= 0 -- in the value OR in
+      // its x coordinate -- since neither has a pixel.
+      if (!isNum(frame[j]) || (logY && frame[j] <= 0) || (logX && !(xs[j] > 0))) {
+        pen = false; continue;
+      }
       const px = toX(j), py = toY(frame[j]);
       if (pen) ctx.lineTo(px, py); else ctx.moveTo(px, py);
       pen = true;
@@ -519,45 +698,160 @@ function drawLinePanel(ctx, panel, p, i) {
   });
 
   drawAxes(ctx,
-    ticksFor("line-x", xs, 9, toX),
-    `${DATA.x.label} [${DATA.x.unit}]`,
+    // Uncached on a log axis: ticksFor's cache is keyed per panel type, but the
+    // log ticks depend on the value range, not just the sample array.
+    logX ? decadeTicks(xMin, xMax, 9, toXval)
+         : ticksFor("line-x", xs, 9, toX),
+    axisLabel(DATA.x),
     // Round values here too, not five equal divisions of the range: the y-axis
     // is what two overlaid traces are compared against. Uncached -- unlike the
     // spatial axes, these limits change with the frame.
-    niceTicks(lo, hi, 6, toY),
-    panel.unit ? `${panel.name} [${panel.unit}]` : panel.name);
+    logY ? decadeTicks(lo, hi, 6, toY) : niceTicks(lo, hi, 6, toY),
+    axisLabel({ label: panel.name, unit: panel.unit }));
 
   // A legend only where there is something to tell apart.
-  if (panel.traces.length > 1) drawTraceLegend(ctx, panel, p);
+  if (panel.traces.length > 1)
+    drawLegend(ctx, panel.traces, t => traceColor(panel, p, t));
 }
 
-/** Key for a multi-trace panel: a short colour swatch and name per trace. */
-function drawTraceLegend(ctx, panel, p) {
+/**
+ * Key for a multi-trace plot: a short colour swatch and name per entry, boxed
+ * at the top right of the plot area.
+ *
+ * Shared by the panels and the context figure, which differ only in where the
+ * name and the colour come from -- hence `names` plus a `colorOf(i)` rather
+ * than either caller's own shape. Colours come from the theme tokens: the
+ * literals this replaced painted a white box with near-black text, which
+ * inverted against the dark theme's ground.
+ */
+function drawLegend(ctx, names, colorOf) {
   const pad = 8, lineH = 15, swatch = 18;
   ctx.font = "12px system-ui, sans-serif";
-  const width = swatch + 6 + Math.max(...panel.traces.map(n => ctx.measureText(n).width));
+  const width = swatch + 6 + Math.max(...names.map(n => ctx.measureText(n).width));
   const x = PAD.left + PLOT_W - width - pad;
   const y = PAD.top + pad;
 
-  ctx.fillStyle = "rgba(255,255,255,0.82)";
-  ctx.fillRect(x - 6, y - 4, width + 12, panel.traces.length * lineH + 8);
-  ctx.strokeStyle = "#c8c8c8";
+  ctx.fillStyle = PANEL_BG;
+  ctx.fillRect(x - 6, y - 4, width + 12, names.length * lineH + 8);
+  ctx.strokeStyle = RULE;
   ctx.lineWidth = 1;
-  ctx.strokeRect(x - 6, y - 4, width + 12, panel.traces.length * lineH + 8);
+  ctx.strokeRect(x - 6, y - 4, width + 12, names.length * lineH + 8);
 
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  panel.traces.forEach((name, t) => {
-    const cy = y + t * lineH + lineH / 2;
-    ctx.strokeStyle = traceColor(panel, p, t);
+  names.forEach((name, i) => {
+    const cy = y + i * lineH + lineH / 2;
+    ctx.strokeStyle = colorOf(i);
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(x, cy);
     ctx.lineTo(x + swatch, cy);
     ctx.stroke();
-    ctx.fillStyle = "#333";
+    ctx.fillStyle = INK;
     ctx.fillText(name, x + swatch + 6, cy);
   });
+  // drawAxesOn draws on the alphabetic baseline; leaving "middle" set here
+  // shifted every tick label by half a line.
+  ctx.textBaseline = "alphabetic";
+}
+
+// ----------------------------------------------------------- context figure
+
+/**
+ * The static figure above the panels: the raw record with the analysed span
+ * shaded. It does not move with the slider, which is the whole point of it (it
+ * says what every frame was computed FROM), so render() repaints it only when
+ * resizeCanvas reports it cleared the backing store.
+ *
+ * Its own canvas and its own y-extent: the context shares no axis with the
+ * panels (a time record against a frequency spectrum), so none of the panel
+ * limit machinery applies.
+ */
+const CONTEXT_H = 150;
+const CONTEXT_CANVAS_H = PAD.top + CONTEXT_H + PAD.bottom;
+
+function drawContext(ctx) {
+  const c = DATA.context;
+  const xs = c.x.values;
+  ctx.clearRect(0, 0, CANVAS_W, CONTEXT_CANVAS_H);
+
+  // isPlane false: a context trace is one curve, whatever the panels' geometry.
+  const acc = [Infinity, -Infinity];
+  for (const trace of c.traces) foldExtent(trace.values, acc, false);
+  let [lo, hi] = finishExtent(acc);
+  // A little headroom so the extremes are not drawn on the frame itself.
+  const margin = (hi - lo) * 0.06;
+  lo -= margin; hi += margin;
+
+  const xLo = xs[0], xHi = xs[xs.length - 1];
+  const xSpan = (xHi - xLo) || 1;
+  const toX = v => PAD.left + (v - xLo) * PLOT_W / xSpan;
+  const toY = v => PAD.top + CONTEXT_H - (v - lo) * CONTEXT_H / (hi - lo);
+
+  // The shaded span, under the traces so it never hides them.
+  if (c.span) {
+    const [a, b] = c.span;
+    // Clamped: a window may legitimately start before the record's first
+    // sample, and an unclamped rect would paint over the axis furniture.
+    const left = Math.max(PAD.left, Math.min(toX(a), toX(b)));
+    const right = Math.min(PAD.left + PLOT_W, Math.max(toX(a), toX(b)));
+    if (right > left) {
+      ctx.fillStyle = SPAN_FILL;
+      ctx.fillRect(left, PAD.top, right - left, CONTEXT_H);
+      ctx.strokeStyle = SPAN_EDGE;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(left, PAD.top); ctx.lineTo(left, PAD.top + CONTEXT_H);
+      ctx.moveTo(right, PAD.top); ctx.lineTo(right, PAD.top + CONTEXT_H);
+      ctx.stroke();
+      if (c.span_label) {
+        ctx.fillStyle = SPAN_EDGE;
+        ctx.font = "11px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "alphabetic";
+        ctx.fillText(c.span_label, (left + right) / 2, PAD.top + 12);
+      }
+    }
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(PAD.left, PAD.top, PLOT_W, CONTEXT_H);
+  ctx.clip();
+  c.traces.forEach((trace, i) => {
+    ctx.strokeStyle = CONTEXT_COLORS[i % CONTEXT_COLORS.length];
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    let pen = false;
+    for (let j = 0; j < xs.length; j++) {
+      const v = trace.values[j];
+      if (!isNum(v)) { pen = false; continue; }   // NaN breaks the line
+      const px = toX(xs[j]), py = toY(v);
+      if (pen) ctx.lineTo(px, py); else { ctx.moveTo(px, py); pen = true; }
+    }
+    ctx.stroke();
+  });
+  ctx.restore();
+
+  // niceTicks, not ticksFor: that helper's toPixel takes a fractional *index*,
+  // and toX here maps a value. A raw record is uniformly sampled so the two
+  // agree numerically, but only by coincidence of this data.
+  drawAxes(ctx, niceTicks(xLo, xHi, 7, toX), axisLabel(c.x),
+           niceTicks(lo, hi, 5, toY), axisLabel(c.y), CONTEXT_H);
+
+  if (c.traces.length > 1)
+    drawLegend(ctx, c.traces.map(tr => tr.name || ""),
+               i => CONTEXT_COLORS[i % CONTEXT_COLORS.length]);
+}
+
+const contextFigure = document.getElementById("context");
+const contextCtx = DATA.context
+  ? document.getElementById("contextCanvas").getContext("2d")
+  : null;
+if (DATA.context) {
+  contextFigure.hidden = false;
+  document.getElementById("contextCaption").textContent = DATA.context.title || "";
+  contextCtx.canvas.style.aspectRatio = `${CANVAS_W} / ${CONTEXT_CANVAS_H}`;
 }
 
 // ------------------------------------------------------------ panel assembly
@@ -569,7 +863,7 @@ const panelHost = document.getElementById("panels");
 const contexts = DATA.panels.map((panel, p) => {
   const figure = document.createElement("figure");
   const caption = document.createElement("figcaption");
-  caption.textContent = panel.unit ? `${panel.name} [${panel.unit}]` : panel.name;
+  caption.textContent = axisLabel({ label: panel.name, unit: panel.unit });
 
   // The canvas is laid out by CSS at whatever width its grid track gives it,
   // but its backing store is sized in device pixels: CSS width x the display's
@@ -610,8 +904,10 @@ function reportHover(event, canvas, panel, p) {
       `${DATA.y.values[iy].toFixed(1)} ${DATA.y.unit}) ` +
       `= ${fmt(frame[iy][ix])}${panel.unit ? " " + panel.unit : ""}`;
   } else {
-    const j = Math.round((mx - PAD.left) / PLOT_W * (xs.length - 1));
-    const clamped = Math.max(0, Math.min(xs.length - 1, j));
+    // Invert whichever mapping drawLinePanel used: a log x places samples by
+    // value, so the linear index-fraction inverse would name a bin from the
+    // wrong decade -- the readout disagreeing with the pixel under the cursor.
+    const clamped = nearestX(mx, xs);
     // Report every trace at the hovered position: with two curves on a panel,
     // reading only the first would answer the wrong half of the question.
     const unit = panel.unit ? " " + panel.unit : "";
@@ -620,7 +916,7 @@ function reportHover(event, canvas, panel, p) {
       return panel.traces.length > 1 ? `${panel.traces[t]} ${value}` : value;
     });
     hoverOut.textContent =
-      `${panel.name} at ${xs[clamped].toFixed(1)} ${DATA.x.unit} = ` +
+      `${panel.name} at ${fmt(xs[clamped])} ${DATA.x.unit} = ` +
       reads.join(",  ");
   }
 }
@@ -636,8 +932,17 @@ function render() {
   frameSlider.max = axis.values.length - 1;
   if (+frameSlider.value > +frameSlider.max) frameSlider.value = frameSlider.max;
   const i = +frameSlider.value;
-  axisReadout.textContent =
-    `${axis.name} ${fmt(axis.values[i])} ${axis.unit}`;
+  // `labels` gives an axis its own per-index text (an (x, y) location, a run
+  // name); without it the readout is the numeric value and its unit.
+  axisReadout.textContent = axis.labels
+    ? axis.labels[i]
+    : `${axis.name} ${fmt(axis.values[i])} ${axis.unit}`;
+
+  // Independent of the frame index, so it is repainted only when its canvas was
+  // resized -- which is also the only thing that clears it.
+  if (contextCtx && resizeCanvas(contextCtx, CONTEXT_CANVAS_H)) {
+    drawContext(contextCtx);
+  }
 
   DATA.panels.forEach((panel, p) => {
     const ctx = contexts[p];
@@ -656,20 +961,24 @@ function render() {
  * window: the grid re-flows from two columns to one, and the page can move
  * between displays of different pixel ratios.
  */
-function resizeCanvas(ctx) {
+function resizeCanvas(ctx, canvasH = CANVAS_H) {
   const canvas = ctx.canvas;
   const cssW = canvas.clientWidth;
-  if (!cssW) return;                       // not laid out yet (display:none)
+  if (!cssW) return false;                 // not laid out yet (display:none)
   // Capped because the backing store costs width x height x 4 bytes per panel,
   // and past ~2x the extra detail is beyond what a display resolves.
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const target = Math.round(cssW * dpr);
-  if (canvas.width !== target) {
+  // Assigning canvas.width CLEARS the backing store, so the caller is told:
+  // static content (the context figure) must be repainted exactly then.
+  const resized = canvas.width !== target;
+  if (resized) {
     canvas.width = target;
-    canvas.height = Math.round(target * CANVAS_H / CANVAS_W);
+    canvas.height = Math.round(target * canvasH / CANVAS_W);
   }
   // setTransform, not scale: this runs every render and scale() would compound.
   ctx.setTransform(canvas.width / CANVAS_W, 0, 0, canvas.width / CANVAS_W, 0, 0);
+  return resized;
 }
 
 // Re-draw when the panel width changes: the grid re-flows at breakpoints, and

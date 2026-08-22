@@ -11,9 +11,11 @@ module knows nothing about any diagnostic, and no analysis module imports it.
 Every preliminary-data product decomposes into three independent parts, and the
 bundle is exactly those three:
 
-**geometry** -- the spatial layout, decided *solely by the position data*
-(``plane`` -> heatmap panels, ``line`` -> profile panels). This is the same rule
-:func:`data_analysis.viz.plot_utils.grid_frames` already applies.
+**geometry** -- the panel form: ``plane`` -> heatmap panels, ``line`` -> profile
+panels. For a position scan the position data decides it, exactly as
+:func:`data_analysis.viz.plot_utils.grid_frames` does. The panel axes need not
+be spatial, though: ``x`` is simply the panel's horizontal axis, so a ``line``
+panel plots amplitude against *frequency* just as readily as against X position.
 
 **axis** -- the one scan dimension the slider scrubs, *typed and
 self-describing* (``name``/``unit``/``values``). Frequency (a cross-spectral
@@ -33,12 +35,20 @@ fourth dimension: every group shares the one geometry, and differs only in which
 signal was measured or when. That is what makes them comparable by switching
 rather than by opening two files.
 
-Groups share the *spatial* axes always -- they are measured on the same probe
-line or plane, which is what makes switching a comparison rather than a change
-of subject. The *scan* axis is per group: a group may carry its own ``axis``,
+Groups share the panel axes always -- they are measured on the same probe line
+or plane (or, for a non-spatial panel, resolved on the same ``x``), which is
+what makes switching a comparison rather than a change of subject. The *scan* axis is per group: a group may carry its own ``axis``,
 falling back to the bundle's. Where groups differ in length the slider keeps the
 **index** across a switch and the readout shows the real value for the group now
 selected.
+
+A bundle may also carry a **context** block: one static plot drawn once above
+the panels, with an optional shaded x-span. It answers "what was analysed, and
+over what part of the record?" -- a raw trace with the FFT window shaded, say.
+It is deliberately not a field: it does not move with the slider, shares none of
+the panel axes, and carries a single curve per trace rather than a frame cube.
+Stating the analysis window in the banner says *what* the number was; showing it
+on the record says whether it was the right one.
 
 A field draws one curve by default (``frames``). For ``line`` geometry it may
 instead carry several named **traces** (``traces``), drawn on one panel against
@@ -56,8 +66,14 @@ Schema v1
         "geometry": "plane" | "line",
         "axis": {"name": "frequency",       # THE scan axis (exactly one)
                  "unit": "kHz",
-                 "values": (n_axis,) float},        # monotonic
+                 "values": (n_axis,) float,         # monotonic
+                 "labels": [str] | None},   # optional per-index readout text,
+                                            # e.g. "(-12.0, 4.0) cm"; without it
+                                            # the readout is value + unit
+        # The panel's horizontal axis -- spatial or not:
         "x": {"label": "X position", "unit": "cm", "values": (nx,) float},
+        #   or {"label": "frequency", "unit": "kHz", "values": (nx,) float,
+        #       "scale": "log"}          # "linear" (default) | "log"
         "y": {...},                         # plane only; omitted for a line
         "fields": [                         # one or more, order = panel order
             {"name": "coherence",
@@ -68,6 +84,8 @@ Schema v1
             # ... OR "traces" instead of "frames" (line geometry only):
             {"name": "Vp", "unit": "V", "cmap": "viridis",
              "vmin": None, "vmax": None,
+             # "yscale": "log",           # line geometry only; needs vmin > 0
+             #                            # if fixed. Default "linear".
              "traces": [{"name": "tip L", "frames": ndarray},
                         {"name": "tip R", "frames": ndarray}]},
         ],
@@ -77,6 +95,15 @@ Schema v1
              "axis": {...},                 # optional; defaults to the above
              "fields": [...]},              # same field list as above
         ],
+        # Optional static figure above the panels -- NOT a slider frame:
+        "context": {
+            "title": "raw Isat, position 0",
+            "x": {"label": "time", "unit": "ms", "values": (nt,) float},
+            "y": {"label": "signal", "unit": "V"},
+            "traces": [{"name": "C2", "values": (nt,) float}],
+            "span": [1.5, 5.0],             # optional shaded x-range
+            "span_label": "FFT window",     # optional caption for the shading
+        },
         "provenance": {"source": str, "params": {...}},   # rendered as a banner
         "warning": str | None,              # optional caveat banner
     }
@@ -194,6 +221,42 @@ def field_traces(field):
     return [{"name": "", "frames": field.get("frames")}]
 
 
+def _require_context(context, _require):
+    """Validate an optional ``context`` block (see the schema in the module doc).
+
+    Split out of :func:`validate_bundle` because it shares none of the panel
+    machinery: its traces are single curves, not frame cubes, and its axes are
+    its own rather than the bundle's.
+    """
+    if context is None:
+        return
+    _require(isinstance(context, dict), "'context' must be a dict or absent")
+    for key in ("x", "y"):
+        entry = context.get(key)
+        _require(isinstance(entry, dict), f"'context.{key}' must be a dict")
+        for k in ("label", "unit"):
+            _require(k in entry, f"'context.{key}' is missing '{k}'")
+    xs = np.asarray(context["x"].get("values"), float)
+    _require(xs.ndim == 1 and xs.size > 0,
+             f"'context.x.values' must be 1-D and non-empty, got shape {xs.shape}")
+
+    traces = context.get("traces")
+    _require(isinstance(traces, (list, tuple)) and traces,
+             "'context.traces' must be a non-empty list of {name, values}")
+    for i, trace in enumerate(traces):
+        _require(isinstance(trace, dict), f"'context.traces[{i}]' must be a dict")
+        values = np.asarray(trace.get("values"), float)
+        _require(values.shape == xs.shape,
+                 f"'context.traces[{i}].values' has shape {values.shape}, "
+                 f"but 'context.x.values' has {xs.shape}")
+
+    span = context.get("span")
+    if span is not None:
+        _require(len(span) == 2, f"'context.span' must be [lo, hi], got {span!r}")
+        lo, hi = (float(v) for v in span)
+        _require(lo < hi, f"'context.span' must have lo < hi, got {span!r}")
+
+
 def validate_bundle(bundle):
     """Check a bundle against schema v1; raise ``ValueError`` naming the key.
 
@@ -228,6 +291,15 @@ def validate_bundle(bundle):
         _require(np.all(np.diff(values) > 0) or np.all(np.diff(values) < 0),
                  f"'{where}.values' must be monotonic (it is the slider's order); "
                  f"got {values[:4]}...")
+        # Optional per-index readout text. It indexes by frame like the cubes
+        # do, so a short list renders 'undefined' at the end rather than failing.
+        labels = axis.get("labels")
+        if labels is not None:
+            _require(isinstance(labels, (list, tuple)),
+                     f"'{where}.labels' must be a list of strings")
+            _require(len(labels) == values.size,
+                     f"'{where}.labels' has {len(labels)} entries but "
+                     f"'{where}.values' has {values.size}; they index together")
         return values.size
 
     n_axis = _check_axis(bundle.get("axis"), "axis")
@@ -243,9 +315,18 @@ def validate_bundle(bundle):
         values = np.asarray(entry["values"], float)
         _require(values.ndim == 1 and values.size > 0,
                  f"'{key}.values' must be 1-D and non-empty, got shape {values.shape}")
+        scale = entry.get("scale", "linear")
+        _require(scale in ("linear", "log"),
+                 f"'{key}.scale' must be 'linear' or 'log', got {scale!r}")
+        # A log axis has no pixel for <= 0, so an axis that is entirely
+        # non-positive would draw nothing at all.
+        _require(scale != "log" or np.any(values > 0),
+                 f"'{key}.scale' is 'log' but no '{key}.values' entry is > 0")
         sizes[key] = values.size
     if geometry == "line":
         _require("y" not in bundle, "'y' is meaningless for geometry 'line'; drop it")
+
+    _require_context(bundle.get("context"), _require)
 
     _require(("fields" in bundle) != ("groups" in bundle),
              "set exactly one of 'fields' (single channel) or 'groups' "
@@ -328,6 +409,17 @@ def validate_bundle(bundle):
             _require(vmin is None or vmin < vmax,
                      f"{where} ('{field['name']}') needs vmin < vmax, "
                      f"got vmin={vmin}, vmax={vmax}")
+            yscale = field.get("yscale", "linear")
+            _require(yscale in ("linear", "log"),
+                     f"{where} ('{field['name']}') has yscale {yscale!r}; "
+                     "expected 'linear' or 'log'")
+            _require(yscale != "log" or geometry == "line",
+                     f"{where} ('{field['name']}') sets yscale 'log', which "
+                     "scales a line panel's y-axis; geometry 'plane' has no "
+                     "y-axis to scale (use vmin/vmax for a heatmap's range)")
+            _require(yscale != "log" or vmin is None or vmin > 0,
+                     f"{where} ('{field['name']}') sets yscale 'log' with "
+                     f"vmin={vmin}; a log axis needs vmin > 0")
 
         # _payload emits the panel row once, from the first group, and the
         # page builds its canvases from that row. A group whose layout differed
@@ -391,6 +483,16 @@ def _jsonable(value):
 #: way, so exempting them would buy precision nothing downstream reads.
 PAYLOAD_DECIMALS = 4
 
+#: Significant digits kept for a ``yscale: "log"`` field's frames instead of
+#: :data:`PAYLOAD_DECIMALS`. Absolute rounding assumes the reader's resolution
+#: is uniform across the range, which is exactly what a log axis denies: on a
+#: Jun-2026 Isat spectrum spanning 3.4e-05..8.8e-02 V, 4 dp flushes the smallest
+#: bins to zero outright -- and zero has no pixel on a log axis, so the curve
+#: acquires gaps where the data is merely small. Relative rounding holds the
+#: error at ~0.05% of a decade everywhere, and (formatted decimally, see
+#: :func:`_round_frames`) costs slightly fewer bytes than 4 dp absolute.
+PAYLOAD_SIGFIGS = 6
+
 
 def _frames_array(frames):
     """A frame cube as a plain float array, masked entries becoming NaN.
@@ -422,6 +524,29 @@ def _round_floats(value):
     return value
 
 
+def _round_frames(frames, field):
+    """One trace's cube rounded for the payload, by the field's y-scale.
+
+    Linear fields round to :data:`PAYLOAD_DECIMALS` (absolute); log fields to
+    :data:`PAYLOAD_SIGFIGS` (relative), because a log axis resolves small values
+    as finely as large ones and absolute rounding would erase the bottom decades.
+    """
+    arr = _frames_array(frames)
+    if field.get("yscale") != "log":
+        return np.round(arr, PAYLOAD_DECIMALS)
+    # Round through the decimal repr rather than by scaling: v * 10**shift then
+    # back lands on 3.0000000000000004 for 3.0, which json.dumps writes in full
+    # -- ~28% more bytes for the same precision -- and overflows to inf below
+    # ~1e-304. float(f"{v:.6g}") is exact for both. Zeros, negatives and NaN
+    # have no log and pass through; the page already draws them as gaps.
+    out = np.array(arr, dtype=float, copy=True)
+    pos = np.isfinite(out) & (out > 0)
+    if pos.any():
+        fmt = f"%.{PAYLOAD_SIGFIGS}g".__mod__
+        out[pos] = [float(fmt(v)) for v in out[pos]]
+    return out
+
+
 def _colormap_lut(name, n=256):
     """``name`` as an ``n x 3`` uint8 RGB lookup table, as nested lists.
 
@@ -443,9 +568,11 @@ def _payload(bundle):
     page has one panel row to build its canvases from, whichever channel is
     selected.
 
-    Every float here is rounded to :data:`PAYLOAD_DECIMALS`; the ``.npz`` beside
-    the page keeps full precision, so the bundle -- not the page -- is what to
-    re-read for anything quantitative.
+    Every float here is rounded to :data:`PAYLOAD_DECIMALS`, except a log
+    field's frames, which keep :data:`PAYLOAD_SIGFIGS` significant digits
+    instead (see :func:`_round_frames`). The ``.npz`` beside the page keeps full
+    precision, so the bundle -- not the page -- is what to re-read for anything
+    quantitative.
     """
     groups = bundle_groups(bundle)
 
@@ -465,11 +592,19 @@ def _payload(bundle):
             # across groups by the layout rule, so they ride with the panel;
             # only the cubes below vary per group.
             "traces": [t.get("name", "") for t in field_traces(field)],
+            # "linear" (the default) or "log"; the page's y-mapping and tick
+            # generator branch on it.
+            "yscale": field.get("yscale", "linear"),
         })
 
     def _axis_payload(axis):
-        return {"name": axis["name"], "unit": axis["unit"],
-                "values": _jsonable(np.asarray(axis["values"], float))}
+        entry = {"name": axis["name"], "unit": axis["unit"],
+                 "values": _jsonable(np.asarray(axis["values"], float))}
+        # Optional per-index readout text, e.g. "(-12.0, 4.0) cm" for a scan
+        # whose index alone ("position 37") would not say where it is.
+        if axis.get("labels") is not None:
+            entry["labels"] = [str(s) for s in axis["labels"]]
+        return entry
 
     # A group ships its own axis only when it actually overrides the bundle's;
     # the page falls back to the bundle axis otherwise. Emitting it
@@ -479,8 +614,7 @@ def _payload(bundle):
         entry = {"name": group.get("name", "")}
         if group.get("axis"):
             entry["axis"] = _round_floats(_axis_payload(group["axis"]))
-        entry["frames"] = [[_jsonable(np.round(_frames_array(t["frames"]),
-                                               PAYLOAD_DECIMALS))
+        entry["frames"] = [[_jsonable(_round_frames(t["frames"], f))
                             for t in field_traces(f)]
                            for f in group["fields"]]
         return entry
@@ -497,7 +631,31 @@ def _payload(bundle):
     }
     if bundle["geometry"] == "plane":
         payload["y"] = _round_floats(_jsonable(bundle["y"]))
+    if bundle.get("context"):
+        payload["context"] = _context_payload(bundle["context"])
     return payload
+
+
+def _context_payload(context):
+    """The context block as JSON, its curves rounded as arrays.
+
+    Arrays go through :func:`np.round` and the scalar spine through
+    :func:`_round_floats`, matching how the frame cubes are handled -- walking
+    the curves element-wise in Python would cost thousands of interpreter
+    round-trips to reach the same numbers.
+    """
+    def curve(values):
+        return _jsonable(np.round(np.asarray(values, float), PAYLOAD_DECIMALS))
+
+    entry = _round_floats({k: v for k, v in context.items()
+                           if k not in ("x", "traces")})
+    entry["x"] = _round_floats({k: v for k, v in context["x"].items()
+                                if k != "values"})
+    entry["x"]["values"] = curve(context["x"]["values"])
+    entry["traces"] = [{**{k: v for k, v in trace.items() if k != "values"},
+                        "values": curve(trace["values"])}
+                       for trace in context["traces"]]
+    return entry
 
 
 def _script_json(obj):
@@ -543,11 +701,27 @@ def save_bundle(bundle, path):
         arrays["__y_values__"] = np.asarray(bundle["y"]["values"], float)
 
     spine = {k: v for k, v in bundle.items()
-             if k not in ("axis", "x", "y", "fields", "groups")}
-    spine["axis"] = {"name": bundle["axis"]["name"], "unit": bundle["axis"]["unit"]}
+             if k not in ("axis", "x", "y", "fields", "groups", "context")}
+    # Everything but the values, like 'x'/'y' below and the per-group axis: an
+    # allowlist here would silently drop any axis key added later (it dropped
+    # 'labels').
+    spine["axis"] = {k: v for k, v in bundle["axis"].items() if k != "values"}
     spine["x"] = {k: v for k, v in bundle["x"].items() if k != "values"}
     if bundle["geometry"] == "plane":
         spine["y"] = {k: v for k, v in bundle["y"].items() if k != "values"}
+    # The context block's curves are arrays too: left in the spine they would
+    # serialize as JSON number lists, costing several times their npz size.
+    if bundle.get("context"):
+        context = bundle["context"]
+        arrays["__context_x__"] = np.asarray(context["x"]["values"], float)
+        entry = {k: v for k, v in context.items() if k not in ("x", "traces")}
+        entry["x"] = {k: v for k, v in context["x"].items() if k != "values"}
+        entry["traces"] = []
+        for i, trace in enumerate(context["traces"]):
+            arrays[f"__context_trace_{i}__"] = np.asarray(trace["values"], float)
+            entry["traces"].append({k: v for k, v in trace.items()
+                                    if k != "values"})
+        spine["context"] = entry
 
     # Frame cubes are keyed by (group, field) so a multi-channel bundle round
     # trips as one file. Everything is written in the grouped spelling, single
@@ -604,6 +778,10 @@ def load_bundle(path):
         bundle["x"]["values"] = data["__x_values__"]
         if bundle["geometry"] == "plane":
             bundle["y"]["values"] = data["__y_values__"]
+        if bundle.get("context"):
+            bundle["context"]["x"]["values"] = data["__context_x__"]
+            for i, trace in enumerate(bundle["context"]["traces"]):
+                trace["values"] = data[f"__context_trace_{i}__"]
 
         if "groups" not in bundle:                      # pre-groups npz
             for i, field in enumerate(bundle["fields"]):
