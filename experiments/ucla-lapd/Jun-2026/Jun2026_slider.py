@@ -90,11 +90,22 @@ def slider_path(name, subdir=FIG_SUBDIR):
     return fig_path(name, subdir, ext=".html")
 
 
-def _xcorr_params(freq_khz, fmax_khz, gamma2_floor):
-    """The provenance ``params`` block shared by both xcorr pages."""
+def _xcorr_params(freq_khz, fmax_khz, gamma2_floor, stored=None):
+    """The provenance ``params`` block shared by both xcorr pages.
+
+    ``stored`` is the npz's own record of the batch settings
+    (:func:`Jun2026_xcorr.stored_settings`). The module constants are only a
+    fallback for a file written before they were recorded: they are read at
+    *render* time, so a constant edited between batch and render would state a
+    window no stored pair was ever computed with.
+    """
+    stored = stored or {}
+    window = stored.get("window")
+    nperseg = stored.get("nperseg")
     params = {"band": f"0-{fmax_khz:g} kHz ({freq_khz.size} bins)",
-              "window": f"{jxc.TMIN_MS}-{jxc.TMAX_MS} ms",
-              "nperseg": jxc.NPERSEG}
+              "window": window or f"{jxc.TMIN_MS}-{jxc.TMAX_MS} ms (not recorded)",
+              "nperseg": nperseg if nperseg is not None
+                         else f"{jxc.NPERSEG} (not recorded)"}
     if gamma2_floor is not None:
         params["phase masked below gamma2"] = gamma2_floor
     return params
@@ -193,7 +204,8 @@ def emit_xcorr_slider(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
     # recognizably the same run.
     run_label = jpl.run_title(ifn, run_num) or f"{run_num} xcorr plane"
     pair_label = jxc.pair_label(ch_a, ch_b)
-    params = _xcorr_params(freq_khz, fmax_khz, gamma2_floor)
+    params = _xcorr_params(freq_khz, fmax_khz, gamma2_floor,
+                           jxc.stored_settings(npz_path or jxc.xcorr_npz_path(ifn)))
 
     bundle = {
         "schema": SCHEMA_VERSION,
@@ -290,7 +302,8 @@ def emit_xcorr_slider_all(ifn, npz_path=None, pairs=None,
         "y": {"label": "Y position", "unit": "cm", "values": ys},
         "groups": groups,
         "provenance": {"source": os.path.basename(ifn),
-                       "params": _xcorr_params(freq_khz, fmax_khz, gamma2_floor),
+                       "params": _xcorr_params(freq_khz, fmax_khz, gamma2_floor,
+                                               jxc.stored_settings(npz_path)),
                        # Every channel the dropdown's pairs are built from, each
                        # named once however many pairs it takes part in.
                        "details": _channel_details(
@@ -342,12 +355,18 @@ IV_TIP_JITTER_MS = 0.02
 def _iv_run_group(data_dir, run_num, tips, calibrated=True):
     """One run as a slider *group*: per-tip traces of each field, vs position.
 
-    Returns ``(group, xpos)``, or ``None`` when the run cannot be read. Each
-    field carries one trace per tip, so a frame shows both tips of the same
-    quantity against one y-axis -- the comparison the static figure could only
-    make by drawing separate lines per timestamp.
+    Returns ``(group, xpos, ne_calibrated)``, or ``None`` when the run cannot be
+    read. Each field carries one trace per tip, so a frame shows both tips of
+    the same quantity against one y-axis -- the comparison the static figure
+    could only make by drawing separate lines per timestamp.
+
+    ``ne_calibrated`` is what actually happened, not what was asked for:
+    :func:`Jun2026_plot._load_ne` falls back to raw ne for any tip whose
+    calibration array is missing, and a banner that repeated the *request*
+    would label raw densities as interferometer-calibrated.
     """
     traces_by_field = {name: [] for name, _ in IV_FIELDS}
+    ne_calibrated = calibrated
     axis_values, xpos = None, None
 
     for tip in tips:
@@ -357,7 +376,12 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
         except (FileNotFoundError, OSError, KeyError) as exc:
             print(f"  (IV: run {run_num} tip {tip} unreadable: {exc})")
             return None
-        ne = jpl._load_ne(data_dir, run_num, tip, ne, calibrated)
+        # _load_ne hands back the very array it was given when the run has no
+        # calibration yet (it only prints a note), so identity is the signal.
+        ne_cal = jpl._load_ne(data_dir, run_num, tip, ne, calibrated)
+        if ne_cal is ne:
+            ne_calibrated = False
+        ne = ne_cal
 
         # Some runs store one more timestamp than they have sweeps. The static
         # figure indexes t_ls[t_idx] for t_idx < n_sweeps, i.e. it uses the
@@ -407,7 +431,7 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
                     "traces": traces_by_field[name]}
                    for name, unit in IV_FIELDS],
     }
-    return group, xpos
+    return group, xpos, ne_calibrated
 
 
 def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
@@ -432,6 +456,9 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
     real time for the run now selected.
     """
     groups, xpos, shared_label = [], None, None
+    # False as soon as ANY rendered run fell back to raw ne: one banner covers
+    # the whole page, so it must state the weakest guarantee on it.
+    ne_calibrated = calibrated
     for ifn in ifns:
         data_dir = os.path.dirname(ifn)
         run_num = run_num_of(ifn)
@@ -443,7 +470,8 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
         prepared = _iv_run_group(data_dir, run_num, tips, calibrated)
         if prepared is None:
             continue
-        group, xs = prepared
+        group, xs, run_ne_calibrated = prepared
+        ne_calibrated = ne_calibrated and run_ne_calibrated
 
         # The delay time is the knob that distinguishes these runs, so it is
         # what the dropdown says -- "23 ms", not "run 24".
@@ -475,7 +503,7 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
         "groups": groups,
         "provenance": {
             "source": f"{len(groups)} runs, {os.path.basename(os.path.dirname(ifns[0]))}",
-            "params": {"ne": "interferometer-calibrated" if calibrated else "raw",
+            "params": {"ne": _ne_provenance(calibrated, ne_calibrated),
                        "tips": "overlaid per frame",
                        "positions": xpos.size},
             # Every run on this page uses the same probe, so one run's tip
@@ -552,8 +580,8 @@ def emit_isat_fft_slider(ifn, npz_path=None, chans=None,
         freq_khz = freq_khz[band]
         # Read inside the `with`: an NpzFile is a lazy zip handle, and the
         # bundle below is built after it has closed.
-        window = ([float(d["tmin_ms"]), float(d["tmax_ms"])]
-                  if "tmin_ms" in d.files else None)
+        window = _stored_window(d, chans)
+        d_files = set(d.files)
         context = _fft_window_context(d, chans, window)
 
     run_num = run_num_of(ifn)
@@ -575,8 +603,7 @@ def emit_isat_fft_slider(ifn, npz_path=None, chans=None,
             "source": os.path.basename(ifn),
             "params": {"band": f"{fmin_khz:g}-{fmax_khz:g} kHz "
                                f"({freq_khz.size} bins)",
-                       "FFT window": (f"{window[0]:g}-{window[1]:g} ms"
-                                      if window else "not recorded"),
+                       "FFT window": _window_text(d_files, chans, window),
                        "positions": pos_x.size},
             "details": _channel_details(ifn, chans),
         },
@@ -585,6 +612,35 @@ def emit_isat_fft_slider(ifn, npz_path=None, chans=None,
 
     name = f"{run_num}-isat-fft-slider-0to{fmax_khz:g}kHz"
     return write_slider_html(bundle, out or slider_path(name))
+
+
+def _window_text(d_files, chans, window):
+    """Banner text for the FFT window: the value, 'mixed', or 'not recorded'."""
+    if window:
+        return f"{window[0]:g}-{window[1]:g} ms"
+    if all(f"{k}__tmin_ms" in d_files for k in chans):
+        return "mixed (channels analysed over different windows)"
+    return "not recorded"
+
+
+def _stored_window(d, chans):
+    """The FFT window ``[tmin_ms, tmax_ms]`` these channels share, else ``None``.
+
+    Stored per channel because it is a per-call argument: a second
+    :func:`Jun2026_Isat.batch_fft_by_position` call with a different window
+    leaves earlier channels' spectra untouched, so one page can hold two. The
+    banner and the shaded span state one window, so they may only do so when
+    the channels agree -- otherwise the page says "mixed" and shades nothing,
+    rather than labelling half its traces with a window they never saw.
+    """
+    windows = set()
+    for k in chans:
+        if f"{k}__tmin_ms" not in d.files:
+            return None                      # npz predates per-channel windows
+        windows.add((float(d[f"{k}__tmin_ms"]), float(d[f"{k}__tmax_ms"])))
+    if len(windows) != 1:
+        return None
+    return list(windows.pop())
 
 
 def _channel_details(ifn, chans):
@@ -693,6 +749,14 @@ def emit_isat_fft_sliders(ifns, **kwargs):
     with nothing stored.
     """
     return [p for p in (emit_isat_fft_slider(f, **kwargs) for f in ifns) if p]
+
+
+def _ne_provenance(requested, actual):
+    """Banner text for the ne density: what was used, not what was asked for."""
+    if not requested:
+        return "raw"
+    return ("interferometer-calibrated" if actual
+            else "raw (calibration missing; run calibrate_plasma_npz)")
 
 
 def _delay_label(ifn):

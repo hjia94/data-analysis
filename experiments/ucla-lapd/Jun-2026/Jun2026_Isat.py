@@ -156,7 +156,8 @@ def batch_fft_by_position(ifn, scope_name=ISAT_SCOPE, chans=None,
     ``freq`` axis valid.
 
     Writes ``<run>-isat-fft-data.npz`` (:func:`isat_npz_path`) holding ``pos_x``
-    / ``pos_y`` (cm), the FFT window ``tmin_ms`` / ``tmax_ms``, and, per channel,
+    / ``pos_y`` (cm) and, per channel, the FFT window
+    ``__tmin_ms`` / ``__tmax_ms``,
     ``<scope>-<chan>__amp`` ``(npos, nfreq)``, ``__nshots`` ``(npos,)``,
     ``__freq`` (Hz) and ``__raw`` -- one decimated UNCLIPPED shot
     (:data:`RAW_TRACE_SAMPLES`) that the page draws the window on, so a reader
@@ -195,8 +196,7 @@ def batch_fft_by_position(ifn, scope_name=ISAT_SCOPE, chans=None,
     # The window is stored, not just applied: the page shades it on the raw
     # trace, and re-deriving it from the clipped array bounds would be an
     # inference where the number itself is available.
-    arrays = {"pos_x": pos_x, "pos_y": pos_y,
-              "tmin_ms": np.float64(tmin_ms), "tmax_ms": np.float64(tmax_ms)}
+    arrays = {"pos_x": pos_x, "pos_y": pos_y}
     freq = None
     with tqdm(total=len(chans) * npos, desc="Isat FFT", unit="pos") as bar:
         for scope, chan in chans:
@@ -231,6 +231,12 @@ def batch_fft_by_position(ifn, scope_name=ISAT_SCOPE, chans=None,
             arrays[f"{key}__nshots"] = np.asarray(counts)
             arrays[f"{key}__freq"] = freq
             arrays[f"{key}__raw"] = raw
+            # Per channel, like __freq: merge_save_npz keeps other channels'
+            # arrays, so a file-level window would be overwritten by a second
+            # call while the spectra it described stayed as they were --
+            # relabelling them with a window they were never computed over.
+            arrays[f"{key}__tmin_ms"] = np.float64(tmin_ms)
+            arrays[f"{key}__tmax_ms"] = np.float64(tmax_ms)
     out_path = isat_npz_path(ifn)
     merge_save_npz(out_path, arrays)
     print(f"Wrote {out_path} ({len(chans)} channels x {npos} positions, "

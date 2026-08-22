@@ -231,6 +231,32 @@ def pair_label(ch_a, ch_b):
     return f"{ch_a[0]}/{ch_a[1]} vs {ch_b[0]}/{ch_b[1]}"
 
 
+def stored_settings(npz_path, pair_key=None):
+    """The batch settings a run's xcorr npz recorded: ``{window, nperseg}``.
+
+    ``{}`` for a file written before :func:`batch_xcorr` stored them, and for a
+    file whose pairs disagree -- one page carries one banner, and a single
+    number there would have to pick a pair to be true of. ``pair_key`` reads one
+    pair's settings instead of requiring agreement.
+    """
+    if not npz_path or not os.path.isfile(npz_path):
+        return {}
+    with np.load(npz_path) as d:
+        keys = ([pair_key] if pair_key else
+                [k.removesuffix("__nperseg") for k in d.files
+                 if k.endswith("__nperseg")])
+        found = set()
+        for k in keys:
+            if f"{k}__nperseg" not in d.files:
+                continue
+            found.add((float(d[f"{k}__tmin_ms"]), float(d[f"{k}__tmax_ms"]),
+                       int(d[f"{k}__nperseg"])))
+    if len(found) != 1:
+        return {}
+    tmin, tmax, nperseg = found.pop()
+    return {"window": f"{tmin:g}-{tmax:g} ms", "nperseg": nperseg}
+
+
 def stored_pairs(npz_path):
     """The channel-pair keys a run's xcorr npz actually holds.
 
@@ -349,6 +375,14 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
     key = _pair_key(ch_a, ch_b)
     merge_save_npz(out_path, {
         "freq": freq, "pos_x": pos_x, "pos_y": pos_y,
+        # Per pair, not per file: these are arguments, so two pairs in one npz
+        # can legitimately differ in them (the freq guard above is blind to the
+        # window -- Welch's axis depends only on nperseg and dt). A page that
+        # read the module constants instead would state whatever they say at
+        # RENDER time, which no stored pair need have been computed with.
+        f"{key}__tmin_ms": np.float64(tmin_ms),
+        f"{key}__tmax_ms": np.float64(tmax_ms),
+        f"{key}__nperseg": np.int64(nperseg),
         f"{key}__gamma2": gamma2, f"{key}__phase": phase,
         f"{key}__nshots": nshots,
     })

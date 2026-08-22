@@ -289,6 +289,10 @@ def validate_bundle(bundle):
         values = np.asarray(axis["values"], float)
         _require(values.ndim == 1 and values.size > 0,
                  f"'{where}.values' must be 1-D and non-empty, got shape {values.shape}")
+        # inf passes a diff-based monotonic test and then serializes as null,
+        # silently breaking the readout on that frame.
+        _require(np.isfinite(values).all(),
+                 f"'{where}.values' must be finite; got {values[:4]}...")
         # The slider steps through these in order, so an unsorted axis would
         # scrub to frames that jump around the scan rather than sweeping it.
         _require(np.all(np.diff(values) > 0) or np.all(np.diff(values) < 0),
@@ -321,10 +325,21 @@ def validate_bundle(bundle):
         scale = entry.get("scale", "linear")
         _require(scale in ("linear", "log"),
                  f"'{key}.scale' must be 'linear' or 'log', got {scale!r}")
+        _require(np.isfinite(values).all(),
+                 f"'{key}.values' must be finite; got {values[:4]}...")
         # A log axis has no pixel for <= 0, so an axis that is entirely
         # non-positive would draw nothing at all.
         _require(scale != "log" or np.any(values > 0),
                  f"'{key}.scale' is 'log' but no '{key}.values' entry is > 0")
+        # The page places LINEAR samples by index (log ones by value), so a
+        # non-uniform linear axis draws points and ticks at disagreeing
+        # positions -- the tick labelled "2" left of the sample whose x is 1.
+        if scale == "linear" and values.size >= 3:
+            d = np.diff(values)
+            _require(d[0] != 0 and np.allclose(d, d[0], rtol=1e-3),
+                     f"'{key}.values' must be uniformly spaced on a linear "
+                     f"scale (the page places them by index); spacings start "
+                     f"{d[:4]}... -- use scale 'log' or resample")
         sizes[key] = values.size
     if geometry == "line":
         _require("y" not in bundle, "'y' is meaningless for geometry 'line'; drop it")
@@ -428,7 +443,11 @@ def validate_bundle(bundle):
         # page builds its canvases from that row. A group whose layout differed
         # would therefore render under another group's captions and colorbars,
         # so the layouts must agree.
-        signature = [(f["name"], f.get("unit", ""),
+        # Everything _payload serializes into the shared panel row must be in
+        # here: a key that is not (cmap, once) let a group with a different
+        # colormap or fixed scale validate, then draw under group 0's colorbar.
+        signature = [(f["name"], f.get("unit", ""), f["cmap"],
+                      f.get("vmin"), f.get("vmax"), f.get("yscale", "linear"),
                       tuple(t.get("name", "") for t in field_traces(f)))
                      for f in fields]
         if layout is None:
@@ -467,6 +486,10 @@ def _jsonable(value):
         return None if not math.isfinite(value) else float(value)
     if isinstance(value, (np.integer, int)) and not isinstance(value, bool):
         return int(value)
+    # np.bool_ is neither np.integer nor int in numpy 2; untouched, it crashes
+    # json.dumps -- and provenance flags read back from an npz are np.bool_.
+    if isinstance(value, np.bool_):
+        return bool(value)
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -517,6 +540,10 @@ def _round_floats(value):
     is one precision rule to state instead of a per-key exemption list. Kept
     apart from :func:`_jsonable`, which also serializes ``save_bundle``'s spine
     -- the bundle is the full-precision copy and must not be rounded.
+
+    The 4-decimal cut is absolute, not relative: the digitizer and its analog
+    chain do not resolve below it, so a value small enough to be flushed to 0
+    here carries no measurement the page could misstate.
     """
     if isinstance(value, float):
         return round(value, PAYLOAD_DECIMALS)
@@ -650,12 +677,15 @@ def _context_payload(context):
     def curve(values):
         return _jsonable(np.round(np.asarray(values, float), PAYLOAD_DECIMALS))
 
-    entry = _round_floats({k: v for k, v in context.items()
-                           if k not in ("x", "traces")})
-    entry["x"] = _round_floats({k: v for k, v in context["x"].items()
-                                if k != "values"})
+    # Through _jsonable first: a numpy scalar or array in the spine (a span
+    # built with np.float32) validates, and would otherwise crash json.dumps.
+    entry = _round_floats(_jsonable({k: v for k, v in context.items()
+                                     if k not in ("x", "traces")}))
+    entry["x"] = _round_floats(_jsonable({k: v for k, v in context["x"].items()
+                                          if k != "values"}))
     entry["x"]["values"] = curve(context["x"]["values"])
-    entry["traces"] = [{**{k: v for k, v in trace.items() if k != "values"},
+    entry["traces"] = [{**_round_floats(_jsonable(
+                            {k: v for k, v in trace.items() if k != "values"})),
                         "values": curve(trace["values"])}
                        for trace in context["traces"]]
     return entry

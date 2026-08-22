@@ -164,14 +164,18 @@ const PLOT_H = IS_PLANE ? 360 : 260;
 const CANVAS_W = PAD.left + PLOT_W + PAD.right;
 const CANVAS_H = PAD.top + PLOT_H + PAD.bottom;
 
-const NAN_COLOR = getComputedStyle(document.documentElement)
-  .getPropertyValue("--nan").trim() || "#b9bcc0";
-const INK = getComputedStyle(document.documentElement)
-  .getPropertyValue("--ink").trim() || "#1a1f26";
-const RULE = getComputedStyle(document.documentElement)
-  .getPropertyValue("--rule").trim() || "#e3e2dc";
-const PANEL_BG = getComputedStyle(document.documentElement)
-  .getPropertyValue("--panel").trim() || "#fafaf7";
+// Re-read on a scheme change (see the matchMedia listener at the bottom):
+// the CSS ground flips instantly, but canvas ink is baked in at draw time, so
+// values frozen at load would paint the old theme's ink on the new ground.
+let NAN_COLOR, INK, RULE, PANEL_BG;
+function readThemeColors() {
+  const style = getComputedStyle(document.documentElement);
+  NAN_COLOR = style.getPropertyValue("--nan").trim() || "#b9bcc0";
+  INK = style.getPropertyValue("--ink").trim() || "#1a1f26";
+  RULE = style.getPropertyValue("--rule").trim() || "#e3e2dc";
+  PANEL_BG = style.getPropertyValue("--panel").trim() || "#fafaf7";
+}
+readThemeColors();
 
 // The analysed span, drawn under the record. Semi-transparent rather than a
 // theme colour: it must read as a highlight over both themes' panel grounds,
@@ -526,9 +530,13 @@ function decadeTicks(lo, hi, max, toPixel) {
     if (out.length > 1 && out.length <= max) return out;
   }
   // Nothing fit (a sub-decade span): label the two ends, with enough digits to
-  // tell them apart -- these are arbitrary values, not decade rungs.
-  return [{ text: logTickText(lo, 3), pos: toPixel(lo) },
-          { text: logTickText(hi, 3), pos: toPixel(hi) }];
+  // tell them apart -- these are arbitrary values, not decade rungs, and a
+  // span narrower than ~0.5% needs more than 3 figures or both ends print
+  // the same string.
+  let sig = 3;
+  while (sig < 12 && logTickText(lo, sig) === logTickText(hi, sig)) sig++;
+  return [{ text: logTickText(lo, sig), pos: toPixel(lo) },
+          { text: logTickText(hi, sig), pos: toPixel(hi) }];
 }
 
 /**
@@ -900,6 +908,10 @@ function reportHover(event, canvas, panel, p) {
     const cell = cellAt(mx, my);
     if (!cell) { hoverOut.textContent = ""; return; }
     const { ix, iy } = cell;
+    // A plane field is single-curve by rule, so trace 0 is the cube. Without
+    // this binding, `frame` resolved to the <input id="frame"> element via
+    // named-window access and every mousemove threw.
+    const frame = cubesFor(p)[0][i];
     // Each coordinate carries its own unit: the schema allows x and y to
     // differ, so labelling both with x's would misreport the y position.
     hoverOut.textContent =
@@ -1032,8 +1044,28 @@ document.getElementById("playBtn").addEventListener("click", togglePlay);
 document.getElementById("prevBtn").addEventListener("click", () => step(-1));
 document.getElementById("nextBtn").addEventListener("click", () => step(1));
 document.addEventListener("keydown", e => {
+  // A focused control already handles arrows natively (the slider steps
+  // itself, a select changes its option); stepping here too would double
+  // every press -- and at frame 0 wrap to the end while the native handler
+  // then decremented. Modifier combos are browser shortcuts, not ours.
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  const tag = e.target && e.target.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
   if (e.key === "ArrowLeft") step(-1);
   else if (e.key === "ArrowRight") step(1);
+});
+
+// A live OS theme switch restyles the DOM by itself, but every canvas keeps
+// the ink it was painted with -- re-read the tokens and repaint. The context
+// figure is repainted explicitly: its canvas was not cleared (no resize), so
+// render() alone would leave it in the old theme.
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  readThemeColors();
+  if (contextCtx) {
+    resizeCanvas(contextCtx, CONTEXT_CANVAS_H);
+    drawContext(contextCtx);
+  }
+  render();
 });
 
 // An empty warning placeholder leaves a stray banner; drop it.
