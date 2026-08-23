@@ -27,32 +27,32 @@ import argparse
 import glob
 import json
 import os
-import re
 import subprocess
 import sys
 
 import h5py
 
 from data_analysis.io.lapd_hdf5 import detect_backend  # not re-exported by io/
+# The port parse and the [channels] parse are the SAME operation the analysis
+# path joins on (data_analysis.io.probe_map). Importing them rather than keeping
+# a copy is what stops this log and the analysis from disagreeing about which
+# channel belongs to which probe -- the one thing the log exists to state.
+from data_analysis.io.probe_map import config_text, parse_config_channels, ports_in
 
 # Bump when a field's meaning changes, so a regenerated log that differs can be
 # traced to the extractor rather than to the data.
-SCHEMA_VERSION = 1
+# v2: parse_channels reads the whole [channels] section as `<prefix>_C<n>`
+# instead of requiring a literal `_scope_` infix, which matched no channel in
+# configs that write `LPScope_C1` (the pre-v2 join saw zero channel ports).
+# v3: the port/[channels] parsers moved to data_analysis.io.probe_map; same
+# output, one implementation shared with the analysis path.
+SCHEMA_VERSION = 3
 
 # `source_code` embeds a whole Python source file; `description` is long free
 # text the agent pulls per-run when it actually needs it. Both blow the budget
 # of a bulk scan.
 SKIP_ATTRS = {"source_code", "description"}
 ATTR_MAXLEN = 400
-
-# `p28_Bdot`: a trailing \b fails here because `8_` is not a word boundary, so
-# the port never matches. Require a non-digit instead.
-PORT_RE = re.compile(r"[pP](\d{1,2})(?!\d)")
-
-
-def ports(s):
-    """Port numbers named in a probe or channel string. '<A> p28_Bdot' -> {28}."""
-    return sorted({int(m) for m in PORT_RE.findall(s or "")})
 
 
 def attrs_of(obj):
@@ -66,27 +66,15 @@ def attrs_of(obj):
     return out
 
 
-def config_text(f):
-    """Raw `Configuration/experiment_config` text, or None if absent."""
-    node = f.get("Configuration/experiment_config")
-    if node is None or not isinstance(node, h5py.Dataset):
-        return None
-    raw = node[()]
-    return raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
-
-
 def parse_channels(cfg):
-    """`{'<scope>:C1': 'description'}` from a config's [channels] lines.
+    """`{'<scope>:C1': 'description'}` from the config's [channels] section.
 
-    Keyed by the scope prefix the config itself uses, which need not match the
-    HDF5 group name -- the agent reconciles those.
+    :func:`~data_analysis.io.probe_map.parse_config_channels` keyed for JSON:
+    the tuple key it returns is not serializable, and the `'<scope>:C1'` spelling
+    is what the emitted JSONL and the run log use.
     """
-    out = {}
-    for line in (cfg or "").splitlines():
-        m = re.match(r"\s*(\w+?)_scope_(C\d+)\s*=\s*(.+?)\s*$", line)
-        if m:
-            out[f"{m.group(1)}:{m.group(2)}"] = m.group(3)
-    return out
+    return {f"{prefix}:{chan}": desc
+            for (prefix, chan), desc in parse_config_channels(cfg).items()}
 
 
 def summarize_group(g):
@@ -185,8 +173,8 @@ def join_material(motion_groups, channels):
     appearing alongside an unmatched channel in the same run is the signature
     of a typo, not of a missing probe.
     """
-    mg_ports = {n: ports(n) for n in motion_groups}
-    ch_ports = {k: ports(v) for k, v in channels.items()}
+    mg_ports = {n: ports_in(n) for n in motion_groups}
+    ch_ports = {k: ports_in(v) for k, v in channels.items()}
     moving = {p for ps in mg_ports.values() for p in ps}
     # A port claimed by two probes joins every one of its channels to both, so
     # the unmatched sets stay empty and the ambiguity is otherwise invisible.
