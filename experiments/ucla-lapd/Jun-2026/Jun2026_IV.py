@@ -57,11 +57,13 @@ final ne.
 
 import os
 import re
+from typing import NamedTuple
 
 import numpy as np
 import h5py
 
-from data_analysis.io import open_lapd, choose_from_list, position_shots
+from data_analysis.io import (open_lapd, choose_from_list, position_shots,
+                              motion_group_for_channel)
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
 from data_analysis.plasma.langmuir import (
     find_sweep_indices, reshape_IV, analyze_IV_safe,
@@ -204,7 +206,34 @@ def discover_lp_channels(fn, scope_name):
     return pairs, incomplete
 
 
-def read_lp_positions(fn, motion_group_name=None):
+class ProbePositions(NamedTuple):
+    """One motion group's scan grid and the shot numbers it was measured at.
+
+    ``shot_nums`` is the ground truth tying positions to discharges: entry
+    ``p*nshot + k`` is the shot number of position ``p``'s k-th shot. Pass it to
+    :func:`data_analysis.io.position_shots` rather than computing row offsets --
+    see that function for why.
+    """
+    pos_array: np.ndarray   # live rows only (padding filtered)
+    xpos: np.ndarray        # unique planned x axis
+    ypos: np.ndarray        # unique planned y axis
+    npos: int
+    nshot: int
+    shot_nums: np.ndarray   # this group's shot numbers, position-major
+    motion_group: str       # which drive these coordinates describe
+
+
+def _describe_motion_group(mg):
+    """One-line summary of a motion group's grid, for the ambiguity error."""
+    setup = mg["positions_setup_array"][:]
+    x, y = setup["x"], setup["y"]
+    ys = np.unique(np.round(y, 3))
+    y_txt = f"{ys[0]:g}" if ys.size == 1 else f"{ys.min():g}..{ys.max():g}"
+    return (f"{len(setup)} positions, x {x.min():.2f}..{x.max():.2f}, "
+            f"y {y_txt}")
+
+
+def read_lp_positions(fn, motion_group_name=None, interactive=False):
     """Read line-scan probe positions from a LAPD_DAQ pydaq file.
 
     The unified ``run.positions()`` needs a ``motion_list`` dataset these files
@@ -214,8 +243,21 @@ def read_lp_positions(fn, motion_group_name=None):
     * ``positions_array``       -- the (x, y) actually visited for every shot;
       used to count shots-per-position.
 
-    Returns ``(pos_array, xpos, ypos, npos, nshot)`` where ``xpos``/``ypos`` are
-    the unique sorted axes (for a line scan one of them is a single value).
+    Returns a :class:`ProbePositions`; ``xpos``/``ypos`` are the unique sorted
+    axes (for a line scan one of them is a single value) and ``shot_nums`` is the
+    shot number of every shot this group owns, position-major.
+
+    ``pos_array`` holds only this group's **live** rows. Where two probes scan
+    sequentially into one file, each group's array is padded with ``shot_num==0``
+    for the shots the *other* probe owns; those rows sit at the null coordinate,
+    so leaving them in makes the leading-run ``nshot`` heuristic below count
+    padding as one long first position (measured: 4805 instead of 5 for the
+    second probe of a two-phase plane).
+
+    With more than one motion group the caller must say which one it means:
+    ``motion_group_name``, or ``interactive=True`` for the notebook picker.
+    Defaulting would silently stamp one probe's coordinates onto the other's
+    signals -- shapes and x values match, so nothing errors.
     """
     with h5py.File(fn, "r") as f:
         if "Control/Positions" not in f:
@@ -223,14 +265,41 @@ def read_lp_positions(fn, motion_group_name=None):
         pos_root = f["Control/Positions"]
         groups = list(pos_root.keys())
         if motion_group_name is None:
-            motion_group_name = groups[0] if len(groups) == 1 else choose_from_list(
-                groups, label=lambda g: f'"{g}"', prompt="Motion group index",
-                header="Multiple motion groups; choose one:")
+            if len(groups) == 1:
+                motion_group_name = groups[0]
+            elif interactive:
+                motion_group_name = choose_from_list(
+                    groups, label=lambda g: f'"{g}"', prompt="Motion group index",
+                    header="Multiple motion groups; choose one:")
+            else:
+                listing = "\n".join(
+                    f"  {g!r}  ({_describe_motion_group(pos_root[g])})"
+                    for g in groups)
+                raise ValueError(
+                    f"{os.path.basename(fn)} has {len(groups)} motion groups; "
+                    f"name one explicitly via motion_group_name=... "
+                    f"(or interactive=True to pick):\n{listing}")
+        if motion_group_name not in pos_root:
+            raise ValueError(
+                f"Motion group {motion_group_name!r} not in {os.path.basename(fn)}; "
+                f"available: {groups}")
         mg = pos_root[motion_group_name]
         print(f"Using motion group: {motion_group_name!r}")
 
-        pos_array = mg["positions_array"][:]
+        raw = mg["positions_array"][:]
         setup = mg["positions_setup_array"][:]  # planned unique positions
+
+    # shot_num == 0 is the pydaq padding convention (verified campaign-wide: the
+    # null coordinate never collides with a real measured position). Reads select
+    # by shot NUMBER, so the live rows need not be contiguous or start at row 0.
+    pos_array = raw[raw["shot_num"] != 0]
+    if pos_array.size == 0:
+        raise ValueError(
+            f"Motion group {motion_group_name!r} in {os.path.basename(fn)} has no "
+            "live rows (every shot_num == 0).")
+    if pos_array.size != len(raw):
+        print(f"  Padding: kept {pos_array.size} live rows of {len(raw)} "
+              f"(shots {pos_array['shot_num'].min()}-{pos_array['shot_num'].max()}).")
 
     npos = len(setup)
     xpos = np.unique(np.round(setup["x"], 3))
@@ -244,38 +313,38 @@ def read_lp_positions(fn, motion_group_name=None):
     nshot = len(same) if same.all() else int(np.argmin(same))
 
     print(f"Positions: {npos} unique (x: {len(xpos)}, y: {len(ypos)}), "
-          f"{nshot} shots/position, {len(pos_array)} total shots.")
+          f"{nshot} shots/position, {len(pos_array)} live shots.")
     if npos * nshot != len(pos_array):
-        print(f"  *** FLAG: npos*nshot ({npos*nshot}) != total shots "
+        print(f"  *** FLAG: npos*nshot ({npos*nshot}) != live shots "
               f"({len(pos_array)}); positions may be irregular. ***")
-    return pos_array, xpos, ypos, npos, nshot
+    return ProbePositions(pos_array, xpos, ypos, npos, nshot,
+                          pos_array["shot_num"], motion_group_name)
 
 
-def _read_reshaped(run, scope_name, I_chan, V_chan, npos, nshot, pos_index=None):
+def _read_reshaped(run, scope_name, I_chan, V_chan, pos, pos_index=None):
     """Read one probe tip's V and I into ``(npos, nshot, nsamples)`` arrays.
 
-    Shared core for :func:`get_IV_arr` and :func:`get_IV_at_position`.  Voltage is
-    left as-is (LAPD_DAQ folds the probe attenuation into the scope
-    ``vertical_gain``, so this is already true probe volts); current is scaled to
-    current density via ``I_SIGN``/``RESISTOR``/``Aprobe``.  Returns
-    ``(tarr, V3d, I3d)``, both 3-D.
+    Shared core for :func:`get_IV_arr` and :func:`get_IV_at_position`.  ``pos`` is
+    the tip's :class:`ProbePositions`.  Voltage is left as-is (LAPD_DAQ folds the
+    probe attenuation into the scope ``vertical_gain``, so this is already true
+    probe volts); current is scaled to current density via
+    ``I_SIGN``/``RESISTOR``/``Aprobe``.  Returns ``(tarr, V3d, I3d)``, both 3-D.
 
-    * ``pos_index=None`` -> read the whole run: the first ``npos*nshot`` shots,
-      reshaped to ``(npos, nshot, nsamples)``.
-    * ``pos_index=k``    -> read **only** that position's ``nshot`` shots (passing
-      a positional ``shots=slice`` so ``run.channel`` fetches just those rows off
-      disk instead of the whole run), reshaped to ``(1, nshot, nsamples)``.  The
-      slice indexes the sorted shot list positionally -- the same ordering the
-      ``Vstack[:nuse]`` whole-run slice relies on -- so the rows match the batch
-      path exactly.
+    Both paths select by recorded shot number
+    (:func:`data_analysis.io.position_shots`), so the whole-run read and the
+    single-position read return the same rows for the same position.
+
+    * ``pos_index=None`` -> the whole run's ``npos*nshot`` shots, reshaped to
+      ``(npos, nshot, nsamples)``.
+    * ``pos_index=k``    -> only that position's ``nshot`` shots read off disk,
+      reshaped to ``(1, nshot, nsamples)``.
     """
+    npos, nshot = pos.npos, pos.nshot
     if pos_index is None:
-        # Read only the npos*nshot used shots off disk (any trailing shots are
-        # dropped anyway), so the reshape consumes the whole read.
-        shots = slice(0, npos * nshot)
+        shots = [int(s) for s in pos.shot_nums[:npos * nshot]]
         out_npos = npos
     else:
-        shots = position_shots(pos_index, nshot)
+        shots = position_shots(pos.shot_nums, pos_index, nshot)
         out_npos = 1
 
     Vstack, tarr = run.channel(V_chan, scope_name=scope_name, shots=shots)
@@ -286,20 +355,20 @@ def _read_reshaped(run, scope_name, I_chan, V_chan, npos, nshot, pos_index=None)
     return tarr, V3d, I3d
 
 
-def get_IV_at_position(run, scope_name, I_chan, V_chan, npos, nshot, pos_index,
+def get_IV_at_position(run, scope_name, I_chan, V_chan, pos, pos_index,
                        shot_index=None):
     """Read scaled I and V for ONE probe position (for notebook inspection).
 
     A single-position view of :func:`_read_reshaped` -- handy for eyeballing a
-    trace before committing to the batch pass.  Only that position's ``nshot``
-    shots are read off disk (not the whole run), so inspecting one position is
-    cheap.
+    trace before committing to the batch pass.  ``pos`` is the tip's
+    :class:`ProbePositions`.  Only that position's ``nshot`` shots are read off
+    disk (not the whole run), so inspecting one position is cheap.
 
     * ``shot_index=None`` -> shot-averaged V and all per-shot I for that position:
       ``Vpos`` is ``(nsamples,)`` (mean over shots), ``Ipos`` is ``(nshot, nsamples)``.
     * ``shot_index=k``    -> a single shot: both ``(nsamples,)``.
     """
-    tarr, V3d, I3d = _read_reshaped(run, scope_name, I_chan, V_chan, npos, nshot,
+    tarr, V3d, I3d = _read_reshaped(run, scope_name, I_chan, V_chan, pos,
                                     pos_index=pos_index)
     Vpos, Ipos = V3d[0], I3d[0]                            # (nshot, nsamples)
 
@@ -308,19 +377,19 @@ def get_IV_at_position(run, scope_name, I_chan, V_chan, npos, nshot, pos_index,
     return tarr, Vpos[shot_index], Ipos[shot_index]
 
 
-def get_IV_arr(run, scope_name, I_chan, V_chan, npos, nshot):
+def get_IV_arr(run, scope_name, I_chan, V_chan, pos):
     """Read the V and I sweeps for one probe tip for the whole run.
 
     LAPD_DAQ equivalent of Mar-2026's ``get_IV_arr``.  Returns ``(tarr, Vsweep,
     Isweep)`` where ``Vsweep`` is shot-averaged ``(npos, nsamples)`` and
     ``Isweep`` keeps per-shot resolution ``(npos, nshot, nsamples)``.
     """
-    tarr, V3d, Isweep = _read_reshaped(run, scope_name, I_chan, V_chan, npos, nshot)
+    tarr, V3d, Isweep = _read_reshaped(run, scope_name, I_chan, V_chan, pos)
     Vsweep = np.mean(V3d, axis=1)                          # (npos, nsamples)
     return tarr, Vsweep, Isweep
 
 
-def analyze_tip_at_position(run, scope_name, I_chan, V_chan, npos, nshot,
+def analyze_tip_at_position(run, scope_name, I_chan, V_chan, pos,
                             pos_index, sweep_idx, padding=10, trim_percent=5,
                             smooth_sigma=10):
     """Run the full sweep pipeline for one tip at one position/sweep.
@@ -331,8 +400,8 @@ def analyze_tip_at_position(run, scope_name, I_chan, V_chan, npos, nshot,
     position; the steps mirror :func:`save_IV_data` so what you see matches the
     batch pass.
     """
-    _, Vpos, Ipos = get_IV_at_position(run, scope_name, I_chan, V_chan,
-                                       npos, nshot, pos_index)
+    _, Vpos, Ipos = get_IV_at_position(run, scope_name, I_chan, V_chan, pos,
+                                       pos_index)
     start_ls, stop_ls = find_sweep_indices(Vpos, padding=padding)
     V_rs, I_rs = reshape_IV(Vpos[None, :], Ipos[None, :, :], start_ls, stop_ls,
                             trim_percent)
@@ -382,7 +451,8 @@ def resolve_iv_channels(ifn, tip=None):
     return scope_name, I_chan, V_chan
 
 
-def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=None):
+def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=None,
+                 motion_group_name=None):
     """Detect sweeps, reshape + smooth the IV traces, and save to ``.npz``.
 
     Same workflow as Mar-2026's ``save_IV_data`` but for the pydaq format and
@@ -390,10 +460,10 @@ def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=No
     override, else auto-detected first complete I+V pair).
 
     ``run`` / ``channels`` / ``positions`` let a caller that already opened the
-    file, resolved ``(scope_name, I_chan, V_chan)``, and read
-    ``(xpos, ypos, npos, nshot)`` -- :func:`process_run`, once per run -- pass
-    them in instead of re-running discovery for every tip; each ``None`` is
-    resolved here (the standalone / notebook path).
+    file, resolved ``(scope_name, I_chan, V_chan)``, and read a
+    :class:`ProbePositions` -- :func:`process_run` -- pass them in instead of
+    re-running discovery for every tip; each ``None`` is resolved here (the
+    standalone / notebook path).
 
     Returns ``(Vswp_arr_rs, Iswp_arr_rs)`` -- the reshaped sweep arrays just
     saved -- so the caller can feed :func:`data_analysis.plasma.langmuir.process_iv_and_save` directly instead of
@@ -406,21 +476,23 @@ def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=No
     scope_name, I_chan, V_chan = (channels if channels is not None
                                   else resolve_iv_channels(ifn, tip=tip))
 
-    if positions is None:
-        _, xpos, ypos, npos, nshot = read_lp_positions(ifn)
-    else:
-        xpos, ypos, npos, nshot = positions
+    pos = positions if positions is not None else read_lp_positions(
+        ifn, motion_group_name)
 
-    tarr, Vswp_arr, Iswp_arr = get_IV_arr(run, scope_name, I_chan, V_chan, npos, nshot)
+    tarr, Vswp_arr, Iswp_arr = get_IV_arr(run, scope_name, I_chan, V_chan, pos)
 
     # Sweep detection -> reshape -> smoothing (shared batch pipeline).
     Vswp_arr_rs, Iswp_arr_rs, data_timestamp, sweep_t_start, sweep_t_stop = \
         prepare_sweep_data(tarr, Vswp_arr, Iswp_arr)
 
+    # motion_group: which drive xpos/ypos describe. In a two-drive run the other
+    # tip's sweeps sit in a sibling npz with different coordinates, so a reader
+    # that only has the file cannot otherwise tell which probe it is holding.
     np.savez(save_path, Vswp_arr_rs=Vswp_arr_rs, Iswp_arr_rs=Iswp_arr_rs,
              data_timestamp=data_timestamp, sweep_t_start=sweep_t_start,
-             sweep_t_stop=sweep_t_stop, xpos=xpos, ypos=ypos,
-             npos=npos, nshot=nshot, I_chan=I_chan, V_chan=V_chan)
+             sweep_t_stop=sweep_t_stop, xpos=pos.xpos, ypos=pos.ypos,
+             npos=pos.npos, nshot=pos.nshot, I_chan=I_chan, V_chan=V_chan,
+             motion_group=np.str_(pos.motion_group or ""))
     print(f"Saved to: {save_path}")
     return Vswp_arr_rs, Iswp_arr_rs
 
@@ -430,7 +502,7 @@ def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=No
 # imports them from there directly.
 
 
-def process_run(ifn):
+def process_run(ifn, motion_group_name=None):
     """Run the full batch pipeline for **every complete-pair tip** in a run.
 
     For each tip with a complete I+V pair (from :func:`discover_lp_channels`):
@@ -441,6 +513,12 @@ def process_run(ifn):
     tip.  Tips missing a channel are flagged and skipped (their results stay
     absent, never filled from the other probe).
 
+    Positions are resolved **per tip**, not once per run: in a two-drive run each
+    tip can sit on a different probe, and one shared position array would stamp
+    one drive's coordinates onto the other's sweeps
+    (:func:`data_analysis.io.motion_group_for_channel`).  ``motion_group_name``
+    forces one group for every tip, for files whose channels name no port.
+
     No figures are drawn here -- plot from the saved ``.npz`` with
     ``Jun2026_plot.plot_iv_line_run``.  Returns ``{tip: (sweep_path, plasma_path)}``.
 
@@ -450,14 +528,13 @@ def process_run(ifn):
     data_dir = os.path.dirname(ifn)
     run_num = run_num_of(ifn)
 
-    # Everything tip-invariant is resolved ONCE for the run: the open handle,
-    # the scope/channel map (a None tip = the override, flowing through
-    # sweep_npz_paths/save_IV_data as the untagged single-tip case), and the positions.
-    # save_IV_data reuses these instead of re-running discovery per tip.
+    # Tip-invariant work is done ONCE: the open handle and the scope/channel map
+    # (a None tip = the override, flowing through sweep_npz_paths/save_IV_data as
+    # the untagged single-tip case).  Positions are NOT tip-invariant -- see the
+    # docstring -- so they are read inside the loop.
     run = open_lapd(ifn)
     print(f"backend: {run.backend}")
     channel_map = resolve_iv_channel_map(ifn)
-    _, xpos, ypos, npos, nshot = read_lp_positions(ifn)
 
     results = {}
     for tip, channels in channel_map.items():
@@ -465,11 +542,14 @@ def process_run(ifn):
         print(f"PROCESSING tip {tip if tip is not None else 'override'}")
         print("=" * 70)
 
+        scope_name, I_chan, _ = channels
+        group = motion_group_name or motion_group_for_channel(ifn, scope_name, I_chan)
+
         sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
 
         Vswp_arr_rs, Iswp_arr_rs = save_IV_data(
             ifn, sweep_path, tip=tip, run=run, channels=channels,
-            positions=(xpos, ypos, npos, nshot))
+            positions=read_lp_positions(ifn, group))
         process_iv_and_save(Vswp_arr_rs, Iswp_arr_rs, plasma_path)
 
         results[tip if tip is not None else "override"] = (sweep_path, plasma_path)

@@ -34,7 +34,8 @@ from tqdm import tqdm
 
 import Jun2026_IV as jiv
 import Jun2026_xcorr as jxc
-from data_analysis.io import open_lapd, position_shots
+from data_analysis.io import (open_lapd, position_shots, probe_channel_map,
+                              moving_group)
 from data_analysis.signal import (avg_amplitude_spectrum, clip_time_window,
                                   downsample_blockmean)
 from data_analysis.utils import merge_save_npz, run_num_of
@@ -73,18 +74,20 @@ POS_NPZ_SUFFIX = "-isat-fft-data.npz"
 RAW_TRACE_SAMPLES = 4000
 
 
-def get_isat_at_position(run, scope_name, chan, npos, nshot, pos_index):
+def get_isat_at_position(run, scope_name, chan, pos, pos_index):
     """Read the raw Isat signal for ONE probe position.
 
-    Reads only that position's ``nshot`` shots off disk
+    ``pos`` is this channel's drive's :class:`Jun2026_IV.ProbePositions`; only
+    that position's shots are read off disk, selected by recorded shot number
     (:func:`data_analysis.io.position_shots`).  Returns ``(tarr, Iarr)`` where
     ``Iarr`` is the ``(nshot, nsamples)`` raw signal (volts).  Current scaling
     (``Jun2026_IV.RESISTOR`` / ``Aprobe``) is left out for now -- the
     fluctuation *shape* is what matters, not the absolute scaling.  No sign flip
     either -- it doesn't matter for Isat fluctuations.
     """
-    Istack, tarr = run.channel(chan, scope_name=scope_name,
-                               shots=position_shots(pos_index, nshot))
+    Istack, tarr = run.channel(
+        chan, scope_name=scope_name,
+        shots=position_shots(pos.shot_nums, pos_index, pos.nshot))
     # Istack /= Jun2026_IV.RESISTOR * Jun2026_IV.Aprobe   # current scaling (off)
     return tarr, Istack
 
@@ -138,7 +141,8 @@ def isat_channels(ifn, scope_name=ISAT_SCOPE):
 
 
 def batch_fft_by_position(ifn, scope_name=ISAT_SCOPE, chans=None,
-                          tmin_ms=FFT_TMIN_MS, tmax_ms=FFT_TMAX_MS):
+                          tmin_ms=FFT_TMIN_MS, tmax_ms=FFT_TMAX_MS,
+                          motion_group_name=None):
     """Per-position shot-averaged Isat amplitude spectra -> co-located npz.
 
     The per-*position* counterpart of :func:`batch_fft` (which averages every
@@ -179,7 +183,24 @@ def batch_fft_by_position(ifn, scope_name=ISAT_SCOPE, chans=None,
             f"chans must all be on scope {scope_name!r} (they share one stored "
             f"freq axis); got {sorted({s for s, _ in chans})}")
 
-    pos_array, _, _, npos, nshot = jiv.read_lp_positions(ifn)
+    # Positions are per channel, not per run: co-moving probes in a two-drive run
+    # sit on different flux surfaces, so one shared pos_x/pos_y would stamp one
+    # probe's coordinates onto the other's spectra. One channel map for the file
+    # rather than reopening it per channel; positions deduped by drive, since the
+    # common case is several channels on one probe.
+    chan_map = probe_channel_map(ifn)
+    groups = {ch: (motion_group_name or moving_group(chan_map, ch))
+              for ch in chans}
+    by_group = {g: jiv.read_lp_positions(ifn, g) for g in set(groups.values())}
+    positions = {ch: by_group[g] for ch, g in groups.items()}
+
+    npos_set = {p.npos for p in positions.values()}
+    if len(npos_set) > 1:
+        raise ValueError(
+            f"{os.path.basename(ifn)}: channels span drives with different "
+            f"position counts {sorted(npos_set)}; one stored axis cannot "
+            "describe them. Batch one drive at a time.")
+    npos = npos_set.pop()
     # Without this the position loop never runs, freq stays None, and np.savez
     # writes it as an object array -- the file saves and prints success, then
     # fails at load with "Object arrays cannot be loaded".
@@ -191,19 +212,18 @@ def batch_fft_by_position(ifn, scope_name=ISAT_SCOPE, chans=None,
     dt = tarr[1] - tarr[0]
     i0, i1 = clip_time_window(tarr, tmin_ms, tmax_ms)
 
-    pos_x, pos_y = jxc.position_xy(pos_array, npos, nshot)
-
     # The window is stored, not just applied: the page shades it on the raw
     # trace, and re-deriving it from the clipped array bounds would be an
     # inference where the number itself is available.
-    arrays = {"pos_x": pos_x, "pos_y": pos_y}
+    arrays = {}
     freq = None
     with tqdm(total=len(chans) * npos, desc="Isat FFT", unit="pos") as bar:
         for scope, chan in chans:
+            pos = positions[(scope, chan)]
+            nshot = pos.nshot
             amps, counts, raw = [], [], None
             for p in range(npos):
-                _, Istack = get_isat_at_position(run, scope, chan,
-                                                 npos, nshot, p)
+                _, Istack = get_isat_at_position(run, scope, chan, pos, p)
                 if raw is None:
                     # The FIRST position's first shot, untrimmed: the context
                     # plot exists to show the window against the whole record,
@@ -231,6 +251,14 @@ def batch_fft_by_position(ifn, scope_name=ISAT_SCOPE, chans=None,
             arrays[f"{key}__nshots"] = np.asarray(counts)
             arrays[f"{key}__freq"] = freq
             arrays[f"{key}__raw"] = raw
+            cx, cy = jxc.position_xy(pos.pos_array, npos, nshot)
+            arrays[f"{key}__pos_x"] = cx
+            arrays[f"{key}__pos_y"] = cy
+            arrays[f"{key}__motion_group"] = np.str_(pos.motion_group or "")
+            # File-level keys stay for back-compat and single-drive readers; the
+            # first channel's drive defines them.
+            arrays.setdefault("pos_x", cx)
+            arrays.setdefault("pos_y", cy)
             # Per channel, like __freq: merge_save_npz keeps other channels'
             # arrays, so a file-level window would be overwritten by a second
             # call while the spectra it described stayed as they were --

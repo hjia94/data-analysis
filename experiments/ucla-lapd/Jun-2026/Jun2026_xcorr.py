@@ -46,15 +46,18 @@ NPERSEG     = 4096                     # Welch segment length (freq res vs varia
 #  Reading -- pull a position's shots for both channels onto one time grid
 # =========================================================================== #
 
-def _read_pair_at_position(run, ch_a, ch_b, npos, nshot, pos_index,
+def _read_pair_at_position(run, ch_a, ch_b, pos_a, pos_b, pos_index,
                            tmin_ms=TMIN_MS, tmax_ms=TMAX_MS):
     """Read both channels' shots at one probe position onto a common time grid.
 
-    ``ch_a`` / ``ch_b`` are ``(scope, channel)`` pairs.  Only that position's
-    ``nshot`` shots are read off disk
-    (:func:`data_analysis.io.position_shots`).  Returns ``(stack_a, stack_b, dt)``
-    with the two ``(nshot, nsamples)`` stacks clipped to ``[tmin_ms, tmax_ms]``
-    and on the *same* grid, plus the sample interval ``dt`` (seconds).
+    ``ch_a`` / ``ch_b`` are ``(scope, channel)`` pairs; ``pos_a`` / ``pos_b`` are
+    their drives' :class:`Jun2026_IV.ProbePositions`.  Only that position's shots
+    are read off disk, selected by recorded shot number
+    (:func:`data_analysis.io.position_shots`) -- so each channel gets the shots
+    ITS probe was at that position for, which for a co-moving pair are the same
+    discharges.  Returns ``(stack_a, stack_b, dt)`` with the two
+    ``(nshot, nsamples)`` stacks clipped to ``[tmin_ms, tmax_ms]`` and on the
+    *same* grid, plus the sample interval ``dt`` (seconds).
 
     Same-scope pair (the common case): both channels share the identical scope
     ``tarr`` recorded in the HDF5, so it is used directly -- no resampling.
@@ -62,10 +65,13 @@ def _read_pair_at_position(run, ch_a, ch_b, npos, nshot, pos_index,
     B's rows are resampled onto A's clipped grid via ``np.interp``.
     """
     (scope_a, chan_a), (scope_b, chan_b) = ch_a, ch_b
-    shots = position_shots(pos_index, nshot)
 
-    stack_a, tarr_a = run.channel(chan_a, scope_name=scope_a, shots=shots)
-    stack_b, tarr_b = run.channel(chan_b, scope_name=scope_b, shots=shots)
+    stack_a, tarr_a = run.channel(
+        chan_a, scope_name=scope_a,
+        shots=position_shots(pos_a.shot_nums, pos_index, pos_a.nshot))
+    stack_b, tarr_b = run.channel(
+        chan_b, scope_name=scope_b,
+        shots=position_shots(pos_b.shot_nums, pos_index, pos_b.nshot))
     if stack_a is None or stack_b is None:
         raise ValueError(f"could not read {ch_a} or {ch_b} at position {pos_index}")
 
@@ -288,7 +294,8 @@ def position_xy(pos_array, npos, nshot):
     return pos_array["x"][::nshot][:npos], pos_array["y"][::nshot][:npos]
 
 
-def _iter_run_positions(ifn, ch_a, ch_b, tmin_ms, tmax_ms, desc):
+def _iter_run_positions(ifn, ch_a, ch_b, tmin_ms, tmax_ms, desc,
+                        motion_group_name=None):
     """Per-position read loop for :func:`batch_xcorr`.
 
     Reads the run's positions, opens the file, and returns ``(pos_x, pos_y,
@@ -297,24 +304,98 @@ def _iter_run_positions(ifn, ch_a, ch_b, tmin_ms, tmax_ms, desc):
     per-shot tqdm bar (the read is the slow part on a plane run, so per-shot
     ticks give continuous feedback).  A caller that ``continue``s past a failed
     position still ticks the bar.
+
+    Each channel's motion group is resolved from the file
+    (:func:`data_analysis.io.motion_group_for_channel`), so the two channels of a
+    pair may sit on different drives.  ``motion_group_name`` forces one group for
+    both, for files whose channels name no port.  The returned ``pos_x``/``pos_y``
+    describe **channel A**; where the two drives differ, B's own coordinates come
+    from :func:`channel_positions` -- one array cannot describe both.
+
+    Raises if the two drives did not record the same discharges (see
+    :func:`assert_pairable`).
     """
-    pos_array, _, _, npos, nshot = jiv.read_lp_positions(ifn)
+    pos_a = resolve_positions(ifn, ch_a, motion_group_name)
+    pos_b = pos_a if motion_group_name else resolve_positions(ifn, ch_b)
+    if pos_b.motion_group != pos_a.motion_group:
+        assert_pairable(ifn, ch_a, pos_a, ch_b, pos_b)
+    npos, nshot = pos_a.npos, pos_a.nshot
     run = open_lapd(ifn)
-    pos_x, pos_y = position_xy(pos_array, npos, nshot)
+    pos_x, pos_y = position_xy(pos_a.pos_array, npos, nshot)
 
     def gen():
         with tqdm(total=npos * nshot, desc=desc, unit="shot") as bar:
             for p in range(npos):
                 sa, sb, dt = _read_pair_at_position(
-                    run, ch_a, ch_b, npos, nshot, p, tmin_ms, tmax_ms)
+                    run, ch_a, ch_b, pos_a, pos_b, p, tmin_ms, tmax_ms)
                 yield p, sa, sb, dt
                 bar.update(sa.shape[0])
 
-    return pos_x, pos_y, npos, gen()
+    return pos_x, pos_y, npos, gen(), pos_a.motion_group
+
+
+def assert_pairable(ifn, ch_a, pos_a, ch_b, pos_b):
+    """Raise unless two drives' channels can be correlated position by position.
+
+    A cross-spectrum is only physical between signals from the SAME discharge, so
+    the two drives must have been at each position for the same shots. Two probes
+    can share a file without that being true: in a sequential scan each drive
+    owns its own block of shots (probe A shots 1-N, probe B shots N+1-2N), which
+    produces identical grids and identical (x, y) at every index -- so a grid or
+    shape check passes and the pairing looks valid while every position
+    correlates two different plasmas.
+
+    Comparing the recorded shot numbers is the direct test. It also catches the
+    partial-overlap case (B starts before A finishes), which a file-wide
+    intersection would let through.
+    """
+    where = (f"{os.path.basename(ifn)}: {ch_a} ({pos_a.motion_group}) and "
+             f"{ch_b} ({pos_b.motion_group})")
+    if (pos_a.npos, pos_a.nshot) != (pos_b.npos, pos_b.nshot):
+        raise ValueError(
+            f"{where} scanned different grids ({pos_a.npos}x{pos_a.nshot} vs "
+            f"{pos_b.npos}x{pos_b.nshot}); they cannot be paired position by "
+            "position.")
+    if not np.array_equal(pos_a.shot_nums, pos_b.shot_nums):
+        n_same = int(np.sum(np.asarray(pos_a.shot_nums) ==
+                            np.asarray(pos_b.shot_nums)))
+        raise ValueError(
+            f"{where} were not recorded in the same discharges -- only "
+            f"{n_same} of {len(pos_a.shot_nums)} shots line up (A covers shots "
+            f"{pos_a.shot_nums.min()}-{pos_a.shot_nums.max()}, B covers "
+            f"{pos_b.shot_nums.min()}-{pos_b.shot_nums.max()}). The probes "
+            "scanned sequentially, not together, so their cross-spectra would "
+            "pair different plasmas. Correlate each probe against a channel on "
+            "its own drive, or against a stationary reference.")
+
+
+def resolve_positions(ifn, channel, motion_group_name=None):
+    """The :class:`Jun2026_IV.ProbePositions` of the probe that recorded ``channel``.
+
+    The "which drive is this channel on, and where did it scan" step every batch
+    path needs; the resolved drive is on the returned record's ``motion_group``.
+    ``motion_group_name`` overrides the port join, for channels whose description
+    names no port.
+    """
+    group = motion_group_name or jiv.motion_group_for_channel(ifn, *channel)
+    return jiv.read_lp_positions(ifn, group)
+
+
+def channel_positions(ifn, scope, chan, motion_group_name=None):
+    """The ``(pos_x, pos_y)`` of the probe that recorded one channel.
+
+    The per-channel answer the stored file-level ``pos_x``/``pos_y`` cannot give
+    in a two-drive run: co-moving probes can sit on different flux surfaces (1 cm
+    apart in y, in one run of this campaign), so a page drawing both channels
+    must label each with its own drive's coordinates.  Read from the HDF5 rather
+    than stored, so it stays right for npz files written before this was tracked.
+    """
+    pos = resolve_positions(ifn, (scope, chan), motion_group_name)
+    return position_xy(pos.pos_array, pos.npos, pos.nshot)
 
 
 def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
-                nperseg=NPERSEG):
+                nperseg=NPERSEG, motion_group_name=None):
     """Per-position ensemble coherence + cross-phase for ONE run -> co-located npz.
 
     The Smith (1974) FFT cross-spectral estimator: reads each probe position's
@@ -338,8 +419,8 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
     other pairs are kept), so several pairs accumulate in one file. Returns the npz
     path.
     """
-    pos_x, pos_y, npos, positions = _iter_run_positions(
-        ifn, ch_a, ch_b, tmin_ms, tmax_ms, "xcorr")
+    pos_x, pos_y, npos, positions, motion_group = _iter_run_positions(
+        ifn, ch_a, ch_b, tmin_ms, tmax_ms, "xcorr", motion_group_name)
 
     # One ensemble result PER position: average that position's shots, keep the
     # per-position gamma2/phase so the spatial (x, y) structure is preserved.
@@ -375,6 +456,9 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
     key = _pair_key(ch_a, ch_b)
     merge_save_npz(out_path, {
         "freq": freq, "pos_x": pos_x, "pos_y": pos_y,
+        # Which drive pos_x/pos_y describe (see _iter_run_positions); the other
+        # channel's come from channel_positions().
+        f"{key}__motion_group": np.str_(motion_group or ""),
         # Per pair, not per file: these are arguments, so two pairs in one npz
         # can legitimately differ in them (the freq guard above is blind to the
         # window -- Welch's axis depends only on nperseg and dt). A page that

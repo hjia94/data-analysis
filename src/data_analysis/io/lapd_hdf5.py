@@ -220,16 +220,28 @@ def print_run_description(fn):
     return desc
 
 
-def position_shots(pos_index, nshot):
-    """Positional shot slice for one probe position -> ``slice``.
+def position_shots(shot_numbers, pos_index, nshot):
+    """The shot NUMBERS one probe position was measured at -> list.
 
-    LAPD_DAQ shots are stored position-major: position ``p`` owns the ``nshot``
-    consecutive rows ``[p*nshot, (p+1)*nshot)`` of the sorted shot list. Pass the
-    returned slice to :meth:`LapdRun.channel` (``shots=``) to read just that
-    position's shots off disk. This is the single home of that layout fact --
-    don't hand-build the slice at call sites.
+    ``shot_numbers`` is the motion group's per-shot ``shot_num`` column (live
+    rows only), which the position array records for every shot it owns. Position
+    ``p`` owns the ``nshot`` consecutive entries ``[p*nshot, (p+1)*nshot)`` of
+    that column; this returns the numbers themselves, which
+    :meth:`LapdRun.channel` accepts directly as ``shots=``.
+
+    Selecting by recorded shot number rather than by row arithmetic is what keeps
+    a position tied to the discharges it was actually measured in. Row arithmetic
+    silently desynchronises whenever the shot list is not a contiguous 1..N run
+    (a dropped shot) or the group's rows do not start at row 0 (two probes
+    scanning sequentially into one file) -- both produce plausible arrays built
+    from the wrong shots. The number is ground truth the format already stores;
+    the row index is an inference about layout.
+
+    A requested shot the scope never wrote comes back as a NaN row, so a gap
+    stays visible instead of shifting every later position by one.
     """
-    return slice(pos_index * nshot, (pos_index + 1) * nshot)
+    block = shot_numbers[pos_index * nshot:(pos_index + 1) * nshot]
+    return [int(s) for s in block]
 
 
 # --------------------------------------------------------------------------- #
