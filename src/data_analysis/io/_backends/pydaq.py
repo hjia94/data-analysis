@@ -242,7 +242,7 @@ def print_scope_channels(hdf5_filename, scope_name):
 				else:
 					print(f"  {channel}: No description available")
 
-def read_positions(hdf5_filename, motion_group_name=None):
+def read_positions(hdf5_filename, motion_group_name=None, interactive=False):
 	"""
 	Read Control/Positions data from HDF5 file written by acquisition_bmotion.py
 
@@ -251,8 +251,13 @@ def read_positions(hdf5_filename, motion_group_name=None):
 	hdf5_filename : str
 		Path to the HDF5 file
 	motion_group_name : str, optional
-		Name of the motion group to read. If None, will list available groups
-		and use the first one if only one exists.
+		Name of the motion group to read. If None and the file has exactly one
+		group, that one is used; with several, the caller must name one (or pass
+		interactive=True). Defaulting to the first would silently pair one
+		probe's coordinates with another probe's signals.
+	interactive : bool, optional
+		Prompt to choose when the file has several motion groups. Default False
+		so batch/headless callers raise instead of blocking on input().
 
 	Returns:
 	--------
@@ -280,12 +285,17 @@ def read_positions(hdf5_filename, motion_group_name=None):
 			if len(mg_list) == 1:
 				motion_group_name = mg_list[0]
 				print(f"Using motion group: {motion_group_name}")
-			else:
-				from .prompts import choose_from_list
+			elif interactive:
+				from ..prompts import choose_from_list
 				motion_group_name = choose_from_list(
 					mg_list, label=lambda g: f'"{g}"',
 					prompt="Motion group index",
 					header="Multiple motion groups; choose one:")
+			else:
+				raise ValueError(
+					f"{os.path.basename(hdf5_filename)} has {len(mg_list)} motion "
+					f"groups; name one via motion_group_name=... (or pass "
+					f"interactive=True to pick): {mg_list}")
 
 		if motion_group_name not in positions_group:
 			print(f"Motion group '{motion_group_name}' not found.")

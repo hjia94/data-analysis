@@ -13,6 +13,9 @@ from .interferometer import InterferometerChannel, read_interferometer
 from .lapd_hdf5 import (open_lapd, LapdRun, LapdSession, compare_runs,
                         gas_puff, parse_gas_puff, position_shots,
                         list_all_channels, print_run_description)
+from .probe_map import (AmbiguousProbeMap, STATIONARY, UNMAPPED,
+                        motion_group_for_channel, moving_group,
+                        probe_channel_map)
 from .prompts import choose_from_list
 
 __all__ = [
@@ -28,4 +31,10 @@ __all__ = [
     "choose_from_list",
     "read_interferometer",
     "InterferometerChannel",
+    "probe_channel_map",
+    "motion_group_for_channel",
+    "moving_group",
+    "AmbiguousProbeMap",
+    "STATIONARY",
+    "UNMAPPED",
 ]
