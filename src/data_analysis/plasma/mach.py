@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from data_analysis.plasma.formulas import ion_sound_speed
+
 # Magnetised fluid model, Hutchinson, Phys. Fluids 30, 3777 (1987). The
 # calibration constant relating ln(j_+/j_-) to the Mach number; unmagnetised and
 # kinetic models give other values, so it is a parameter everywhere below.
@@ -116,6 +118,19 @@ def mach_single(R, kappa, K=K_HUTCHINSON):
     """
     return (K / 2.0) * np.log(np.asarray(R, dtype=float)
                               / np.asarray(kappa, dtype=float))
+
+
+def flow_velocity(M, T_e_eV, mu, gamma=5 / 3, Z=1):
+    """Mach number -> flow speed in **km/s**. ``mu`` is the ion mass in m_p (He = 4).
+
+    The Mach number is what a Mach probe measures. ``T_e`` is a *separate*
+    measurement it does not make, so every velocity carries that assumption:
+    ``v`` scales as ``sqrt(T_e)``, and a factor-4 error in an assumed T_e is a
+    factor-2 error in every velocity derived from it. Callers state the T_e they
+    used wherever the velocity is shown.
+    """
+    # ion_sound_speed returns cm/s; 1e-5 converts to km/s.
+    return np.asarray(M, dtype=float) * ion_sound_speed(T_e_eV, mu, gamma, Z) * 1e-5
 
 
 def combine_log(values):

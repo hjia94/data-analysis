@@ -56,6 +56,14 @@ one shared y-axis -- two probe tips of the same quantity, say. Overlaying is
 what makes them comparable; that is also why traces are refused for ``plane``
 geometry, where stacked heatmaps would simply hide one another.
 
+A ``plane`` field may carry a **vectors** block: two more cubes of the same
+shape drawn as arrows over the heatmap, moving on the same slider. It is an
+overlay, not a field -- a vector quantity's components and its magnitude are one
+measurement, and splitting them into separate panels would put the direction and
+the strength of one flow on opposite sides of the page. ``step`` decimates the
+arrow grid (arrows at every Nth cell in each direction); the raster underneath
+is never decimated.
+
 Schema v1
 --------------------------------------------------------------------------
 ::
@@ -80,7 +88,12 @@ Schema v1
              "unit": "",                    # "" for dimensionless
              "frames": (n_axis, ny, nx) | (n_axis, nx) float,
              "cmap": "viridis",             # any matplotlib colormap name
-             "vmin": 0.0, "vmax": 1.0},     # both None -> page scale toggle
+             "vmin": 0.0, "vmax": 1.0,      # both None -> page scale toggle
+             # optional, plane only -- arrows over the heatmap. u/v carry the
+             # field's own unit, which is what the arrow key states:
+             "vectors": {"u": (n_axis, ny, nx) float,   # x-component
+                         "v": (n_axis, ny, nx) float,   # y-component
+                         "step": 2}},        # draw every Nth cell (default 1)
             # ... OR "traces" instead of "frames" (line geometry only):
             {"name": "Vp", "unit": "V", "cmap": "viridis",
              "vmin": None, "vmax": None,
@@ -224,6 +237,18 @@ def field_traces(field):
     if traces is not None:
         return list(traces)
     return [{"name": "", "frames": field.get("frames")}]
+
+
+def _vector_spec(vectors):
+    """A ``vectors`` block's panel furniture, defaults applied -> ``{"step": int}``.
+
+    One place applies the defaults, so the group-layout signature and the panel
+    payload cannot disagree about them. ``None`` in, ``None`` out: a panel
+    without an overlay.
+    """
+    if vectors is None:
+        return None
+    return {"step": int(vectors.get("step", 1))}
 
 
 def _require_context(context, _require):
@@ -441,6 +466,28 @@ def validate_bundle(bundle):
                      f"{where} ('{field['name']}') sets yscale 'log' with "
                      f"vmin={vmin}; a log axis needs vmin > 0")
 
+            vectors = field.get("vectors")
+            if vectors is not None:
+                _require(geometry == "plane",
+                         f"{where} ('{field['name']}') carries 'vectors', which "
+                         "draws arrows over a heatmap; geometry 'line' has no "
+                         "raster to draw them on")
+                _require(isinstance(vectors, dict),
+                         f"{where}.vectors must be a dict {{u, v, step}}")
+                for comp in ("u", "v"):
+                    _require(comp in vectors,
+                             f"{where}.vectors is missing '{comp}' (both "
+                             "components are needed to place an arrow)")
+                    shape = np.shape(vectors[comp])
+                    _require(shape == want,
+                             f"{where}.vectors.{comp} has shape {shape}, "
+                             f"expected {want} -- the same cube shape as the "
+                             "field it overlays")
+                step = vectors.get("step", 1)
+                _require(isinstance(step, (int, np.integer)) and step >= 1,
+                         f"{where}.vectors.step must be an integer >= 1, "
+                         f"got {step!r}")
+
         # _payload emits the panel row once, from the first group, and the
         # page builds its canvases from that row. A group whose layout differed
         # would therefore render under another group's captions and colorbars,
@@ -454,8 +501,12 @@ def validate_bundle(bundle):
         # property of that measurement -- one run digitizes two probe tips,
         # another one. What must agree is the panel row itself, which is what
         # the page builds its canvases from.
+        # Whether a panel carries arrows is part of the row: the page builds one
+        # quiver key per panel from group 0, so a group that added or dropped
+        # the overlay would draw arrows under a key that does not describe them.
         signature = [(f["name"], f.get("unit", ""), f["cmap"],
-                      f.get("vmin"), f.get("vmax"), f.get("yscale", "linear"))
+                      f.get("vmin"), f.get("vmax"), f.get("yscale", "linear"),
+                      _vector_spec(f.get("vectors")))
                      for f in fields]
         if layout is None:
             layout, layout_name = signature, group.get("name")
@@ -525,6 +576,15 @@ PAYLOAD_DECIMALS = 4
 #: error at ~0.05% of a decade everywhere, and (formatted decimally, see
 #: :func:`_round_frames`) costs slightly fewer bytes than 4 dp absolute.
 PAYLOAD_SIGFIGS = 6
+
+#: Decimal places kept for a ``vectors`` overlay's u/v cubes, instead of
+#: :data:`PAYLOAD_DECIMALS`. The raster's 4 dp is justified by the hover readout
+#: printing the value and by colormap resolution; neither applies to an arrow,
+#: which is consumed only as a direction and a length normalized to the frame's
+#: peak. On a Jun-2026 flow page (peak 6.3 km/s) 2 dp is 0.16% of the longest
+#: arrow -- far below what a ~30 px arrow can render -- and cuts each cube's
+#: JSON by ~23%.
+PAYLOAD_VECTOR_DECIMALS = 2
 
 
 def _frames_array(frames):
@@ -632,6 +692,9 @@ def _payload(bundle):
             # "linear" (the default) or "log"; the page's y-mapping and tick
             # generator branch on it.
             "yscale": field.get("yscale", "linear"),
+            # Arrow-overlay furniture (step, key label); the cubes ride with
+            # the group. None means this panel draws no arrows.
+            "vectors": _vector_spec(field.get("vectors")),
         })
 
     def _axis_payload(axis):
@@ -661,6 +724,15 @@ def _payload(bundle):
         entry["frames"] = [[_jsonable(_round_frames(t["frames"], f))
                             for t in field_traces(f)]
                            for f in group["fields"]]
+        # Per field: [u, v] cubes, or null where that panel has no overlay.
+        # Emitted only when some panel does, so an ordinary page is unchanged.
+        if any(f.get("vectors") for f in group["fields"]):
+            entry["vectors"] = [
+                None if f.get("vectors") is None else
+                [_jsonable(np.round(_frames_array(f["vectors"][c]),
+                                    PAYLOAD_VECTOR_DECIMALS))
+                 for c in ("u", "v")]
+                for f in group["fields"]]
         return entry
 
     # Rounding is applied per part rather than to the finished payload: the
@@ -804,7 +876,16 @@ def save_bundle(bundle, path):
             arrays[f"__axis_{g}__"] = np.asarray(group["axis"]["values"], float)
             entry["axis"] = {k: v for k, v in group["axis"].items() if k != "values"}
         for i, field in enumerate(group["fields"]):
-            spec = {k: v for k, v in field.items() if k not in ("frames", "traces")}
+            spec = {k: v for k, v in field.items()
+                    if k not in ("frames", "traces", "vectors")}
+            # The overlay's two cubes are arrays like the frames; left in the
+            # spine they would serialize as JSON number lists, costing several
+            # times their npz size. Only step/label stay in the spine.
+            if field.get("vectors") is not None:
+                vec = field["vectors"]
+                for c in ("u", "v"):
+                    arrays[f"__vec_{g}_{i}_{c}__"] = _frames_array(vec[c])
+                spec["vectors"] = _vector_spec(vec)
             # Cubes are always keyed per trace, so there is one array layout on
             # disk. The *spine* keeps the field's own spelling: a plane field
             # is single-curve by rule, and handing it back as 'traces' would
@@ -864,6 +945,9 @@ def load_bundle(path):
                         field["frames"] = data[f"__frames_{g}_{i}_0__"]
                     else:                       # pre-traces npz: one cube/field
                         field["frames"] = data[f"__frames_{g}_{i}__"]
+                    if field.get("vectors") is not None:
+                        for c in ("u", "v"):
+                            field["vectors"][c] = data[f"__vec_{g}_{i}_{c}__"]
     return bundle
 
 

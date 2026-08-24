@@ -652,12 +652,109 @@ function drawPlanePanel(ctx, panel, p, i) {
     }
   }
 
+  drawVectors(ctx, panel, p, i);
+
   drawAxes(ctx,
     ticksFor("plane-x", DATA.x.values, 9, i2 => PAD.left + (i2 + 0.5) * cw),
     axisLabel(DATA.x),
     ticksFor("plane-y", DATA.y.values, 9, i2 => PAD.top + (ny - 1 - i2 + 0.5) * ch),
     axisLabel(DATA.y));
   drawColorbar(ctx, colors, lo, hi);
+}
+
+/**
+ * Head length as a fraction of the arrow's own length, its half-angle, and a
+ * ceiling in pixels so a long arrow does not grow a head out of proportion.
+ */
+const ARROW_HEAD = 0.32, ARROW_ANGLE = 0.42, ARROW_HEAD_MAX_PX = 8;
+
+/**
+ * Arrows over a plane panel, if this panel carries a vector overlay.
+ *
+ * Arrows are scaled so the LONGEST one in the current frame spans `step` cells:
+ * the eye reads a quiver field by relative length, and a fixed data-to-pixel
+ * scale would either collapse to dots or overlap into a mat as the flow grows
+ * and decays across the slider. The scale is therefore per frame, which is why
+ * the key printed beside the panel states the magnitude it corresponds to --
+ * without it, arrow length would be uncalibrated.
+ *
+ * A cell whose u or v is NaN draws nothing, matching the grey the raster puts
+ * there: an arrow at a position the probe never visited would be invented data.
+ */
+function drawVectors(ctx, panel, p, i) {
+  const spec = panel.vectors;
+  if (!spec) return;
+  const cubes = currentGroup().vectors;
+  if (!cubes || !cubes[p]) return;
+  const u = cubes[p][0][i], v = cubes[p][1][i];
+  const step = spec.step || 1;
+  const nx = DATA.x.values.length, ny = DATA.y.values.length;
+  const { cw, ch } = cellSize();
+
+  let peak = 0;
+  for (let iy = 0; iy < ny; iy += step) {
+    for (let ix = 0; ix < nx; ix += step) {
+      const a = u[iy][ix], b = v[iy][ix];
+      if (isNum(a) && isNum(b)) peak = Math.max(peak, Math.hypot(a, b));
+    }
+  }
+  if (!peak) return;                       // nothing finite to draw this frame
+  const scale = (step * Math.min(cw, ch)) / peak;
+
+  ctx.save();
+  ctx.strokeStyle = "#fff";
+  ctx.fillStyle = "#fff";
+  ctx.lineWidth = 1.1;
+  // Arrows are white over an arbitrary colormap, so they need a dark edge to
+  // stay visible on the light end of it.
+  ctx.shadowColor = "rgba(0,0,0,0.55)";
+  ctx.shadowBlur = 2;
+  // Constant for the whole render; computing it inside arrow() would allocate a
+  // cellSize object per arrow on the scrub path.
+  const maxHead = Math.min(cw, ARROW_HEAD_MAX_PX);
+  for (let iy = 0; iy < ny; iy += step) {
+    for (let ix = 0; ix < nx; ix += step) {
+      const a = u[iy][ix], b = v[iy][ix];
+      if (!isNum(a) || !isNum(b)) continue;
+      const cx = PAD.left + (ix + 0.5) * cw;
+      const cy = PAD.top + (ny - 1 - iy + 0.5) * ch;
+      // Row 0 is the lowest y (matplotlib origin="lower") and canvas y grows
+      // downward, so +v must point UP the screen: negate it once, here.
+      arrow(ctx, cx, cy, a * scale, -b * scale, maxHead);
+    }
+  }
+  ctx.restore();
+
+  ctx.fillStyle = "#444";
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.fillText(`longest arrow = ${fmt(peak)} ${panel.unit}`,
+               PAD.left + PLOT_W, PAD.top - 6);
+}
+
+/**
+ * One arrow of delta (dx, dy) centred on (cx, cy) -- matplotlib's pivot="mid",
+ * so the arrow marks the position it was measured at rather than starting there.
+ */
+function arrow(ctx, cx, cy, dx, dy, maxHead) {
+  const len = Math.hypot(dx, dy);
+  if (len < 0.5) return;                   // sub-pixel: a head with no shaft
+  const x0 = cx - dx / 2, y0 = cy - dy / 2;
+  const x1 = cx + dx / 2, y1 = cy + dy / 2;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+  const head = Math.min(len * ARROW_HEAD, maxHead);
+  const ang = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - head * Math.cos(ang - ARROW_ANGLE),
+             y1 - head * Math.sin(ang - ARROW_ANGLE));
+  ctx.lineTo(x1 - head * Math.cos(ang + ARROW_ANGLE),
+             y1 - head * Math.sin(ang + ARROW_ANGLE));
+  ctx.closePath();
+  ctx.fill();
 }
 
 /**
