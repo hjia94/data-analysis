@@ -13,7 +13,7 @@ which is why it lives here rather than in an experiment script.
 
 Where the channel wiring is written
 -----------------------------------
-Two places, and they disagree in real campaigns:
+In pydaq files, two places, and they disagree in real campaigns:
 
 * ``Configuration/experiment_config``, ``[channels]`` -- operator-entered at
   setup. Authoritative in practice, and the ONLY source in runs whose scope
@@ -23,6 +23,12 @@ Two places, and they disagree in real campaigns:
 
 :func:`channel_wiring` reads the config block and falls back to the scope attrs,
 because a campaign that has only the latter should still join.
+
+bapsflib files keep both sides somewhere else entirely -- wiring on the digitizer
+configuration groups, motion groups in ``bmotion`` -- so each function here
+dispatches on the layout. The join itself is unchanged, because both schemas
+spell the port the same way in both places; only the addressing differs, with a
+channel keyed ``(board, chan)`` rather than ``'C1'``.
 
 What this module refuses to do
 ------------------------------
@@ -145,15 +151,27 @@ def _scope_attr_channels(f, scopes):
 
 
 def channel_wiring(fn):
-    """Every channel's wiring description: ``{(scope, chan): description}``.
+    """Every channel's wiring description: ``{(group, chan): description}``.
 
     Prefers the ``[channels]`` config block and falls back to scope attrs for
     channels the config does not mention (see the module docstring on why both
     exist). Scope names are returned as the config writes them unless an actual
     HDF5 group matches case-insensitively, in which case the on-disk spelling
     wins -- callers address channels by the group name they read data from.
+
+    bapsflib files keep their wiring somewhere else entirely (on the digitizer
+    configuration groups) and are delegated to that backend, which returns the
+    same ``{(group, chan): description}`` shape with ``chan`` as the
+    ``(board, chan)`` tuple its reader addresses. Dispatching here rather than
+    leaving those files to fall through matters: this function found no scope
+    groups in them and returned ``{}``, which reads as "the file records no
+    wiring" -- indistinguishable from a run whose operator left it blank.
     """
-    from .lapd_hdf5 import _has_shot_groups
+    from .lapd_hdf5 import _has_shot_groups, detect_backend
+
+    if detect_backend(fn) == "bapsflib":
+        from ._backends import bapsflib_daq
+        return bapsflib_daq.channel_wiring(fn)
 
     with h5py.File(fn, "r") as f:
         # Scope groups are the ones holding shot_* subgroups -- the repo's single
@@ -169,12 +187,31 @@ def channel_wiring(fn):
     return wiring
 
 
+#: Where each schema names its motion groups. pydaq gives one subgroup per
+#: group; bapsflib names them in a `motion_group_name` column instead, with one
+#: row per shot -- hence the dedup. Both spell the port the same way
+#: (`p29_Nxy21-dxy1cm`), so :func:`ports_in` reads either.
+_MOTION_GROUPS = "Control/Positions"
+_BMOTION_AXES = "Raw data + config/bmotion/bmotion_axis_names"
+
+
 def motion_group_ports(fn):
-    """``{motion_group_name: [ports]}`` for every group in ``Control/Positions``."""
+    """``{motion_group_name: [ports]}`` for every moving probe in the file.
+
+    Empty only when the file truly moved nothing. Reading just the pydaq path
+    would return ``{}`` for every bapsflib run, and an empty mapping does not
+    fail -- it silently relabels every channel :data:`STATIONARY` in
+    :func:`probe_channel_map`, which is a wrong answer rather than a refusal.
+    """
     with h5py.File(fn, "r") as f:
-        if "Control/Positions" not in f:
+        if _MOTION_GROUPS in f:
+            return {name: ports_in(name) for name in f[_MOTION_GROUPS]}
+        axes = f.get(_BMOTION_AXES)
+        if axes is None:
             return {}
-        return {name: ports_in(name) for name in f["Control/Positions"]}
+        names = {n.decode(errors="replace") if isinstance(n, bytes) else str(n)
+                 for n in axes["motion_group_name"]}
+        return {name: ports_in(name) for name in sorted(names)}
 
 
 def probe_channel_map(fn):

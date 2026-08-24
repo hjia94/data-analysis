@@ -450,15 +450,30 @@ class LapdRun:
         return self._pydaq().print_scope_channels(self.path, scope_name)
 
     def channel_descriptions(self):
-        """Every scope group's channel descriptions (LAPD_DAQ pydaq files only).
+        """Every channel's wiring description -> ``{group: {chan: description}}``.
 
-        One pass over the file -> ``{scope: {chan: description}}``, silently
-        (scope groups are the top-level groups holding ``shot_*`` subgroups,
-        the same test as :meth:`scope_names`; groups without descriptions are
-        omitted). :func:`list_all_channels` is the printing wrapper. Raises
-        ``NotImplementedError`` for bapsflib/legacy files.
+        One pass over the file, silently; groups without descriptions are
+        omitted. :func:`list_all_channels` is the printing wrapper.
+
+        The two schemas key a channel differently, and the key is deliberately
+        left as each writes it, because it is what that backend's reader
+        addresses a channel by: pydaq groups by scope name with ``'C1'``-style
+        channels, bapsflib by adc name (``'SIS 3302'``) with ``(board, chan)``
+        tuples. A caller that has one of these can read the channel it names.
+
+        Raises ``NotImplementedError`` for the legacy 2018 layout.
         """
-        self._require_pydaq("channel_descriptions()")
+        if self._backend == "bapsflib":
+            out = {}
+            for (adc, chan), desc in self._bapsflib_daq().channel_wiring(
+                    self.path).items():
+                out.setdefault(adc, {})[chan] = desc
+            return out
+        if self._backend != "pydaq":
+            raise NotImplementedError(
+                f"channel_descriptions() needs channel wiring text; the "
+                f"{self._backend!r} layout records none."
+            )
         from . import scope_reader as scope
         out = {}
         with h5py.File(self.path, "r") as f:

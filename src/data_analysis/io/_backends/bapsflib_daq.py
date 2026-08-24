@@ -8,6 +8,7 @@ to these functions. Reached only through ``open_lapd``; not a public import.
 
 import math
 import os
+import re
 import numpy as np
 import h5py
 
@@ -17,6 +18,7 @@ import matplotlib.pyplot as plt
 __all__ = [
 	'show_info',
 	'parse_description',
+	'channel_wiring',
 	'read_probe_motion_6k',
 	'read_probe_motion_bmotion',
 	'read_digitizer_config',
@@ -64,6 +66,79 @@ def parse_description(ifn):
 		grp = f.get(_DESCRIPTION_PATH)
 		_, description = _find_description_attribute(grp.attrs) if grp else (None, None)
 	return run_description.parse_description(description or "")
+
+#: Per-channel wiring label, as the LabVIEW DAQ writes it on a configuration
+#: group: `Data type 6 = 'Vy+_p29'` alongside `Enabled 6 = 'TRUE'`. The digit is
+#: the channel within the board, not the board.
+_DATA_TYPE_RE = re.compile(r'^Data type (\d+)$')
+
+_SIS_CRATE_PATH = 'Raw data + config/SIS crate'
+
+def channel_wiring(ifn):
+	"""Every ACTIVE channel's wiring description -> ``{(adc, (board, chan)): desc}``.
+
+	The bapsflib counterpart of ``probe_map.channel_wiring``. Keys are what
+	``read_data`` addresses a channel by -- ``(board, chan)``, not pydaq's
+	``'C1'`` -- so a caller resolving "which channel is tip Y+" gets something it
+	can read with, on either schema.
+
+	Two independent sources have to be joined, because each lacks what the other
+	has: the HDF5 configuration groups carry the descriptions but index their
+	groups by *config index*, which is NOT the board number (here `[3]` is board
+	4); bapsflib's `slot_info` carries the authoritative slot -> board mapping but
+	drops the descriptions. Slot is the key that joins them, via the parallel
+	`SIS crate slot numbers` / `SIS crate config indices` attributes.
+
+	Only channels marked ``Enabled ... TRUE`` are returned. These files retain the
+	previous setup's labels on disabled channels -- run 054 still reads
+	``Bx_p22_mov`` on a board-3 channel that recorded nothing -- so returning them
+	would hand a caller a channel that looks wired and holds no data.
+	"""
+	# Opened before the h5py handle, not inside it: two readers on one file at
+	# once is needless, and this only needs the slot table, not the data.
+	with lapd.File(ifn, silent=True) as bf:
+		slot_info = bf.digitizers['SIS crate'].slot_info
+
+	wiring = {}
+	with h5py.File(ifn, 'r') as fh:
+		crate = fh.get(_SIS_CRATE_PATH)
+		if crate is None:
+			return wiring
+		for cfg_name in crate:
+			cfg = crate[cfg_name]
+			slots = cfg.attrs.get('SIS crate slot numbers')
+			indices = cfg.attrs.get('SIS crate config indices')
+			if slots is None or indices is None:
+				continue
+			for slot, index in zip(slots, indices):
+				if int(slot) not in slot_info:
+					continue  # the 3820 timing board: no signal channels
+				board, adc = slot_info[int(slot)]
+				# 'SIS 3302' -> 'SIS crate 3302 configurations[2]'. Matched rather
+				# than formatted: the group name is the translator's spelling, and
+				# a miss here would silently drop a whole board's wiring.
+				grp = next((cfg[n] for n in cfg
+				            if n.startswith('SIS crate ' + adc.split()[-1])
+				            and n.endswith(f'configurations[{index}]')), None)
+				if grp is None:
+					continue
+				for key, val in grp.attrs.items():
+					m = _DATA_TYPE_RE.match(str(key))
+					if not m:
+						continue
+					chan = int(m.group(1))
+					if _attr_text(grp.attrs.get(f'Enabled {chan}')).upper() != 'TRUE':
+						continue
+					desc = _attr_text(val).strip()
+					if desc:
+						wiring[(adc, (board, chan))] = desc
+	return wiring
+
+def _attr_text(value):
+	"""An HDF5 attribute as str, tolerating the bytes these files mix in."""
+	if isinstance(value, bytes):
+		return value.decode(errors='replace')
+	return '' if value is None else str(value)
 
 def read_probe_motion_6k(f):
 	'''
