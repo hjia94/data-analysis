@@ -11,8 +11,9 @@ backends under :mod:`data_analysis.io._backends` are private implementation deta
 
 from .interferometer import InterferometerChannel, read_interferometer
 from .lapd_hdf5 import (open_lapd, LapdRun, LapdSession, compare_runs,
-                        gas_puff, parse_gas_puff, position_shots,
-                        list_all_channels, print_run_description)
+                        gas_puff, parse_gas_puff, parse_shunts,
+                        position_shots, list_all_channels,
+                        print_run_description)
 from .probe_map import (AmbiguousProbeMap, STATIONARY, UNMAPPED,
                         motion_group_for_channel, moving_group,
                         probe_channel_map)
@@ -25,6 +26,7 @@ __all__ = [
     "compare_runs",
     "gas_puff",
     "parse_gas_puff",
+    "parse_shunts",
     "position_shots",
     "list_all_channels",
     "print_run_description",

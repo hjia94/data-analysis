@@ -183,6 +183,33 @@ def gas_puff(path):
     return parse_gas_puff(open_lapd(path).description().raw)
 
 
+# Probe-tip shunt bullet: "        - X-, 300ohm, AN1-CH2" -> ('X-', 300.0).
+# Same free-text-bullet pattern as _PUFF_RE above, and LAPD-specific for the
+# same reason.
+_SHUNT_RE = re.compile(
+    r"^\s*-\s*([XYZ][+-])\s*,\s*([\d.]+)\s*ohm",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def parse_shunts(text):
+    """Extract per-tip shunt resistances from description text -> ``{'X+': 75.0, ...}``.
+
+    Multi-tip probes use **unequal** shunts, sized so ``V = I*R`` fills the
+    digitizer range on each tip -- in Jun-2026, 300 ohm on X- against 75/43 ohm
+    elsewhere. Converting volts to amps therefore needs the per-tip value, and a
+    missing one cannot be defaulted to 1.0 or to a neighbour's: a 4x error would
+    be absorbed straight into a calibration as a spurious gain, with nothing
+    downstream looking wrong.
+
+    Returns ``{}`` when the description has no shunt bullets, so a caller can tell
+    "no shunts recorded" from "some recorded" and decide; a caller needing a
+    specific set of tips checks for them.
+    """
+    return {m.group(1).upper(): float(m.group(2))
+            for m in _SHUNT_RE.finditer(text or "")}
+
+
 def list_all_channels(fn):
     """Print every scope group's channel descriptions -> ``{scope: {chan: description}}``.
 
