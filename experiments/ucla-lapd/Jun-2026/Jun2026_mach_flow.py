@@ -15,15 +15,13 @@ Two stages, because the read is the expensive part:
 
 Geometry
 --------
-The tip labels are the probe's own axes. X/Y span the scan plane -- the same
-plane the probe moves in, so ``M_X``/``M_Y`` are the in-plane vector drawn as
-quiver -- and Z is along the machine axis (B), drawn as its own map.
+Tip labels are the probe's own axes: X/Y span the scan plane (the in-plane vector
+drawn as quiver), Z is along the machine axis (B) and gets its own map.
 
-Velocities assume a **constant** electron temperature (:data:`TE_EV`): run 32
-digitized no swept tip, so no T_e was measured with this data. ``v = M * c_s``
-scales as ``sqrt(T_e)``, so the number is a stated scale, not a measurement; it
-is recorded in the npz and printed on every figure. Mach number is the measured
-quantity and is stored alongside.
+Velocities assume a **constant** T_e (:data:`TE_EV`) -- run 32 digitized no swept
+tip, so none was measured. ``v = M * c_s`` scales as ``sqrt(T_e)``, making it a
+stated scale, not a measurement; it is recorded in the npz and printed on every
+figure. Mach number is the measured quantity and is stored alongside.
 
     .venv/Scripts/python.exe experiments/ucla-lapd/Jun-2026/Jun2026_mach_flow.py
 """
@@ -219,12 +217,11 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, window_ms=WINDOW_MS, bin_ms=BIN_MS,
                te_ev=TE_EV, out_path=None):
     """Read the plane, reduce to time bins, apply kappa -> co-located npz.
 
-    The slow stage. For every probe position it reads all six tips' shots, bins
-    them to ``bin_ms``, forms each axis' face ratio, and converts to a Mach
-    number with that axis' calibrated kappa. Only the reduced
-    ``(npos, nbin)`` arrays survive the loop -- the raw stacks are ~2.4 MB per
-    tip per position and are dropped as soon as they are binned, so peak memory
-    is one position's six stacks rather than the run.
+    The slow stage. Per position: read all six tips' shots, bin to ``bin_ms``,
+    form each axis' face ratio, convert with that axis' kappa. Only the reduced
+    ``(npos, nbin)`` arrays survive the loop -- raw stacks are ~2.4 MB per tip per
+    position and are dropped once binned, so peak memory is one position's six
+    stacks rather than the run.
 
     Writes ``<run>-mach-flow-data.npz``: ``M_X``/``M_Y``/``M_Z`` and the matching
     ``v_*`` [km/s], ``n_valid``, the position axes, the bin centres, and the
@@ -236,8 +233,8 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, window_ms=WINDOW_MS, bin_ms=BIN_MS,
     shunts = parse_shunts(run.description().raw)
     no_shunt = [t for t in chans if t not in shunts]
     if no_shunt:
-        # Never default: X- is 300 ohm against 75/43 elsewhere, so a guessed
-        # value is a 4x gain landing silently in every velocity.
+        # Never default: the tips differ (300 ohm on X-, 75/43 elsewhere), so a
+        # guessed value yields a wrong current with nothing downstream complaining.
         raise ValueError(f"{ifn}: no shunt in description for {no_shunt}")
 
     pos = jiv.read_lp_positions(ifn)
@@ -335,9 +332,8 @@ def _kappa_note(data):
 def _weakest_axis_note(data):
     """Name the axis whose kappa carries the largest systematic bar.
 
-    Read from the npz rather than written as a literal: the numbers come from
-    whichever calibration was applied, and a hardcoded "x/÷1.46" would keep
-    reading plausibly after a recalibration changed it.
+    Read from the npz, never a literal: a hardcoded "x/÷1.46" would keep reading
+    plausibly after a recalibration changed it.
     """
     err = np.asarray(data["kappa_err_sys"], float)
     w = int(np.argmax(err))
@@ -351,17 +347,13 @@ def polar_components(vx, vy, pos_x, pos_y, centre):
     """In-plane flow resolved about ``centre`` -> ``(v_r, v_theta)``, same shape.
 
     ``v_r`` is positive outward; ``v_theta`` is positive counter-clockwise (the
-    +z sense, with z out of the x-y plane along B).
+    +z sense, with z out of the x-y plane along B). The plate drives an azimuthal
+    E x B flow, which in Cartesian components reverses sign across the column and
+    averages to nearly zero; ``v_theta`` states it as one number per cell.
 
-    The decomposition is the point of the measurement, not a presentation
-    choice: the biasing plate drives an azimuthal E x B flow, which in Cartesian
-    components reverses sign across the column and averages to nearly zero over
-    a symmetric plane -- structure that a v_X/v_Y map shows only as a pattern the
-    reader must integrate by eye. ``v_theta`` states it as one number per cell.
-
-    ``centre`` is in the *same machine coordinates* as ``pos_x``/``pos_y``; only
-    the projection uses it. Nothing is translated, so every plot keeps machine
-    coordinates and a feature at x = 5 cm stays at x = 5 cm.
+    ``centre`` is in the *same machine coordinates* as ``pos_x``/``pos_y`` and is
+    used only by the projection -- nothing is translated, so a feature at
+    x = 5 cm stays at x = 5 cm on every plot.
     """
     dx = np.asarray(pos_x, float) - centre[0]
     dy = np.asarray(pos_y, float) - centre[1]
@@ -385,19 +377,17 @@ def find_flow_centre(data, window_ms=CENTRE_FIT_MS, search_cm=3.0, step_cm=0.25,
     minimising ``mean|v_r| / mean|v_theta|`` over the annulus ``r_min..r_max``,
     averaged over ``window_ms``.
 
-    Fitted rather than taken from the run log's "plate centred ~(0,0)": the log's
-    own tilde is the point -- the plate position is approximate, and v_r/v_theta
-    are sensitive to the centre in a way the Cartesian components are not.
+    Fitted rather than taken from the run log's "plate centred ~(0,0)": that
+    position is approximate, and v_r/v_theta are sensitive to the centre in a way
+    the Cartesian components are not.
 
-    The annulus matters. Including r < r_min lets the near-stagnant core, where
-    the direction is ill-defined, dominate the ratio; including the plane edge
-    lets uniformly low-signal cells win by having no flow to be radial. Both were
-    measured to move the answer.
+    The annulus bounds both move the answer (measured): r < r_min lets the
+    near-stagnant core, where direction is ill-defined, dominate the ratio, and
+    the plane edge lets low-signal cells win by having no flow to be radial.
 
-    Measured for run 32: (+2.5, -1.5) during bias, ratio 0.22, stable across the
-    bias window. Outside it the fit degenerates (the ratio rises to ~0.7 and the
-    best centre runs to the search-box edge) -- correctly, since there is no
-    rotation to centre when the plate is off.
+    Run 32: (+2.5, -1.5) during bias, ratio 0.22, stable across the window.
+    Outside it the fit degenerates (ratio ~0.7, centre at the search-box edge) --
+    correctly, since there is no rotation to centre when the plate is off.
     """
     t = data["t_ms"]
     win = (t >= window_ms[0]) & (t <= window_ms[1])
@@ -435,15 +425,11 @@ def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
                      vmax=None):
     """Time-slider page: v_X/v_Y quiver over |v|, beside the v_Z map.
 
-    Two **panels**, not two dropdown groups: the axial flow is a different
-    quantity on a different (diverging, signed) colour scale, not another
-    version of the in-plane one. Panels share the single time slider, so the
-    in-plane and axial flow are read at the same instant instead of by switching
-    -- which is the comparison a 3D probe exists to support.
+    **Panels, not dropdown groups**: they share one time slider, so every
+    component is read at the same instant rather than by switching.
 
-    ``vmax`` fixes both colour scales [km/s]; ``None`` lets the page autoscale
-    per frame, which is right while hunting for structure and wrong when
-    comparing frames.
+    ``vmax`` fixes all colour scales [km/s]; ``None`` autoscales per frame --
+    right while hunting for structure, wrong when comparing frames.
     """
     data = load_flow(npz_path)
     t_ms = data["t_ms"]
@@ -457,30 +443,22 @@ def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
     fy, fs, fz = grid(vy), grid(np.hypot(vx, vy)), grid(vz)
     f_th, f_r = grid(v_th), grid(v_r)
 
-    # Both scales are fixed or both autoscale, matching the schema's own rule
-    # that vmin and vmax are set together.
+    # vmin/vmax are set together (schema rule). Speed is unsigned -> sequential
+    # from 0; the three signed components are diverging about 0, because for them
+    # the sign is the physics -- one sign over the ring is a coherent rotation.
+    # v_r is the control: an E x B rotation has little radial flow.
     fixed = vmax is not None
     fields = [
         {"name": "in-plane flow (v_X, v_Y)", "unit": "km/s", "frames": fs,
          "cmap": "viridis", "vmin": 0.0 if fixed else None, "vmax": vmax,
-         # Arrows over the speed map: direction and magnitude of one flow, on
-         # one panel and one slider.
          "vectors": {"u": fx, "v": fy, "step": quiver_step}},
-        # The E x B panel. Diverging, because the sign is the physics: one sign
-        # over the whole ring is a coherent rotation, and a sign that flips
-        # across the column is not.
         {"name": "azimuthal flow (v_theta, +ve CCW)", "unit": "km/s",
          "frames": f_th, "cmap": "RdBu_r",
          "vmin": -vmax if fixed else None, "vmax": vmax},
-        # Beside it because it is the control: an E x B rotation has little
-        # radial flow, so v_r is how a reader judges whether the v_theta panel
-        # is a rotation or just a decomposition of something else.
         {"name": "radial flow (v_r, +ve outward)", "unit": "km/s",
          "frames": f_r, "cmap": "RdBu_r",
          "vmin": -vmax if fixed else None, "vmax": vmax},
         {"name": "axial flow (v_Z, along B)", "unit": "km/s",
-         # Diverging and symmetric: v_Z is signed, and a sequential map would
-         # hide which way the axial flow points.
          "frames": fz, "cmap": "RdBu_r",
          "vmin": -vmax if fixed else None, "vmax": vmax},
     ]

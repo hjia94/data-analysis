@@ -18,13 +18,11 @@ alone::
 
 so the **product** isolates the area ratio and the **ratio** isolates the flow.
 Flow-referenced treatments (where ``J_+`` means the upstream face by definition)
-have these the other way round. Feeding flow-labelled data to these functions
-returns the flow where kappa was asked for, silently and with a plausible
-magnitude -- the caller cannot see it from the signature, hence this paragraph.
+have these the other way round. Feeding flow-labelled data in returns the flow
+where kappa was asked for, silently and with a plausible magnitude.
 
-This module takes no time axis, no window, no run numbers and no orientation
-table: selecting which samples enter a calibration is campaign policy, and a
-default here would be the wrong default for the next campaign to inherit.
+Selecting which samples enter a calibration is campaign policy, so this module
+takes no time axis, window, run numbers or orientation table.
 """
 
 from __future__ import annotations
@@ -42,10 +40,9 @@ K_HUTCHINSON = 0.45
 def valid_current_mask(*currents):
     """``True`` where every current is finite and strictly positive.
 
-    Isat is positive by construction on these probes, so a non-positive sample is
-    missing data (dropped channel, baseline excursion), not a small measurement.
-    Callers **count** what this excludes rather than letting it vanish into a
-    ``nanmean``: a silently shrinking sample looks identical to a clean one.
+    Isat is positive by construction, so a non-positive sample is missing data,
+    not a small measurement. Callers **count** what this excludes: a silently
+    shrinking sample looks identical to a clean one.
     """
     mask = np.ones(np.broadcast(*currents).shape, dtype=bool)
     for c in currents:
@@ -56,26 +53,17 @@ def valid_current_mask(*currents):
 def face_ratio(j_plus, j_minus, axis=1, mask=None):
     """Face ratio of two current stacks, reduced along ``axis``.
 
-    ``j_plus``/``j_minus`` are ``(nshot, nt_win)`` and **already windowed** -- the
-    caller selects the samples. The reduction happens here, in the order that
-    matters: average *first*, then divide.
+    ``j_plus``/``j_minus`` are ``(nshot, nt_win)`` currents [A], already windowed.
 
-    That order is not cosmetic. Dividing sample-by-sample divides by the
-    instantaneous ``j_minus``, which is small and noisy at individual samples, so
-    the ratio distribution grows a heavy tail that biases any later average.
-    Pooling before dividing has the opposite failure: it collapses the sample to a
-    single number, leaving no scatter to weight with. Both are easy to write by
-    accident, which is why this function owns the reduction instead of taking
-    pre-divided ratios.
+    **Averages first, then divides.** Dividing sample-by-sample divides by the
+    instantaneous ``j_minus``, which is small and noisy, growing a heavy tail that
+    biases any later average. This function owns the reduction so that cannot be
+    written by accident.
 
-    ``axis=1`` (default) averages over the window -> one ratio per shot, the
-    calibration input. ``axis=0`` averages over shots -> one ratio per sample, the
-    drift diagnostic. Same invariant either way, one implementation.
-
-    ``mask`` overrides which samples count (default: :func:`valid_current_mask` of
-    the two stacks). Pass a wider mask -- e.g. one requiring all four tips of a
-    pairing valid -- to keep two ratios sample-aligned. Entries with nothing valid
-    yield ``nan``.
+    ``axis=1`` -> one ratio per shot (calibration input); ``axis=0`` -> one per
+    sample (drift diagnostic). ``mask`` overrides which samples count (default:
+    :func:`valid_current_mask`); pass a wider one -- e.g. all four tips of a
+    pairing -- to keep two ratios sample-aligned. Nothing valid yields ``nan``.
     """
     j_plus = np.asarray(j_plus, dtype=float)
     j_minus = np.asarray(j_minus, dtype=float)
@@ -91,10 +79,9 @@ def face_ratio(j_plus, j_minus, axis=1, mask=None):
 def area_ratio(R_a, R_b):
     """Area ratio from two opposing orientations -> ``kappa = sqrt(R_a * R_b)``.
 
-    The **product**, because these are hardware labels (module docstring): the
-    flow exponent enters ``R_a`` and ``R_b`` with opposite signs and cancels.
-    Immune to a sign-convention error for the same reason, which is what makes it
-    a usable cross-check on a fitted kappa.
+    The **product** (hardware labels -- module docstring): the flow exponent
+    cancels. Immune to a sign-convention error for the same reason, which makes it
+    the cross-check on a fitted kappa.
     """
     return np.sqrt(np.asarray(R_a, dtype=float) * np.asarray(R_b, dtype=float))
 
@@ -103,8 +90,7 @@ def mach_number(R_a, R_b, K=K_HUTCHINSON):
     """Mach number from two opposing orientations -> ``M = (K/4) ln(R_a/R_b)``.
 
     The **ratio**: kappa cancels, leaving the flow along the lab axis this face
-    pair faced in orientation ``a``. Sign follows ``a``; swapping the arguments
-    flips it and leaves :func:`area_ratio` unchanged.
+    pair faced in orientation ``a``. Swapping the arguments flips the sign.
     """
     return (K / 4.0) * np.log(np.asarray(R_a, dtype=float)
                               / np.asarray(R_b, dtype=float))
@@ -113,8 +99,7 @@ def mach_number(R_a, R_b, K=K_HUTCHINSON):
 def mach_single(R, kappa, K=K_HUTCHINSON):
     """Mach number from one orientation given a known kappa -> ``(K/2) ln(R/kappa)``.
 
-    The point of calibrating: once kappa is known, a single measurement gives the
-    flow. Accuracy is limited by kappa's systematic error, not by shot noise.
+    Accuracy is limited by kappa's systematic error, not by shot noise.
     """
     return (K / 2.0) * np.log(np.asarray(R, dtype=float)
                               / np.asarray(kappa, dtype=float))
@@ -123,11 +108,9 @@ def mach_single(R, kappa, K=K_HUTCHINSON):
 def flow_velocity(M, T_e_eV, mu, gamma=5 / 3, Z=1):
     """Mach number -> flow speed in **km/s**. ``mu`` is the ion mass in m_p (He = 4).
 
-    The Mach number is what a Mach probe measures. ``T_e`` is a *separate*
-    measurement it does not make, so every velocity carries that assumption:
-    ``v`` scales as ``sqrt(T_e)``, and a factor-4 error in an assumed T_e is a
-    factor-2 error in every velocity derived from it. Callers state the T_e they
-    used wherever the velocity is shown.
+    A Mach probe does not measure ``T_e``, so every velocity carries that
+    assumption (``v`` scales as ``sqrt(T_e)``). Callers state the T_e they used
+    wherever the velocity is shown.
     """
     # ion_sound_speed returns cm/s; 1e-5 converts to km/s.
     return np.asarray(M, dtype=float) * ion_sound_speed(T_e_eV, mu, gamma, Z) * 1e-5
@@ -136,21 +119,15 @@ def flow_velocity(M, T_e_eV, mu, gamma=5 / 3, Z=1):
 def combine_log(values):
     """Log-space average of ``values`` -> ``(log_mean, log_std, n_valid)``.
 
-    Returns the mean of ``ln values``, **not** the geometric mean: callers here
-    work in log space (it is where the errors are symmetric and where the fit
-    lives), so handing back ``exp`` of it would only be converted straight back.
-    ``np.exp(log_mean)`` is the geometric mean when a caller wants one.
-
-    ``log_std`` is the **population** spread (``ddof=1``), not the standard error
-    -- callers divide by ``sqrt(n_valid)`` themselves when they want the error on
-    the mean, and some deliberately do not (a between-orientation spread is a
-    systematic, and averaging more orientations does not shrink it).
-
     Log space because kappa is multiplicative: ``ln R`` is the additive symmetric
     quantity, and the arithmetic mean of ratios sits above the geometric mean by a
-    bias that grows with the spread. Non-finite and non-positive entries are
-    excluded and counted in ``n_valid`` -- the one definition of a valid ratio, so
-    that ``n_valid`` always describes the sample the mean was taken over.
+    bias that grows with the spread. ``np.exp(log_mean)`` is the geometric mean.
+
+    ``log_std`` is the **population** spread (``ddof=1``), not the standard error:
+    callers divide by ``sqrt(n_valid)`` themselves, and some deliberately do not
+    (a between-orientation spread is a systematic that more orientations do not
+    shrink). Non-finite and non-positive entries are excluded and counted in
+    ``n_valid``, so it always describes the sample the mean was taken over.
     """
     v = np.asarray(values, dtype=float).ravel()
     ok = np.isfinite(v) & (v > 0)
@@ -175,16 +152,12 @@ def fit_calibration(ln_R, sigma, design):
     the reduced chi-squared.
 
     **The design matrix is passed in, never inferred.** Which face looks upstream
-    in which orientation is campaign geometry, and guessing it here would bury a
-    sign convention inside shared code. A sign error is not visible in the fit's
-    own diagnostics -- it fits happily -- so callers cross-check against
+    in which orientation is campaign geometry. A sign error there is invisible to
+    the fit's own diagnostics -- it fits happily -- so callers cross-check against
     :func:`area_ratio`, which cannot be fooled by one.
 
-    ``cov`` uses the supplied ``sigma`` as absolute (``lstsq`` residual scaling is
-    deliberately not applied): these sigmas are measured shot-to-shot errors, not
-    relative weights, and rescaling them by the fit quality would hide a poor fit
-    inside a comfortable-looking error bar. Read ``chi2_dof`` for fit quality
-    instead.
+    ``cov`` treats ``sigma`` as absolute (no ``lstsq`` residual rescaling), so a
+    poor fit widens ``chi2_dof`` rather than hiding inside a comfortable error bar.
     """
     ln_R = np.asarray(ln_R, dtype=float)
     sigma = np.asarray(sigma, dtype=float)

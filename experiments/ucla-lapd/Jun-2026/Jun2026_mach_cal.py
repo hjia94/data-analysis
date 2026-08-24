@@ -8,17 +8,15 @@ plasma flow. The estimator maths lives in ``data_analysis.plasma.mach``; this
 script is the campaign wiring -- paths, runs, the time window, and the rotation
 sign table.
 
-**X is different.** It never swaps faces, so no pairing exists for it. It is
-calibrated from the assumption that there is no flow along x in any orientation,
-which makes ``X+/X-`` a direct read of the area ratio. The four runs then
-disagree by a factor of 2.5 against a shot-to-shot error of ~0.3%, so the
-disagreement -- not the shot noise -- is kappa_X's error bar. Treat kappa_X as
-order-of-magnitude.
+**X is different.** It never swaps faces, so no pairing exists: it is calibrated
+from the assumption of no flow along x, making ``X+/X-`` a direct read of the
+area ratio. The four runs then disagree by a factor of 2.5 against a ~0.3%
+shot-to-shot error, so that disagreement -- not the shot noise -- is kappa_X's
+error bar. Treat kappa_X as order-of-magnitude.
 
-Writes ``<STEM>.npz`` and ``<STEM>.png`` **into the raw data directory**, an
-exception to the centralized-output convention: the figure is the evidence that
-the kappa in the npz can be trusted, so it travels with the data and stays
-readable without the repo.
+Writes ``<STEM>.npz``/``.png`` **into the raw data directory**, an exception to
+the centralized-output convention: the figure is the evidence that the kappa can
+be trusted, so it travels with the data.
 
     .venv/Scripts/python.exe experiments/ucla-lapd/Jun-2026/Jun2026_mach_cal.py
 """
@@ -84,18 +82,17 @@ def load_run(run, keep_full=()):
     """Read one run, windowed -> ``(currents, tarr_win, shunts, tip_channels, full)``.
 
     ``currents`` is ``{tip: (nshot, nt_win) amps}``, converted from volts across
-    each tip's own shunt and already cut to :data:`CAL_WINDOW_MS`. Channel->tip
-    comes from the recorded wiring descriptions ('MP@P33, Isat-X+'), never from a
-    hardcoded C1=X+ table: a swapped +/- assignment would silently report
-    1/kappa, which looks entirely plausible.
+    each tip's own shunt and cut to :data:`CAL_WINDOW_MS`. Channel->tip comes from
+    the recorded wiring descriptions, never a hardcoded C1=X+ table: a swapped
+    +/- assignment would silently report 1/kappa, which looks entirely plausible.
 
-    Windowing happens per tip inside the read loop rather than after all six are
-    resident: a full stack is (20, 500001) float64 = 80 MB, so holding six costs
-    ~480 MB to keep ~8 MB each.
+    Windows per tip inside the read loop, not after all six are resident: a full
+    stack is (20, 500001) float64 = 80 MB, so holding six costs ~480 MB to keep
+    ~8 MB each.
 
-    ``full`` returns ``{tip: (tarr, one shot)}`` for the tips named in
-    ``keep_full``, for the raw-trace panel -- **copied**, because a row slice is a
-    numpy view that would otherwise pin its whole 80 MB parent for the run.
+    ``full`` returns ``{tip: (tarr, one shot)}`` for ``keep_full``'s tips (the
+    raw-trace panel) -- **copied**, because a row slice is a view that would
+    otherwise pin its whole 80 MB parent for the run.
     """
     path = os.path.join(DATA_DIR, FILE_FMT.format(run=run))
     r = open_lapd(path)
@@ -114,8 +111,8 @@ def load_run(run, keep_full=()):
         raise ValueError(f"run {run}: no channel found for {missing}")
     no_shunt = [t for t in tip_channels if t not in shunts]
     if no_shunt:
-        # Never default: X- is 300 ohm against 75/43 elsewhere, so a guessed
-        # value lands in kappa as a 4x gain with nothing downstream complaining.
+        # Never default: the tips differ (300 ohm on X-, 75/43 elsewhere), so a
+        # guessed value yields a wrong current with nothing downstream complaining.
         raise ValueError(f"run {run}: no shunt in description for {no_shunt}")
 
     currents, full, tarr_win = {}, {}, None
@@ -225,9 +222,7 @@ def main():
             # and their product is taken at the same samples.
             ok = valid_current_mask(pa, ma, pb, mb)
             n_valid[i, j] = ok.sum(axis=0)
-            # axis=0: reduce over shots -> one ratio per sample. Same
-            # average-then-divide invariant as the per-shot call above.
-            Ra_t = face_ratio(pa, ma, axis=0, mask=ok)
+            Ra_t = face_ratio(pa, ma, axis=0, mask=ok)   # -> one ratio per sample
             kappa_t[i, j] = Ra_t if axis == "X" else area_ratio(
                 Ra_t, face_ratio(pb, mb, axis=0, mask=ok))
         # Per curve, then worst: pooling the curves would fold the
@@ -251,11 +246,8 @@ def main():
         err_fit[AXES.index(axis)] = fit_err[axis]
     err_sys[AXES.index("X")] = np.exp(lnx_std)
     # err_fit[X] stays NaN: X has no fit row. A 0.0 would read as "measured and
-    # negligible", the opposite of the truth.
-
-    # X's (1) and (2) are computed above and are meaningful -- they describe one
-    # run's stability and still catch a bad window -- but they are not kappa_X's
-    # uncertainty. Only err_sys[X] is.
+    # negligible", the opposite of the truth. X's (1) and (2) are real but
+    # describe one run's stability, not kappa_X's uncertainty -- only err_sys is.
 
     # --- printed checks (none abort) ---------------------------------------
     print("=== kappa ===")
@@ -303,7 +295,8 @@ def main():
     if spread > 1.5 * 0.918:
         print("  <-- WARN: spread exceeds 1.5x what runs 17-20 showed")
     print(f"  kappa_X {kappa_x:.2f} vs kappa_Y {kappa[1]:.2f}, kappa_Z {kappa[2]:.2f} "
-          f"-- expected, not a bug: X- is the only 300 ohm (smaller) tip")
+          f"-- X differs by METHOD (assumed, not fitted), which is what its "
+          f"x/÷{err_sys[0]:.2f} bar measures.")
 
     out_of_bounds = [a for a, k in zip(AXES, kappa) if not 0.5 <= k <= 2.0]
     if out_of_bounds:
