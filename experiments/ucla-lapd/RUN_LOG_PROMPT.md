@@ -56,6 +56,14 @@ material for decisions that are yours to make:
     another discriminator.
   - **Dtype drift.** The same attribute may be a string in early runs and an
     integer later. Cast before comparing, and record the drift as a discrepancy.
+  - **Acquisition mode.** `probe_voltage_channels` lists the channels carrying an
+    applied probe voltage. Non-empty = swept, empty = fixed-bias; the description
+    text does not override it (see "Per-run state that varies" below).
+  - **Hardware state.** `description_markers.not_used` names hardware blocks
+    marked `(NOT USED)`; `description_markers.obstacle` carries the `- Obstacle:`
+    line where one is present. Both match one spelling: confirm the campaign
+    uses these markers before reading a null as "hardware was out", since a
+    campaign writing it differently returns null for every run.
 
 Phase 2 — reason. Do all summarizing, grouping, and cross-run comparison against
 the intermediate, not by re-opening HDF5 files. Go back to the raw files only to
@@ -73,6 +81,26 @@ the files and let the campaign tell you what it was measuring.
 Combine descriptions across runs rather than repeating them: state a setting once
 where it holds, and note where it CHANGES. The changes are the useful signal.
 
+### Per-run state that varies: give it a COLUMN, not a section
+
+Anything that changes run to run and changes how a run is analysed belongs as a
+column in the per-run table — not a prose section, and not repeated in the daily
+summary. Two that campaigns get wrong:
+
+  - **Acquisition mode** (fixed-bias Isat vs swept I–V). Decide from the CHANNEL
+    LIST: only a sweep digitizes the applied probe voltage, so a swept run pairs
+    each current channel with a `V, …` one. Do NOT classify from the description
+    — it quotes "IV sweep 200us" even for probes marked `(NOT USED)`, so it says
+    "sweep" in nearly every run. Beware plate/electrode voltage monitors, which
+    are voltage channels but not probe sweeps.
+  - **Hardware in/out** (obstacle, plate, probe swapped out). Recorded only in
+    the description prose. Scan every run for negation markers like `(NOT USED)`
+    — a run can list a full plate configuration and still have had it withdrawn,
+    and a header line may announce the state for only some runs of a span.
+
+Define each column's rule ONCE, where §1 names conventions, in a sentence or
+two. The table carries the per-run values; nothing else restates them.
+
 ## Structure
 
 1. How to read this document — where each field comes from (which HDF5 path),
@@ -83,7 +111,7 @@ where it holds, and note where it CHANGES. The changes are the useful signal.
    probe/diagnostic inventory, digitizer channel map, and how the controlled
    parameters evolved run to run.
 3. Daily summary — what was done each day and why, in narrative form.
-4. Per-run reference table, plus groupings by experimental intent.
+4. Per-run reference table — the spine of the document (see below).
 5. Probe-drive to channel map (see below).
 6. Per-campaign diagnostics that ran on every shot.
 7. Known-good reference runs worth trusting.
@@ -146,8 +174,6 @@ data. Then:
   - INTENDED changes — configuration switches, parameter scans, retunes — are
     not discrepancies. Document them in sections 2/3 and say so at the top of
     section 9.
-  - State each discrepancy ONCE, in section 9. Do not restate it in the daily
-    summary or the run table; cross-reference instead.
 
 Then go back into the raw data and try to RESOLVE them. Measure the signals
 rather than reasoning from the descriptions — the data outranks the text. Mark
@@ -173,9 +199,29 @@ does NOT have the data-analysis repo — describe operations (what to compute,
 from which HDF5 path), not the library functions that perform them. No function
 names, module paths, or venv paths in the document.
 
-Terse and factual. Tables where the content is tabular. State each fact once, at
-the layer that owns it. Where an array layout, unit, or sign convention matters,
-name it — those are the facts a reader cannot recover from the file alone.
+Terse and factual. Tables where the content is tabular. Where an array layout,
+unit, or sign convention matters, name it — those are the facts a reader cannot
+recover from the file alone.
+
+**State each fact once, at the layer that owns it.** This is the rule that decides
+length, and the one most easily lost while editing. Each fact has exactly one
+home: a per-run value in the run table, a convention in §1, a discrepancy in §9,
+a per-run parameter that varies in the controlled-parameter table. Everything
+else references it.
+
+  - Do not re-assert a run's mode, hardware state, grid, or shot count in the
+    daily summary, the channel map, the reference runs, or the cautions. The
+    daily summary carries WHY a day was run that way; the numbers are in §4.
+  - **Delete any section whose content is derivable from the run table.** A
+    "groupings by intent" list that just re-sorts the Intent column earns
+    nothing. Keep a grouping only where it states something the table cannot —
+    a span, an ordering, a shared derived artifact.
+  - A caution that repeats a §9 row or a §1 storage fact is noise; §8 is for
+    traps that have no other home.
+  - Prefer widening the run table to adding a section.
+
+A reader looking for one run's facts should find them in one row, not assembled
+from five places.
 
 ## Environment notes
 
@@ -193,7 +239,14 @@ Verify programmatically, not by reading:
     never both, none missing) — beware range notation like `11`–`14` in a table
     cell, which silently sweeps runs into a group;
   - every section cross-reference resolves to a real heading;
-  - no orphaned references to sections you deleted while editing.
+  - no orphaned references to sections you deleted while editing, and no pointer
+    to a section for content you have since moved elsewhere;
+  - no paragraph appears twice. Rewriting a preamble in place leaves the old
+    copy directly above the new one, and it reads as intentional.
+
+Then read the document once, start to finish, asking of each sentence: is this
+the one place that owns this fact? Cut what answers no. This catches what the
+programmatic checks cannot.
 
 Ask me about anything the files genuinely cannot settle. Do not guess at
 physical intent that is not recorded.

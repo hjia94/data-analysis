@@ -27,6 +27,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -46,7 +47,10 @@ from data_analysis.io.probe_map import config_text, parse_config_channels, ports
 # configs that write `LPScope_C1` (the pre-v2 join saw zero channel ports).
 # v3: the port/[channels] parsers moved to data_analysis.io.probe_map; same
 # output, one implementation shared with the analysis path.
-SCHEMA_VERSION = 3
+# v4: adds `probe_voltage_channels` (the Isat-vs-swept discriminator) and
+# `description_markers` (hardware in/out state), both previously re-derived by
+# hand per campaign and both got wrong in the Jun-2026 log.
+SCHEMA_VERSION = 4
 
 # `source_code` embeds a whole Python source file; `description` is long free
 # text the agent pulls per-run when it actually needs it. Both blow the budget
@@ -75,6 +79,48 @@ def parse_channels(cfg):
     """
     return {f"{prefix}:{chan}": desc
             for (prefix, chan), desc in parse_config_channels(cfg).items()}
+
+
+# A probe voltage monitor: the description's value starts with `V,` or `V@`
+# (`V, LP@P29-L`, `V@P33, Y+`). Only a SWEPT run digitizes the applied probe
+# voltage, so these channels are the mode discriminator -- reported, not judged.
+# Deliberately does not match a plate/electrode monitor ("Bias voltage, 2'',
+# X200"), which is a voltage channel but not a probe sweep.
+_PROBE_V_RE = re.compile(r"^\s*V\s*[,@]")
+
+# `(NOT USED)` on a hardware block, and a named obstacle: hardware in/out state
+# lives only in the description prose, and a run can list a full configuration
+# for hardware that was withdrawn.
+_NOT_USED_RE = re.compile(r"\(NOT USED\)\s*(.+)")
+_OBSTACLE_RE = re.compile(r"^\s*-\s*Obstacle:\s*(.+)$", re.M)
+
+
+def probe_voltage_channels(channels):
+    """Channels digitizing an applied PROBE voltage -- the swept-run signature.
+
+    Empty means the run recorded fixed-bias current only. The agent classifies;
+    this just reports which channels carry a probe voltage, because the
+    description prose cannot be trusted for it (it quotes sweep settings for
+    probes marked `(NOT USED)`).
+    """
+    return sorted(k for k, desc in channels.items() if _PROBE_V_RE.match(desc))
+
+
+def description_markers(desc):
+    """Hardware-state markers parsed from the run description prose.
+
+    `not_used` lists the hardware blocks marked `(NOT USED)` -- a plate can be
+    fully configured in the text and still have been withdrawn. `obstacle` is
+    the `- Obstacle: ...` line where one is present.
+
+    Both match one specific spelling. A null means only "this campaign did not
+    write that line in this run" -- read it as hardware-out ONLY after checking
+    that the campaign uses these markers at all, since a campaign describing an
+    obstacle in free prose returns null for every run.
+    """
+    return {"not_used": [m.strip()[:120] for m in _NOT_USED_RE.findall(desc or "")],
+            "obstacle": (m.group(1).strip()[:200]
+                         if (m := _OBSTACLE_RE.search(desc or "")) else None)}
 
 
 def summarize_group(g):
@@ -217,7 +263,16 @@ def extract(path):
             rec["config_text"] = cfg
             channels = parse_channels(cfg)
             rec["config_channels"] = channels
+            rec["probe_voltage_channels"] = probe_voltage_channels(channels)
             rec["scopes"] = scope_summary(f)
+
+            # `description` is in SKIP_ATTRS (it is long free text), but the
+            # hardware in/out state is recorded nowhere else, so parse it here
+            # rather than emitting the whole block.
+            raw_desc = f.attrs.get("description", "")
+            if isinstance(raw_desc, bytes):
+                raw_desc = raw_desc.decode(errors="replace")
+            rec["description_markers"] = description_markers(str(raw_desc))
 
             pos = f.get("Control/Positions")
             if pos is None:
