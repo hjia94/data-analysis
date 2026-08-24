@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 
 __all__ = [
 	'show_info',
+	'parse_description',
 	'read_probe_motion_6k',
 	'read_probe_motion_bmotion',
 	'read_digitizer_config',
@@ -42,6 +43,27 @@ class ProbeMotion(dict):
 
 def show_info(f):
 	f.overview.print()
+
+# Where the LabVIEW DAQ writes the operator's run description. pydaq puts the
+# same text in a root `description` attribute; this translator puts it on the
+# data group, so only the location differs -- the text and its parser are shared.
+_DESCRIPTION_PATH = 'Raw data + config'
+
+def parse_description(ifn):
+	"""Parse the run's ``Description`` attribute into a ``RunDescription``.
+
+	The bapsflib counterpart of ``pydaq.parse_description``: same tolerant parser,
+	different attribute location (see ``_DESCRIPTION_PATH``). Returns an empty
+	``RunDescription`` if the file has no description, so callers get the same
+	"nothing recorded" answer either backend gives.
+	"""
+	from . import run_description
+	from .pydaq import _find_description_attribute
+
+	with h5py.File(ifn, 'r') as f:
+		grp = f.get(_DESCRIPTION_PATH)
+		_, description = _find_description_attribute(grp.attrs) if grp else (None, None)
+	return run_description.parse_description(description or "")
 
 def read_probe_motion_6k(f):
 	'''

@@ -122,7 +122,7 @@ def open_lapd(path):
 
 
 def compare_runs(path_a, path_b):
-    """Diff the run descriptions of two pydaq files -> a ``run_description.RunDiff``.
+    """Diff two runs' descriptions -> a ``run_description.RunDiff``.
 
     Convenience for the common "what changed between these two runs?" question:
     opens both, parses each ``description`` attribute, and classifies every setting
@@ -132,8 +132,8 @@ def compare_runs(path_a, path_b):
     ``(path, raw_a, raw_b)`` tuples. The two paths' basenames are attached as the
     diff's ``label_a``/``label_b``.
 
-    Both files must be LAPD_DAQ (pydaq) layout; a non-pydaq file raises
-    ``NotImplementedError`` (via :meth:`LapdRun.description`).
+    The two files need not share a layout -- pydaq and bapsflib runs diff against
+    each other, since both parse to the same ``RunDescription``.
     """
     from ._backends import run_description
 
@@ -175,10 +175,9 @@ def gas_puff(path):
     Convenience wrapper for the common "group runs by gas puff" question: opens
     the file and pulls the puff voltage/duration out of the free-text
     plasma-condition bullet of its ``description`` via :func:`parse_gas_puff`.
-    Returns ``None`` when the run has no puff line.
-
-    LAPD_DAQ (pydaq) layout only; a non-pydaq file raises ``NotImplementedError``
-    (via :meth:`LapdRun.description`).
+    Returns ``None`` when the run has no puff line. Works on any layout with a
+    run description; the legacy 2018 one has none and raises
+    ``NotImplementedError`` (via :meth:`LapdRun.description`).
     """
     return parse_gas_puff(open_lapd(path).description().raw)
 
@@ -191,23 +190,53 @@ _SHUNT_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# The other phrasing: one line for the whole probe, e.g. Mar-2026's "All four
+# tips used ground referemce, -98 V bias, and 45 Ohm resistor". Anchored on
+# "all ... tips" so a stray "45 ohm" elsewhere in the description cannot claim
+# every tip. Scoped to the rest of that LINE, not the sentence: the line is what
+# the operator actually formats to, and a '.' terminator would truncate "4.7 ohm".
+_UNIFORM_TIPS_RE = re.compile(r"\ball\b[^\n]*?\btips?\b([^\n]*)", re.IGNORECASE)
 
-def parse_shunts(text):
+# A resistance within that line. The lookbehind keeps the value glued to "ohm":
+# the same line carries "-98 V bias", which a looser pattern captures instead.
+_OHM_RE = re.compile(r"(?<![\d.])([\d.]+)\s*ohm", re.IGNORECASE)
+
+
+def parse_shunts(text, tips=None):
     """Extract per-tip shunt resistances from description text -> ``{'X+': 75.0, ...}``.
 
-    Multi-tip probes use **unequal** shunts, sized so ``V = I*R`` fills the
-    digitizer range on each tip -- in Jun-2026, 300 ohm on X- against 75/43 ohm
-    elsewhere. Converting volts to amps therefore needs the per-tip value, and a
-    missing one cannot be defaulted to 1.0 or to a neighbour's: a 4x error would
-    be absorbed straight into a calibration as a spurious gain, with nothing
-    downstream looking wrong.
+    Every analysis starts here: the digitizer records volts across this resistor,
+    and ``I = V / R`` needs its value per tip. Campaigns write it two ways --
+    per-tip bullets (Jun-2026: 300 ohm on X- against 75/43 elsewhere) or one
+    sentence for the whole probe (Mar-2026: "All four tips ... 45 Ohm resistor").
+    Bullets win where present; the uniform sentence is read only if there are
+    none, and then needs ``tips`` to say which tips it covers, since the sentence
+    names a count rather than the tips themselves.
 
-    Returns ``{}`` when the description has no shunt bullets, so a caller can tell
-    "no shunts recorded" from "some recorded" and decide; a caller needing a
-    specific set of tips checks for them.
+    A missing value cannot be defaulted to 1.0 or to a neighbour's: the error
+    lands in a calibration as a spurious gain with nothing downstream looking
+    wrong. So an unparsed description returns ``{}`` rather than a guess, letting
+    a caller tell "none recorded" from "some recorded" and decide.
+
+    Raises ``ValueError`` if a uniform line names two different resistances --
+    picking either would be the silent guess this parser exists to prevent.
     """
-    return {m.group(1).upper(): float(m.group(2))
-            for m in _SHUNT_RE.finditer(text or "")}
+    text = text or ""
+    per_tip = {m.group(1).upper(): float(m.group(2))
+               for m in _SHUNT_RE.finditer(text)}
+    if per_tip or not tips:
+        return per_tip
+    for m in _UNIFORM_TIPS_RE.finditer(text):
+        found = {float(v) for v in _OHM_RE.findall(m.group(1))}
+        if len(found) > 1:
+            raise ValueError(
+                f"uniform shunt line names {sorted(found)} ohm; cannot tell which "
+                f"applies to {list(tips)}: {m.group(0).strip()!r}"
+            )
+        if found:
+            ohms = found.pop()
+            return {t.upper(): ohms for t in tips}
+    return {}
 
 
 def list_all_channels(fn):
@@ -232,10 +261,10 @@ def list_all_channels(fn):
 def print_run_description(fn):
     """Print the run's hand-written description (plasma / bias / probe settings).
 
-    Reads the pydaq ``description`` attribute via ``open_lapd(fn).description()``
-    and prints its raw text so the probe wiring / bias settings the operator
-    wrote are visible alongside the channel list.  Returns the parsed
-    ``RunDescription`` (or ``None`` if it can't be read).
+    Reads the run description via ``open_lapd(fn).description()`` and prints its
+    raw text so the probe wiring / bias settings the operator wrote are visible
+    alongside the channel list.  Returns the parsed ``RunDescription`` (or
+    ``None`` if it can't be read).
     """
     try:
         desc = open_lapd(fn).description()
@@ -440,18 +469,26 @@ class LapdRun:
         return out
 
     def description(self):
-        """Parse the run's ``description`` attribute (LAPD_DAQ pydaq files only).
+        """Parse the run's description attribute -> ``run_description.RunDescription``.
 
-        Delegates to ``pydaq.parse_description`` -> a
-        ``run_description.RunDescription``: the hand-written description text
-        (plasma / magnetic-field / bias / probe settings) structured into sections
-        and items, tolerant of the run-to-run formatting drift. Use
-        :func:`compare_runs` to diff two of them. Raises ``NotImplementedError``
-        for bapsflib/legacy files, which store run metadata differently (read those
-        via :meth:`info`).
+        The hand-written description text (plasma / magnetic-field / bias / probe
+        settings) structured into sections and items, tolerant of run-to-run
+        formatting drift. Use :func:`compare_runs` to diff two of them.
+
+        pydaq and bapsflib write the same operator text to different attributes;
+        each backend locates its own, then both use the one parser. So callers --
+        :func:`parse_shunts`, :func:`parse_gas_puff`, plot titles -- work on either
+        schema without asking which they hold. Raises ``NotImplementedError`` for
+        the legacy 2018 layout, which records no description.
         """
-        self._require_pydaq("description()")
-        return self._pydaq().parse_description(self.path)
+        if self._backend == "bapsflib":
+            return self._bapsflib_daq().parse_description(self.path)
+        if self._backend == "pydaq":
+            return self._pydaq().parse_description(self.path)
+        raise NotImplementedError(
+            f"description() needs a run-description attribute; the "
+            f"{self._backend!r} layout records none."
+        )
 
     # ----------------------------------------------------------------------- #
     # positions
