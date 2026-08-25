@@ -6,6 +6,11 @@ placeholders. Everything outside the block is guidance for *you*, not the agent.
 
 **Fill in:** `<DATA_DIR>`, `<START>`, `<END>` (dates as `YYYY-MM-DD`).
 
+`<DATA_DIR>` may be several paths — directories and/or individual `.hdf5` files. A
+campaign is often filed under per-probe folders with strays at the drive root; pass
+them all and the extractor scans the lot. Give the log's output path explicitly when
+the runs span more than one directory.
+
 **Optional, saves a discovery pass:** if the campaign has an obvious split — a
 configuration change partway through, two probe setups — say so when you paste.
 The agent will look regardless.
@@ -59,6 +64,11 @@ material for decisions that are yours to make:
   - **Acquisition mode.** `probe_voltage_channels` lists the channels carrying an
     applied probe voltage. Non-empty = swept, empty = fixed-bias; the description
     text does not override it (see "Per-run state that varies" below).
+  - **Segmented capture.** `scopes[*].channel_shapes` gives each channel's dataset
+    shape and `segmented_channels` names the 2-D ones. A 2-D `(n_segments,
+    nsamples)` channel is a SEQUENCE-mode capture; 1-D is one trace per shot.
+    `config_scope_modes` is the DECLARED mode and can disagree — it did not exist
+    before mid-2026, so older sequence runs declare nothing. The shape is the truth.
   - **Hardware state.** `description_markers.not_used` names hardware blocks
     marked `(NOT USED)`; `description_markers.obstacle` carries the `- Obstacle:`
     line where one is present. Both match one spelling: confirm the campaign
@@ -100,6 +110,27 @@ summary. Two that campaigns get wrong:
 
 Define each column's rule ONCE, where §1 names conventions, in a sentence or
 two. The table carries the per-run values; nothing else restates them.
+
+### Facts that are only in the array shapes and the binary header
+
+Neither the description nor the config records these, and each one silently
+breaks analysis written without it. Check every campaign for them:
+
+  - **Array layout per channel** — 1-D (one trace) vs 2-D (segmented). State both
+    layouts in §1 and put the segment count in the run table.
+  - **A time base that is present but EMPTY.** A `time_array` of `shape (0,)` with
+    valid-looking attrs reads as a real axis to code that checks only for the
+    dataset's existence. Say so per run and give the rebuild recipe.
+  - **Scaling.** Raw integer counts are not volts. Name the formula and where its
+    constants live, including the sign.
+  - **Positions are unsnapped encoder floats**, not the commanded grid. Say what
+    to round to, and give the measured worst-case deviation so the reader knows
+    rounding is safe. Counting `np.unique(x)` unrounded invents positions that do
+    not exist — check grid completeness only AFTER snapping.
+  - **The instrument behind a group name can change mid-campaign.** Group names
+    like `bdotscope` are config-chosen and get reused across a hardware swap;
+    `scope_type` carries the real model and serial. Where they diverge, tabulate
+    which runs used which unit — sample rates and bandwidths change with it.
 
 ## Structure
 
@@ -179,6 +210,15 @@ Then go back into the raw data and try to RESOLVE them. Measure the signals
 rather than reasoning from the descriptions — the data outranks the text. Mark
 each as *resolved* / *confirmed* / *supported* / *documentary* and put the
 supporting numbers in an evidence subsection.
+
+**The acquisition code is evidence too.** These files are written by LAPD_DAQ
+(`../LAPD_DAQ`, installed editable). When a run's structure is unfamiliar or a
+whole run looks wrong, read the writer and its `docs/` plans, and check `git log`
+dates against the run's mtime — a known acquisition bug fixed at a datable commit
+tells you exactly which runs are affected, which no amount of staring at the
+description will. Confirm it in the data rather than inferring from the timeline
+alone: a run written after the fix should show the correct signature, and saying
+so with measured numbers is what makes it *resolved* rather than *supported*.
 
 Be honest about strength of evidence. If a measurement corroborates but does not
 prove — within-group scatter comparable to between-group separation, say — mark

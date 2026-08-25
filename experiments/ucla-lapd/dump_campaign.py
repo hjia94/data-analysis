@@ -50,7 +50,11 @@ from data_analysis.io.probe_map import config_text, parse_config_channels, ports
 # v4: adds `probe_voltage_channels` (the Isat-vs-swept discriminator) and
 # `description_markers` (hardware in/out state), both previously re-derived by
 # hand per campaign and both got wrong in the Jun-2026 log.
-SCHEMA_VERSION = 4
+# v5: adds sequence-mode reporting -- per-channel dataset shapes and
+# `segmented_channels` (a 2-D channel is a segmented capture), the declared
+# `[scope_modes]`/`[nshots]` config, and `time_array` length. Also takes several
+# directories/files, since a campaign is not always one folder.
+SCHEMA_VERSION = 5
 
 # `source_code` embeds a whole Python source file; `description` is long free
 # text the agent pulls per-run when it actually needs it. Both blow the budget
@@ -79,6 +83,29 @@ def parse_channels(cfg):
     """
     return {f"{prefix}:{chan}": desc
             for (prefix, chan), desc in parse_config_channels(cfg).items()}
+
+
+_INI_SECTION_RE = re.compile(r"^\s*\[(\w+)\]\s*$")
+_INI_KEY_RE = re.compile(r"^\s*([^;#=\[\]]+?)\s*=\s*(.*?)\s*$")
+
+
+def config_section(cfg, section):
+    """`{key: value}` from one INI section of the embedded config, `{}` if absent.
+
+    A leading `;`/`#` comments a line out -- these configs keep previous setups
+    in place, commented -- and the key pattern excludes both so that wiring is
+    skipped, matching `parse_config_channels`.
+    """
+    out = {}
+    inside = False
+    for line in (cfg or "").splitlines():
+        sec = _INI_SECTION_RE.match(line)
+        if sec:
+            inside = sec.group(1).lower() == section.lower()
+            continue
+        if inside and (m := _INI_KEY_RE.match(line)):
+            out[m.group(1)] = m.group(2)
+    return out
 
 
 # A probe voltage monitor: the description's value starts with `V,` or `V@`
@@ -187,11 +214,18 @@ def pair_relations(groups):
 
 
 def scope_summary(f):
-    """Per scope group: shot count, and which channels exist on shot 1.
+    """Per scope group: shot count, channels on shot 1, and their dataset shapes.
 
     Channel presence on disk is ground truth for what was acquired; the config's
     [channels] is only intent. Shot 1 stands in for all shots -- verifying every
     shot would defeat the point of a metadata-only pass.
+
+    `channel_shapes` is read from the dataset shape, never the data: a 2-D
+    `(n_segments, nsamples)` channel is a SEQUENCE-mode capture and a 1-D one is
+    single-shot. That distinction changes the shape of every downstream array and
+    is recorded nowhere else in the file, since `[scope_modes]` is config intent
+    and `time_array` only carries it in prose. Shapes are reported per channel
+    because one scope's channels are all one mode but two scopes need not agree.
     """
     out = {}
     for name, node in f.items():
@@ -201,11 +235,22 @@ def scope_summary(f):
         if not shots:
             continue
         first = node.get(sorted(shots, key=lambda s: int(s.split("_")[1]))[0])
+        shapes = {k[:-5]: list(v.shape)
+                  for k, v in (first or {}).items()
+                  if k.endswith("_data") and hasattr(v, "shape")}
+        ta = node.get("time_array")
         out[name] = {
             "n_shot_groups": len(shots),
             "attrs": attrs_of(node),
-            "channels_on_disk": sorted(
-                k[:-5] for k in (first or {}) if k.endswith("_data")),
+            "channels_on_disk": sorted(shapes),
+            "channel_shapes": shapes,
+            "segmented_channels": sorted(k for k, s in shapes.items()
+                                         if len(s) > 1),
+            # A `time_array` of length 0 is not the same as a missing one: some
+            # sequence runs write the dataset with valid-looking attrs and no
+            # samples, which reads as a usable axis to a caller that only checks
+            # the key exists. Hence the explicit None-vs-0 distinction.
+            "time_array_len": None if ta is None else int(ta.shape[0]),
         }
     return out
 
@@ -264,6 +309,11 @@ def extract(path):
             channels = parse_channels(cfg)
             rec["config_channels"] = channels
             rec["probe_voltage_channels"] = probe_voltage_channels(channels)
+            # Declared acquisition mode per scope. Intent only -- the on-disk
+            # truth is `scopes[*].segmented_channels`; a scope declared
+            # `sequence` whose channels are 1-D did not record segments.
+            rec["config_scope_modes"] = config_section(cfg, "scope_modes")
+            rec["config_nshots"] = config_section(cfg, "nshots")
             rec["scopes"] = scope_summary(f)
 
             # `description` is in SKIP_ATTRS (it is long free text), but the
@@ -322,20 +372,38 @@ def git_hash():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("data_dir")
+    # A campaign is not always one directory: runs get filed under per-probe
+    # folders with strays at the drive root, and staging them into one place
+    # needs symlinks (admin-only on Windows) or a copy of hundreds of GB.
+    ap.add_argument("data_dir", nargs="+",
+                    help="directories to scan, and/or individual .hdf5 files")
     ap.add_argument("-o", "--out", help="output JSONL (default: stdout)")
     ap.add_argument("--glob", default="*.hdf5")
     args = ap.parse_args()
 
-    paths = sorted(glob.glob(os.path.join(args.data_dir, args.glob)))
-    if not paths:
+    paths = []
+    for spec in args.data_dir:
+        if os.path.isdir(spec):
+            paths.extend(sorted(glob.glob(os.path.join(spec, args.glob))))
+        else:
+            paths.append(spec)
+    # The same run reachable by two paths (a folder copy and a root-level
+    # original) must be extracted once; realpath, not basename, so two genuinely
+    # different runs sharing a filename both survive.
+    seen, unique = set(), []
+    for p in paths:
+        key = os.path.realpath(p)
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    if not unique:
         sys.exit(f"no files matching {args.glob!r} in {args.data_dir}")
 
-    records = [extract(p) for p in paths]
+    records = [extract(p) for p in unique]
     summary = {"summary": coverage(records),
                "schema_version": SCHEMA_VERSION,
                "extractor_git": git_hash(),
-               "data_dir": os.path.abspath(args.data_dir)}
+               "data_dir": [os.path.abspath(d) for d in args.data_dir]}
 
     out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
     if out is sys.stdout:
