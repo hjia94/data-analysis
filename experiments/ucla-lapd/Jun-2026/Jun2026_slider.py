@@ -36,15 +36,28 @@ behind the dropdown and both probe tips overlaid in each frame.
 :func:`emit_isat_fft_slider` puts **one run's Isat tips on one page**, the
 slider scrubbing probe position and each tip a trace -- the schema's
 non-spatial case, where the panel's x-axis is frequency rather than position.
+:func:`emit_isat_fft_slider_all` puts **every such run on one page**, the runs
+behind the dropdown and the tips still overlaid: the runs that repeat one probe
+line while a setting is walked (00-06, gas puff 23->45 ms) are read by switching
+that dropdown at a held position.
 :func:`emit_xcorr_slider_all` puts **every pair of a run on one page** behind a
 dropdown, which is the one to reach for when the question is "which channel pair
 shows this?" -- comparing pairs by switching a dropdown at a held frequency,
-rather than by tiling browser windows. The two share
-:func:`_xcorr_pair_fields`, so a change to how a pair is prepared cannot apply
-to only one of them.
+rather than by tiling browser windows.
+
+Each *_all page shares its per-item preparation with the single-item emitter
+(:func:`_xcorr_pair_fields` for a pair, :func:`_isat_run_read` for a run), so a
+change to how one is prepared cannot apply to only one of the two pages.
+
+A dropdown of runs and a dropdown of channels are the same schema feature, so
+what a page's dropdown *varies* is stated in its ``group_label`` -- the caption
+is the only thing on the page that says whether switching it changes the
+channel or the run.
 """
 
+import glob
 import os
+from collections import namedtuple
 
 import numpy as np
 
@@ -451,7 +464,7 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
     Replaces the ``IV_line_*.png`` family, where each figure fixed a handful of
     timestamps and each run needed its own file. Here the slider scrubs the
     timestamps and the dropdown switches runs, so "how does this profile evolve,
-    and how does that differ between fill delays?" is two controls rather than
+    and how does that differ between gas puffs?" is two controls rather than
     seven files.
 
     Args:
@@ -492,10 +505,9 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
         group, xs, run_ne_calibrated = prepared
         ne_calibrated = ne_calibrated and run_ne_calibrated
 
-        # The delay time is the knob that distinguishes these runs, so it is
-        # what the dropdown says -- "23 ms", not "run 24".
-        delay = _delay_label(ifn)
-        group["name"] = f"{delay}  (run {run_num})" if delay else f"run {run_num}"
+        # Runs keep their acquisition order here, unlike the Isat page: an IV
+        # group's frames are timestamps, and the sort key is discarded.
+        group["name"], _ = _puff_run_entry(ifn, run_num)
 
         # One page carries one probe line for every run. As with the tips, a
         # page that adopted one run's positions and drew another run's data
@@ -514,12 +526,13 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
 
     bundle = {
         "schema": SCHEMA_VERSION,
-        "title": "Jun-2026 IV line scans - Vp, Te, ne by fill delay",
+        "title": "Jun-2026 IV line scans - Vp, Te, ne by gas puff",
         "geometry": "line",
         # Bundle-level axis: a fallback only, since every group overrides it.
         "axis": groups[0]["axis"],
         "x": {"label": "X Position", "unit": "cm", "values": xpos},
         "groups": groups,
+        "group_label": "Gas puff",
         "provenance": {
             "source": f"{len(groups)} runs, {os.path.basename(os.path.dirname(ifns[0]))}",
             "params": {"ne": _ne_provenance(calibrated, ne_calibrated),
@@ -539,6 +552,13 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
 # numbers, far more than a page needs -- and the fluctuation structure sits at
 # the bottom of the band.
 ISAT_FMAX_KHZ = 500.0
+
+#: How far two runs' recorded probe positions may differ and still count as the
+#: same commanded line [cm]. Runs 00-06 repeat one 61-point x-line and their
+#: stored coordinates differ by up to 6.3e-5 cm -- drive repeatability, not a
+#: different scan. Sits far above that and far below the 1 cm point spacing, so
+#: a genuinely different line still fails.
+ISAT_POS_TOL_CM = 1e-3
 
 
 def emit_isat_fft_slider(ifn, npz_path=None, chans=None,
@@ -565,6 +585,51 @@ def emit_isat_fft_slider(ifn, npz_path=None, chans=None,
 
     Returns the written ``.html`` path, or ``None`` if the run has no stored
     channel (the reason is printed, so a caller looping over runs can continue).
+    """
+    read = _isat_run_read(ifn, npz_path, chans, fmax_khz, fmin_khz)
+    if read is None:
+        return None
+
+    run_num = run_num_of(ifn)
+    run_label = jpl.run_title(ifn, run_num) or f"{run_num} Isat FFT"
+    bundle = {
+        "schema": SCHEMA_VERSION,
+        "title": f"{run_label} \u2014 Isat FFT by position",
+        "geometry": "line",
+        "axis": _isat_position_axis(read.pos_x, read.pos_y),
+        "x": {"label": "frequency", "unit": "kHz", "values": read.freq_khz,
+              "scale": "log"},
+        "fields": [_isat_field(read.traces)],
+        "context": read.context,
+        "provenance": {
+            "source": os.path.basename(ifn),
+            "params": {"band": _band_text(fmin_khz, fmax_khz, read.freq_khz),
+                       "FFT window": read.window_text,
+                       "positions": read.pos_x.size},
+            "details": _channel_details(ifn, read.chans),
+        },
+        "warning": None,
+    }
+
+    name = f"{run_num}-isat-fft-slider-0to{fmax_khz:g}kHz"
+    return write_slider_html(bundle, out or slider_path(name))
+
+
+#: One run's prepared Isat spectra -- what both Isat emitters need from an npz.
+#: The FFT window itself is not here: it survives only as the banner text and
+#: the context shading, both settled inside the read.
+_IsatRead = namedtuple(
+    "_IsatRead", "chans traces freq_khz pos_x pos_y window_text context")
+
+
+def _isat_run_read(ifn, npz_path, chans, fmax_khz, fmin_khz):
+    """One run's npz -> banded traces, axes and context, or ``None``.
+
+    Shared by the one-run and all-runs Isat pages so a change to how a run is
+    prepared cannot apply to only one of them -- the rule
+    :func:`_xcorr_pair_fields` follows for pairs. ``None`` (with the reason
+    printed) means the run has nothing stored, so a caller looping over runs
+    continues instead of dying on a run that was never analysed.
     """
     if npz_path is None:
         npz_path = jis.isat_npz_path(ifn)
@@ -595,42 +660,162 @@ def emit_isat_fft_slider(ifn, npz_path=None, chans=None,
                              f"{freq_khz[0]:.3f}-{freq_khz[-1]:.1f} kHz")
         # Stored as (npos, nfreq), which is already the schema's (n_axis, nx).
         traces = [{"name": k, "frames": d[f"{k}__amp"][:, band]} for k in chans]
-        pos_x, pos_y = d["pos_x"], d["pos_y"]
+        # float32 on disk; float64 here so the cross-run position comparison is
+        # not fighting the storage dtype.
+        pos_x = np.asarray(d["pos_x"], float)
+        pos_y = np.asarray(d["pos_y"], float)
         freq_khz = freq_khz[band]
         # Read inside the `with`: an NpzFile is a lazy zip handle, and the
         # bundle below is built after it has closed.
         window = _stored_window(d, chans)
-        d_files = set(d.files)
+        window_text = _window_text(set(d.files), chans, window)
         context = _fft_window_context(d, chans, window)
 
-    run_num = run_num_of(ifn)
-    run_label = jpl.run_title(ifn, run_num) or f"{run_num} Isat FFT"
+    return _IsatRead(chans, traces, freq_khz, pos_x, pos_y, window_text, context)
+
+
+def _isat_position_axis(pos_x, pos_y):
+    """The scan axis: position index, with each frame's (x, y) as its readout."""
+    return {"name": "position", "unit": "",
+            "values": np.arange(pos_x.size, dtype=float),
+            "labels": _position_labels(pos_x, pos_y)}
+
+
+def _isat_field(traces):
+    """The one Isat panel: every tip overlaid on a shared log-log axis."""
+    return {"name": "Isat amplitude", "unit": "V", "cmap": "viridis",
+            "vmin": None, "vmax": None, "yscale": "log", "traces": traces}
+
+
+def _band_text(fmin_khz, fmax_khz, freq_khz):
+    return f"{fmin_khz:g}-{fmax_khz:g} kHz ({freq_khz.size} bins)"
+
+
+def emit_isat_fft_slider_all(ifns, chans=None, fmax_khz=ISAT_FMAX_KHZ,
+                             fmin_khz=1.0, out=None, name=None):
+    """Every Isat run on **one** page: runs in the dropdown, tips overlaid.
+
+    The counterpart to :func:`emit_iv_line_slider_all`, for runs that repeat one
+    probe line while a setting is walked (runs 00-06, gas puff 23->45 ms).
+    Replaces the one-file-per-run family: "how does this spectrum change with
+    the puff?" becomes a dropdown rather than seven browser windows.
+
+    The dropdown says the *setting*, not the run number -- the puff duration is
+    the knob these runs vary, so ``"35 ms (run 03)"``; entries are ordered by it
+    rather than by run, which is why run 06 (23 ms) leads. Runs with no puff in
+    their description fall back to the run number alone and sort last.
+
+    Args:
+        ifns: The runs' raw HDF5 paths. Each needs its ``-isat-fft-data.npz``
+            beside it (:func:`Jun2026_Isat.batch_fft_by_position`).
+        chans (list): Channel keys to draw; default every channel stored by the
+            run being read, so runs need not agree on their tips.
+        fmax_khz, fmin_khz (float): Band shipped to the page.
+        out, name (str): Explicit output path / output stem.
+
+    Returns the written ``.html`` path, or ``None`` when no run could be read.
+
+    Raises ``ValueError`` if the runs disagree on their frequency axis or probe
+    line beyond :data:`ISAT_POS_TOL_CM` -- one page carries one of each, and
+    drawing a second run's spectra against the first's axes would mislabel every
+    frame with no visible symptom.
+    """
+    groups, shared, ref = [], None, None
+    for ifn in ifns:
+        read = _isat_run_read(ifn, None, chans, fmax_khz, fmin_khz)
+        if read is None:
+            continue
+
+        label, sort_key = _puff_run_entry(ifn, run_num_of(ifn))
+
+        # One page carries one frequency axis and one probe line for every run.
+        # Checked rather than assumed: a page that adopted the first run's axes
+        # and drew another run's data against them would be wrong invisibly.
+        if shared is None:
+            shared, ref = read, label
+        else:
+            if not np.array_equal(read.freq_khz, shared.freq_khz):
+                raise ValueError(
+                    f"{label} has a different frequency axis than {ref} "
+                    "(different scope sampling rate or FFT length); they "
+                    "cannot share one page's x-axis.")
+            # Tolerant, not exact: see ISAT_POS_TOL_CM. A run measured at a
+            # different *number* of positions is a different scan outright.
+            same_line = (read.pos_x.shape == shared.pos_x.shape
+                         and np.allclose(read.pos_x, shared.pos_x,
+                                         rtol=0, atol=ISAT_POS_TOL_CM)
+                         and np.allclose(read.pos_y, shared.pos_y,
+                                         rtol=0, atol=ISAT_POS_TOL_CM))
+            if not same_line:
+                raise ValueError(
+                    f"{label} was measured on a different probe line than "
+                    f"{ref}; they cannot share one page's position axis.")
+
+        # Paired with the sort key rather than carrying it as a group field: a
+        # group is validated against the schema, and a stray key would have to
+        # be popped back off before rendering.
+        # Its own raw record, so the figure above the panels tracks the dropdown
+        # rather than showing one run's trace over every run's spectra.
+        groups.append((sort_key,
+                       {"name": label, "fields": [_isat_field(read.traces)],
+                        "context": _context_for_run(read.context, label)}))
+
+    if not groups:
+        print("  (Isat: no run could be read; nothing to render)")
+        return None
+
+    # By the walked setting, not by run number: the dropdown reads as the sweep
+    # it is (23, 24, 25, 30 ms...), which run order would scramble.
+    groups = [group for _, group in sorted(groups, key=lambda pair: pair[0])]
+
     bundle = {
         "schema": SCHEMA_VERSION,
-        "title": f"{run_label} \u2014 Isat FFT by position",
+        "title": "Jun-2026 Isat FFT by position - runs by gas puff",
         "geometry": "line",
-        "axis": {"name": "position", "unit": "",
-                 "values": np.arange(pos_x.size, dtype=float),
-                 "labels": _position_labels(pos_x, pos_y)},
-        "x": {"label": "frequency", "unit": "kHz", "values": freq_khz,
+        # Every run shares these, checked above; the first read defines them.
+        "axis": _isat_position_axis(shared.pos_x, shared.pos_y),
+        "x": {"label": "frequency", "unit": "kHz", "values": shared.freq_khz,
               "scale": "log"},
-        "fields": [{"name": "Isat amplitude", "unit": "V", "cmap": "viridis",
-                    "vmin": None, "vmax": None, "yscale": "log",
-                    "traces": traces}],
-        "context": context,
+        "groups": groups,
+        "group_label": "Gas puff",
+        # No bundle-level context: each group carries its own record, so a
+        # shared fallback could only ever be one run's trace standing in for
+        # another's.
         "provenance": {
-            "source": os.path.basename(ifn),
-            "params": {"band": f"{fmin_khz:g}-{fmax_khz:g} kHz "
-                               f"({freq_khz.size} bins)",
-                       "FFT window": _window_text(d_files, chans, window),
-                       "positions": pos_x.size},
-            "details": _channel_details(ifn, chans),
+            "source": f"{len(groups)} runs, "
+                      f"{os.path.basename(os.path.dirname(ifns[0]))}",
+            "params": {"band": _band_text(fmin_khz, fmax_khz, shared.freq_khz),
+                       "FFT window": shared.window_text,
+                       "positions": shared.pos_x.size,
+                       "runs": len(groups)},
+            # Every run on this page carries the same tips, so the first
+            # rendered run's channels describe them all.
+            "details": _channel_details(ifns[0], shared.chans),
         },
         "warning": None,
     }
 
-    name = f"{run_num}-isat-fft-slider-0to{fmax_khz:g}kHz"
+    name = name or f"isat-fft-all-runs-0to{fmax_khz:g}kHz"
     return write_slider_html(bundle, out or slider_path(name))
+
+
+def _context_for_run(context, run_label):
+    """One run's context block, titled with the run it came from.
+
+    The figure follows the dropdown, so the title is not what identifies the
+    record -- but the caption is the only place the run's name appears while a
+    given group is selected, and a reader who has scrolled past the dropdown
+    would otherwise have to scroll back to know which run they are looking at.
+
+    A copy, not a mutation: ``read.context`` belongs to the caller's
+    :class:`_IsatRead`, which the single-run emitter also hands out.
+    """
+    if context is None:
+        return None
+    # .get: the schema does not require a context title, and a page whose
+    # context lost its run name is a worse failure than a bare run name.
+    title = context.get("title", "")
+    return {**context, "title": f"{title} \u2014 {run_label}" if title else run_label}
 
 
 def _window_text(d_files, chans, window):
@@ -764,8 +949,11 @@ def _position_labels(pos_x, pos_y):
 def emit_isat_fft_sliders(ifns, **kwargs):
     """:func:`emit_isat_fft_slider` for several runs; returns the written paths.
 
-    One page per run (each run has its own probe line and npz), skipping runs
-    with nothing stored.
+    One page *per run*, skipping runs with nothing stored. Reach for
+    :func:`emit_isat_fft_slider_all` instead where the runs share a probe line:
+    it puts them behind one dropdown, which is what makes them comparable.
+    This one is for runs that do not -- different grids, or different scopes --
+    and so cannot share a page's axes.
     """
     return [p for p in (emit_isat_fft_slider(f, **kwargs) for f in ifns) if p]
 
@@ -778,21 +966,40 @@ def _ne_provenance(requested, actual):
             else "raw (calibration missing; run calibrate_plasma_npz)")
 
 
-def _delay_label(ifn):
-    """A run's fill delay as a dropdown entry: ``'23 ms'``.
+def _puff_run_entry(ifn, run_num):
+    """A run's dropdown entry -> ``(label, sort_key)``, from one read of the file.
 
-    Read from the parsed description rather than by regexing a formatted title
-    back apart: :func:`data_analysis.io.parse_gas_puff` is the one declaration
-    of the operator's puff phrasing, and going through it also avoids
-    :func:`Jun2026_plot.puff_title`'s no-puff fallback, which returns the bare
-    run number -- a label of "24" that reads as a delay but is a run number.
-    Returns ``""`` when there is no puff line, so the caller shows the run
-    alone instead of a wrong delay.
+    ``('35 ms  (run 03)', (0, 35.0))``, or ``('run 03', (1, 3.0))`` where the
+    description records no puff. Both *_all pages label their dropdown this way,
+    so the format is declared here rather than once per page.
+
+    The puff duration is the knob these runs vary, so it leads the label and
+    orders the entries; runs without one sort after those with one, by run
+    number, since interleaving them at an invented duration would put a wrong
+    reading on the dropdown.
+
+    Read via :func:`data_analysis.io.parse_gas_puff`, the one declaration of the
+    operator's puff phrasing, rather than by regexing a formatted title back
+    apart. That also avoids :func:`Jun2026_plot.puff_title`'s no-puff fallback,
+    which returns the bare run number -- a label of "24" that reads as a
+    duration but is a run number.
     """
     desc = jpl._run_description(ifn)
     puff = parse_gas_puff(desc.raw) if desc is not None else None
-    return f"{puff[1]:g} ms" if puff else ""
+    if not puff:
+        return f"run {run_num}", (1, float(run_num))
+    puff_ms = puff[1]
+    return f"{puff_ms:g} ms  (run {run_num})", (0, puff_ms)
+
+
+# Every line-scan run in the data directory, in run order.  Deliberately broader
+# than the runs that have saved sweep npz: emit_iv_line_slider_all skips (and
+# names) the ones that do not, so a run processed later joins the page without
+# anyone remembering to widen a pattern here.
+IV_LINE_GLOB = "*-line_*.hdf5"
 
 
 if __name__ == "__main__":
     emit_xcorr_slider_all(jxc.IFN)
+    emit_iv_line_slider_all(
+        sorted(glob.glob(os.path.join(jis.DATA_DIR, IV_LINE_GLOB))))

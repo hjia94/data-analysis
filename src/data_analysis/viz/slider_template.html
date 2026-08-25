@@ -35,7 +35,7 @@
     color: var(--ink);
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
-  main { max-width: 1600px; margin: 0 auto; }
+  main { max-width: 1400px; margin: 0 auto; }
   h1 { font-size: 1.3rem; margin: 0 0 0.4rem; font-weight: 600; }
   .banner { color: var(--muted); font-size: 0.82rem; margin-bottom: 0.8rem; }
   /* Second banner line: per-item text (channel descriptions), set apart from
@@ -85,7 +85,7 @@
      whether its row is full or not. */
   #panels {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
     gap: 1rem;
   }
   figure {
@@ -130,7 +130,7 @@
   </figure>
 
   <div class="controls">
-    <label id="groupPick" hidden>Channel
+    <label id="groupPick" hidden>__GROUP_LABEL__
       <select id="group"></select>
     </label>
     <button id="playBtn" type="button">▶ Play</button>
@@ -196,6 +196,10 @@ const hoverOut = document.getElementById("hover");
 // to one channel's data, so they cannot be shared across the dropdown.
 const globalLimits = new Map();
 let playTimer = null;
+// The context object last painted, so render() repaints only on a real change
+// of record. Identity, not deep equality: groups sharing one record share the
+// object (the payload emits it once), so === is exactly the right test.
+let drawnContext = null;
 
 /** The group (channel/run) currently selected in the dropdown. */
 function currentGroup() {
@@ -901,9 +905,9 @@ function drawLegend(ctx, names, colorOf) {
 
 /**
  * The static figure above the panels: the raw record with the analysed span
- * shaded. It does not move with the slider, which is the whole point of it (it
- * says what every frame was computed FROM), so render() repaints it only when
- * resizeCanvas reports it cleared the backing store.
+ * shaded. It says what every frame was computed FROM, so it does not move with
+ * the slider -- but it DOES follow the dropdown, since groups measured on
+ * separate records each carry their own (see currentContext).
  *
  * Its own canvas and its own y-extent: the context shares no axis with the
  * panels (a time record against a frequency spectrum), so none of the panel
@@ -912,8 +916,18 @@ function drawLegend(ctx, names, colorOf) {
 const CONTEXT_H = 150;
 const CONTEXT_CANVAS_H = PAD.top + CONTEXT_H + PAD.bottom;
 
+/**
+ * The context to draw: the selected group's own if it has one, else the
+ * bundle's. Mirrors currentAxis -- a group overrides only what it recorded
+ * separately, so a page whose groups share one record ships it once.
+ */
+function currentContext() {
+  return currentGroup().context || DATA.context;
+}
+
 function drawContext(ctx) {
-  const c = DATA.context;
+  const c = currentContext();
+  if (!c) return;
   const xs = c.x.values;
   ctx.clearRect(0, 0, CANVAS_W, CONTEXT_CANVAS_H);
 
@@ -987,12 +1001,15 @@ function drawContext(ctx) {
 }
 
 const contextFigure = document.getElementById("context");
-const contextCtx = DATA.context
+const contextCaption = document.getElementById("contextCaption");
+// Any context at all, bundle-level or on any group: a page whose groups each
+// carry their own has no DATA.context, and gating on that alone hid the figure.
+const HAS_CONTEXT = !!DATA.context || DATA.groups.some(g => g.context);
+const contextCtx = HAS_CONTEXT
   ? document.getElementById("contextCanvas").getContext("2d")
   : null;
-if (DATA.context) {
+if (HAS_CONTEXT) {
   contextFigure.hidden = false;
-  document.getElementById("contextCaption").textContent = DATA.context.title || "";
   contextCtx.canvas.style.aspectRatio = `${CANVAS_W} / ${CONTEXT_CANVAS_H}`;
 }
 
@@ -1085,10 +1102,21 @@ function render() {
     ? axis.labels[i]
     : `${axis.name} ${fmt(axis.values[i])} ${axis.unit}`;
 
-  // Independent of the frame index, so it is repainted only when its canvas was
-  // resized -- which is also the only thing that clears it.
-  if (contextCtx && resizeCanvas(contextCtx, CONTEXT_CANVAS_H)) {
-    drawContext(contextCtx);
+  // Independent of the frame index, but NOT of the group: repainted when the
+  // canvas was resized (the only other thing that clears it) or when the
+  // dropdown moved to a group with a different record.
+  if (contextCtx) {
+    const resized = resizeCanvas(contextCtx, CONTEXT_CANVAS_H);
+    const c = currentContext();
+    if (resized || c !== drawnContext) {
+      drawnContext = c;
+      contextCaption.textContent = (c && c.title) || "";
+      // A group may legitimately have no context where others do; clear the
+      // canvas rather than leaving the previous group's record on screen.
+      if (c) drawContext(contextCtx);
+      else contextCtx.clearRect(0, 0, CANVAS_W, CONTEXT_CANVAS_H);
+      contextFigure.hidden = !c;
+    }
   }
 
   DATA.panels.forEach((panel, p) => {
@@ -1195,7 +1223,9 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
   readThemeColors();
   if (contextCtx) {
     resizeCanvas(contextCtx, CONTEXT_CANVAS_H);
-    drawContext(contextCtx);
+    // Forget what was painted so render() repaints it in the new ink; drawing
+    // here instead would be undone by render()'s own unchanged-context check.
+    drawnContext = null;
   }
   render();
 });

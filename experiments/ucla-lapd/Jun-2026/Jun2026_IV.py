@@ -568,11 +568,7 @@ if __name__ == '__main__':
     # figures afterwards from the saved .npz with Jun2026_plot.plot_iv_line_run(ifn).
     results = process_run(ifn)
 
-    # Calibrate each processed tip's ne against the interferometer chord and
-    # write ne_cal_arr/cal_factor back into its plasma npz.  INTERF_CHAN picks
-    # the chord (see the run-overview notebook for the available phase_* names);
-    # T_OFFSET is the scope-vs-interferometer trigger offset [s] (interferometer
-    # t=0 is plasma breakdown).
+    # Calibrate each processed tip's ne against the interferometer chord
     INTERF_CHAN = "phase_p29"
     T_OFFSET = 0.012
     for tip in results:

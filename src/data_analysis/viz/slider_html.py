@@ -42,13 +42,20 @@ falling back to the bundle's. Where groups differ in length the slider keeps the
 **index** across a switch and the readout shows the real value for the group now
 selected.
 
-A bundle may also carry a **context** block: one static plot drawn once above
-the panels, with an optional shaded x-span. It answers "what was analysed, and
-over what part of the record?" -- a raw trace with the FFT window shaded, say.
-It is deliberately not a field: it does not move with the slider, shares none of
-the panel axes, and carries a single curve per trace rather than a frame cube.
+A bundle may also carry a **context** block: one static plot drawn above the
+panels, with an optional shaded x-span. It answers "what was analysed, and over
+what part of the record?" -- a raw trace with the FFT window shaded, say. It is
+deliberately not a field: it does not move with the slider, shares none of the
+panel axes, and carries a single curve per trace rather than a frame cube.
 Stating the analysis window in the banner says *what* the number was; showing it
 on the record says whether it was the right one.
+
+Static means *against the slider*, not against the dropdown. A group may carry
+its **own** context, falling back to the bundle's -- the same rule the scan axis
+follows. Where the groups are runs, each was computed from its own record, and a
+page showing one run's raw trace above another run's spectra would misattribute
+the very thing the figure exists to establish. Groups that genuinely share a
+record (the channels of one run) leave it off, so it ships once.
 
 A field draws one curve by default (``frames``). For ``line`` geometry it may
 instead carry several named **traces** (``traces``), drawn on one panel against
@@ -106,8 +113,18 @@ Schema v1
         "groups": [                         # order = dropdown order
             {"name": "bdotscope-C1 vs lpscope-C3",   # dropdown entry
              "axis": {...},                 # optional; defaults to the above
+             "context": {...},              # optional; defaults to the below.
+                                            # Same shape as the bundle's; set it
+                                            # where each group was computed from
+                                            # its own record.
              "fields": [...]},              # same field list as above
         ],
+        "group_label": "Run",               # optional; the dropdown's caption.
+                                            # Defaults to "Channel", so a page
+                                            # whose groups are runs or probe
+                                            # pairs must say so -- the caption
+                                            # is the only thing on the page
+                                            # naming what the dropdown varies.
         # Optional static figure above the panels -- NOT a slider frame:
         "context": {
             "title": "raw Isat, position 0",
@@ -225,6 +242,16 @@ def group_axis(bundle, group):
     return group.get("axis") or bundle["axis"]
 
 
+def group_context(bundle, group):
+    """The context a group draws: its own if it has one, else the bundle's.
+
+    ``None`` when neither has one -- most pages draw no context at all. Groups
+    computed from separate records (runs) carry their own; groups sharing one
+    (the channels of a run) leave it off so it ships once.
+    """
+    return group.get("context") or bundle.get("context")
+
+
 def field_traces(field):
     """A field's curves as a ``[{"name", "frames"}, ...]`` list.
 
@@ -251,40 +278,41 @@ def _vector_spec(vectors):
     return {"step": int(vectors.get("step", 1))}
 
 
-def _require_context(context, _require):
+def _require_context(context, _require, where="context"):
     """Validate an optional ``context`` block (see the schema in the module doc).
 
     Split out of :func:`validate_bundle` because it shares none of the panel
     machinery: its traces are single curves, not frame cubes, and its axes are
-    its own rather than the bundle's.
+    its own rather than the bundle's. ``where`` names the block in errors, so a
+    bad per-group context says which group rather than pointing at the bundle's.
     """
     if context is None:
         return
-    _require(isinstance(context, dict), "'context' must be a dict or absent")
+    _require(isinstance(context, dict), f"'{where}' must be a dict or absent")
     for key in ("x", "y"):
         entry = context.get(key)
-        _require(isinstance(entry, dict), f"'context.{key}' must be a dict")
+        _require(isinstance(entry, dict), f"'{where}.{key}' must be a dict")
         for k in ("label", "unit"):
-            _require(k in entry, f"'context.{key}' is missing '{k}'")
+            _require(k in entry, f"'{where}.{key}' is missing '{k}'")
     xs = np.asarray(context["x"].get("values"), float)
     _require(xs.ndim == 1 and xs.size > 0,
-             f"'context.x.values' must be 1-D and non-empty, got shape {xs.shape}")
+             f"'{where}.x.values' must be 1-D and non-empty, got shape {xs.shape}")
 
     traces = context.get("traces")
     _require(isinstance(traces, (list, tuple)) and traces,
-             "'context.traces' must be a non-empty list of {name, values}")
+             f"'{where}.traces' must be a non-empty list of {{name, values}}")
     for i, trace in enumerate(traces):
-        _require(isinstance(trace, dict), f"'context.traces[{i}]' must be a dict")
+        _require(isinstance(trace, dict), f"'{where}.traces[{i}]' must be a dict")
         values = np.asarray(trace.get("values"), float)
         _require(values.shape == xs.shape,
-                 f"'context.traces[{i}].values' has shape {values.shape}, "
-                 f"but 'context.x.values' has {xs.shape}")
+                 f"'{where}.traces[{i}].values' has shape {values.shape}, "
+                 f"but '{where}.x.values' has {xs.shape}")
 
     span = context.get("span")
     if span is not None:
-        _require(len(span) == 2, f"'context.span' must be [lo, hi], got {span!r}")
+        _require(len(span) == 2, f"'{where}.span' must be [lo, hi], got {span!r}")
         lo, hi = (float(v) for v in span)
-        _require(lo < hi, f"'context.span' must have lo < hi, got {span!r}")
+        _require(lo < hi, f"'{where}.span' must have lo < hi, got {span!r}")
 
 
 def validate_bundle(bundle):
@@ -380,6 +408,11 @@ def validate_bundle(bundle):
         _require(isinstance(bundle["groups"], (list, tuple)) and bundle["groups"],
                  "'groups' must be a non-empty list of {name, fields}")
 
+    label = bundle.get("group_label")
+    if label is not None:
+        _require(isinstance(label, str) and label.strip(),
+                 f"'group_label' must be a non-empty string, got {label!r}")
+
     grouped = "groups" in bundle
     groups = bundle_groups(bundle)
     layout = None
@@ -401,6 +434,10 @@ def validate_bundle(bundle):
         # expected cube shape is per group, not per bundle.
         group_ax = group.get("axis")
         n = _check_axis(group_ax, f"{stem}.axis") if group_ax else n_axis
+
+        # A group computed from its own record carries its own context; held to
+        # the same rules as the bundle's rather than being the lenient path.
+        _require_context(group.get("context"), _require, f"{stem}.context")
         want = (n, sizes["y"], sizes["x"]) if geometry == "plane" else (n, sizes["x"])
 
         fields = group.get("fields")
@@ -714,6 +751,10 @@ def _payload(bundle):
         entry = {"name": group.get("name", "")}
         if group.get("axis"):
             entry["axis"] = _round_floats(_axis_payload(group["axis"]))
+        # Like the axis: shipped only when the group overrides the bundle's, so
+        # a page whose groups share one record still serializes it once.
+        if group.get("context"):
+            entry["context"] = _context_payload(group["context"])
         # Only when they differ from the panel row's: on the common page where
         # every group has the same traces this repeats nothing, and the page
         # falls back to the shared names.
@@ -849,17 +890,20 @@ def save_bundle(bundle, path):
         spine["y"] = {k: v for k, v in bundle["y"].items() if k != "values"}
     # The context block's curves are arrays too: left in the spine they would
     # serialize as JSON number lists, costing several times their npz size.
-    if bundle.get("context"):
-        context = bundle["context"]
-        arrays["__context_x__"] = np.asarray(context["x"]["values"], float)
+    # `tag` keys the arrays: "" for the bundle's, "_{g}" for a group's.
+    def _split_context(context, tag=""):
+        arrays[f"__context{tag}_x__"] = np.asarray(context["x"]["values"], float)
         entry = {k: v for k, v in context.items() if k not in ("x", "traces")}
         entry["x"] = {k: v for k, v in context["x"].items() if k != "values"}
         entry["traces"] = []
         for i, trace in enumerate(context["traces"]):
-            arrays[f"__context_trace_{i}__"] = np.asarray(trace["values"], float)
+            arrays[f"__context{tag}_trace_{i}__"] = np.asarray(trace["values"], float)
             entry["traces"].append({k: v for k, v in trace.items()
                                     if k != "values"})
-        spine["context"] = entry
+        return entry
+
+    if bundle.get("context"):
+        spine["context"] = _split_context(bundle["context"])
 
     # Frame cubes are keyed by (group, field) so a multi-channel bundle round
     # trips as one file. Everything is written in the grouped spelling, single
@@ -875,6 +919,9 @@ def save_bundle(bundle, path):
         if group.get("axis"):
             arrays[f"__axis_{g}__"] = np.asarray(group["axis"]["values"], float)
             entry["axis"] = {k: v for k, v in group["axis"].items() if k != "values"}
+        # Same split as the bundle's, keyed by group index.
+        if group.get("context"):
+            entry["context"] = _split_context(group["context"], f"_{g}")
         for i, field in enumerate(group["fields"]):
             spec = {k: v for k, v in field.items()
                     if k not in ("frames", "traces", "vectors")}
@@ -925,10 +972,14 @@ def load_bundle(path):
         bundle["x"]["values"] = data["__x_values__"]
         if bundle["geometry"] == "plane":
             bundle["y"]["values"] = data["__y_values__"]
+        def _fill_context(context, tag=""):
+            """Reverse of save_bundle's _split_context, same array keys."""
+            context["x"]["values"] = data[f"__context{tag}_x__"]
+            for i, trace in enumerate(context["traces"]):
+                trace["values"] = data[f"__context{tag}_trace_{i}__"]
+
         if bundle.get("context"):
-            bundle["context"]["x"]["values"] = data["__context_x__"]
-            for i, trace in enumerate(bundle["context"]["traces"]):
-                trace["values"] = data[f"__context_trace_{i}__"]
+            _fill_context(bundle["context"])
 
         if "groups" not in bundle:                      # pre-groups npz
             for i, field in enumerate(bundle["fields"]):
@@ -937,6 +988,8 @@ def load_bundle(path):
             for g, group in enumerate(bundle["groups"]):
                 if "axis" in group:
                     group["axis"]["values"] = data[f"__axis_{g}__"]
+                if "context" in group:
+                    _fill_context(group["context"], f"_{g}")
                 for i, field in enumerate(group["fields"]):
                     if "traces" in field:
                         for t, trace in enumerate(field["traces"]):
@@ -979,6 +1032,7 @@ def write_slider_html(bundle, out_path, save_bundle_npz=True):
     # (e.g. "Te>5", "gamma2 < 0.2"), so escape them like the banner.
     fills = {
         "__TITLE__": escape(bundle.get("title", "slider")),
+        "__GROUP_LABEL__": escape(bundle.get("group_label") or "Channel"),
         "__BANNER__": _banner_html(bundle.get("provenance")),
         "__WARNING__": escape(bundle.get("warning") or ""),
         "__PAYLOAD__": _script_json(_payload(bundle)),
@@ -991,13 +1045,22 @@ def write_slider_html(bundle, out_path, save_bundle_npz=True):
     out_path.write_text(html, encoding="utf-8")
 
     size_mb = out_path.stat().st_size / 1e6
+    groups = bundle_groups(bundle)
     if size_mb > ARTIFACT_MAX_MB:
+        # A grouped page costs its group count, so that is the lever to name;
+        # advising "coarsen the grid" on a 7-run page points at the one thing
+        # that would not help.
+        lever = (f"drop groups (it carries {len(groups)}) or " if len(groups) > 1
+                 else "")
         print(f"  WARNING: {out_path.name} is {size_mb:.1f} MB "
               f"(> {ARTIFACT_MAX_MB:.0f} MB) "
-              "-- too large to publish as an Artifact; narrow the axis range "
-              "or coarsen the grid.")
-    groups = bundle_groups(bundle)
-    channels = f"{len(groups)} channel(s) x " if len(groups) > 1 else ""
+              f"-- too large to publish as an Artifact; {lever}"
+              "narrow the axis range or coarsen the grid. "
+              "It still opens locally.")
+    # Named by what the dropdown actually varies, so the line does not report a
+    # 7-run page as "7 channel(s)".
+    kind = (bundle.get("group_label") or "channel").lower()
+    channels = f"{len(groups)} {kind}(s) x " if len(groups) > 1 else ""
     print(f"Slider page: {out_path}  ({size_mb:.2f} MB, {channels}"
           f"{len(groups[0]['fields'])} field(s) x "
           f"{np.size(group_axis(bundle, groups[0])['values'])} frames)")
