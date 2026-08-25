@@ -1,55 +1,12 @@
 """Mar-2026 run 054: calibrated Mach-probe flow over the 21x21 P29 plane.
 
-Applies the Mar-2026 ``055-056-mach-calibration.npz`` area ratios
-(``Mar2026_mach_cal``) to the coarse plane. Runs 055/056 rotate this probe 180
-deg at (0,0) with the bias off, on the same day and port as run 054, so both
-axes' kappa come from a rotation pair rather than an assumption.
+Runs 055/056 rotate this probe 180 deg at (0,0), bias off, same day and port, so
+both axes' kappa come from a rotation pair rather than an assumption. They
+replaced the Jun-2026 calibration, whose kappa_X rested on a no-x-flow assumption
+(1.9077 against the rotation pair's 0.833) and put a spurious uniform -0.19 on
+every M_X -- the constant pre-bias offset the maps showed.
 
-**This replaced the Jun-2026 calibration**, which was used first on the rule
-that kappa binds to the probe rather than the port. That rule holds, but
-Jun-2026 could only reach kappa_X through its no-x-flow assumption (x/÷1.458 --
-the weakest number in that file), and the value it gave, 1.9077 against the
-rotation pair's 0.833, put a spurious uniform -0.19 on every M_X in the plane.
-That was the constant pre-bias offset the maps showed. The 055/056 pair measures
-both axes to x/÷1.02, so nothing here rests on an assumed-zero flow.
-
-Two stages, because the read is the expensive part:
-
-1. :func:`batch_flow` -- reads 441 positions x 4 tips x 4 shots from the 1.25 GB
-   file, reduces each shot to :data:`BIN_MS` bins, writes a co-located npz. Slow;
-   run once.
-2. :func:`emit_flow_slider` / :func:`plot_flow_frame` -- read that npz and draw,
-   through the shared renders in :mod:`data_analysis.viz.flow_maps`. What is
-   campaign-specific here is the time frame, the extra panel, and the caveat
-   text; the panel order and colour conventions are the shared module's.
-
-Differences from the Jun-2026 run-32 analysis this shares its renders with, all
-forced by what run 054 actually recorded:
-
-**X and Y only.** The probe has six tips and the other two were functional, but
-the description's ``Channels:`` block wires only Vx+/Vx-/Vy+/Vy- to the
-digitizer. There is no v_Z panel because no Z current was ever measured -- not
-because it is zero.
-
-**Time is w.r.t. the DAQ trigger**, which the description puts at
-:data:`DAQ_TRIGGER_MS` = 4.5 ms after the discharge. The stored axis is left
-exactly as recorded and the offset is carried alongside it, so nothing is
-silently shifted; :func:`machine_ms` converts where a plot needs to name the
-bias window. Bias is 7.5-12.5 ms machine = 3.0-8.0 ms stored, well inside the
-17.4 ms record.
-
-**bapsflib schema.** Channels are addressed ``(board, chan)`` and read through a
-single held ``session()`` -- the per-call open in ``LapdRun.channel`` would
-reopen this 1.25 GB file 1764 times.
-
-**The plasma dies inside the record.** The whole 17.4 ms span is reduced, but
-the description's "Plasma: 0-10 ms" is borne out by the currents: ~19 mA summed
-at peak, under 10% of that by ~13.8 ms machine. A Mach number is a *ratio*, so
-it stays finite and drifts smoothly as both faces decay into noise -- run 054
-reaches M_X = -0.43 well after the machine is empty, which reads as a
-strengthening flow. Every bin is computed and stored, and each carries a
-``reliable`` flag (:data:`MIN_SIGNAL_FRAC`) that the centre fit excludes and both
-renders label. See ``signal_decay_a`` in the npz for the decay curve itself.
+Run 054 recorded no Z current, so there is no v_Z panel -- not because it is zero.
 
     .venv/Scripts/python.exe experiments/ucla-lapd/Mar-2026/Mar2026_mach_flow.py
 """
@@ -78,48 +35,39 @@ DATA_DIR = r"D:\data\LAPD\Mar26-data"
 IFN = os.path.join(
     DATA_DIR,
     "054-mach-4tip-p29-xycoarse-varbias-p30Vmax 2026-03-06 14.42.54.hdf5")
-#: Same-campaign calibration, written by ``Mar2026_mach_cal`` from runs 055/056
-#: (module docstring for why this replaced the Jun-2026 file).
 CAL_NPZ = os.path.join(DATA_DIR, "055-056-mach-calibration.npz")
-
-#: Subdirectory under the output root that this campaign's renders land in.
 FIG_SUBDIR = "Mar-2026"
 
-#: Time-bin width [ms]. 100 MHz with 16x hardware sample averaging gives a
-#: 0.16 us sample, so 0.1 ms is ~625 samples per bin -- enough to average down
-#: shot noise (only 4 shots per position here, against run 32's 5), short enough
-#: to resolve the 5 ms bias window into 50 frames.
+#: Time-bin width [ms]. ~625 samples per bin at this run's 0.16 us sample --
+#: averages down shot noise (only 4 shots/position) and still resolves the bias
+#: window into 50 frames.
 BIN_MS = 0.1
 
-#: DAQ trigger, ms after the discharge ("DAQ trigger: 4.5 ms"). The stored time
-#: axis starts here; see :func:`machine_ms`.
+#: Description's "DAQ trigger: 4.5 ms" after the discharge; the stored time axis
+#: starts here.
 DAQ_TRIGGER_MS = 4.5
 
-#: Multi-electrode bias window [ms, machine time] -- "Multi-electrode bias:
-#: 7.5-12.5 ms". Used to pick the centre-fit window and to mark the plots.
+#: Description's "Multi-electrode bias: 7.5-12.5 ms".
 BIAS_MACHINE_MS = (7.5, 12.5)
 
-#: Assumed electron temperature [eV] and ion mass [proton masses; He = 4].
-#: Run 054 digitized no swept tip, so T_e was NOT measured -- v = M * c_s scales
-#: as sqrt(T_e), making every velocity a stated scale, not a measurement.
+#: T_e was NOT measured -- run 054 digitized no swept tip. v = M * c_s scales as
+#: sqrt(T_e), making every velocity a stated scale, not a measurement.
 TE_EV = 5.0
 ION_MU = 4.0
 
-#: Probe axes in npz/array order. Z is absent by construction -- see the module
-#: docstring.
 AXES = ("X", "Y")
 
-#: Arrows are drawn every Nth cell. The 21x21 grid is coarse enough to show
-#: every arrow, unlike run 32's 41x41.
+#: 1 = every arrow: the 21x21 grid is coarse enough not to overlap.
 QUIVER_STEP = 1
 
-#: A bin is flagged unreliable once the summed tip current falls below this
-#: fraction of its peak. The description says "Plasma: 0-10 ms" and the currents
-#: bear it out: ~19 mA summed at peak, under 10% by 13.8 ms machine, ~0.5 mA by
-#: 20 ms. A Mach number is a RATIO, so it stays finite and smooth-looking as both
-#: faces decay into noise -- run 054 drifts to M_X = -0.43 long after the plasma
-#: is gone, which reads as a strengthening flow rather than as an empty machine.
-#: The flag is what keeps that from being plotted as a measurement.
+#: Pre-bias window [ms, machine]: inside "Plasma: 0-10 ms", before the bias, with
+#: a margin so neither the DAQ trigger nor the turn-on transient is averaged in.
+PREBIAS_MACHINE_MS = (4.6, 7.4)
+
+#: A bin is unreliable once summed tip current falls below this fraction of peak.
+#: A Mach number is a RATIO, so it stays finite and smooth as both faces decay
+#: into noise -- run 054 drifts to M_X = -0.43 long after the plasma is gone,
+#: which reads as strengthening flow rather than an empty machine.
 MIN_SIGNAL_FRAC = 0.1
 
 NPZ_SUFFIX = "-mach-flow-data.npz"
@@ -138,21 +86,18 @@ def flow_npz_path(ifn=IFN):
 def machine_ms(t_ms):
     """Stored time [ms, from DAQ trigger] -> machine time [ms, from discharge].
 
-    The record starts at the trigger, so a stored 3.0 ms is 7.5 ms machine --
-    exactly bias-on. Plots name machine time because that is the frame the run
-    log's timing block is written in; the npz stores the raw axis plus this
-    offset so no consumer inherits a silent shift.
+    Plots name machine time because the run log's timing block is written that
+    way; the npz stores the raw axis, so no consumer inherits a silent shift.
     """
     return np.asarray(t_ms, float) + DAQ_TRIGGER_MS
 
 
 def load_calibration(path=CAL_NPZ):
-    """The calibration's ``kappa`` and its systematic bar -> ``(kappa, err, method)``.
+    """``(kappa, err, method)``, each keyed by tip name so a reordered
+    :data:`AXES` cannot attach one axis' area ratio to another.
 
-    All three keyed by tip name, so a reordered :data:`AXES` cannot attach one
-    axis' area ratio to another. Reads ``kappa_err_sys`` rather than
-    ``kappa_err_fit``: X has no fit row (its slot is NaN by construction), and
-    ``sys`` is the bar the calibration script says to quote for every axis.
+    Uses ``kappa_err_sys``, not ``kappa_err_fit``: X has no fit row (NaN by
+    construction), and sys is the bar to quote for every axis.
     """
     with np.load(path) as d:
         tips = [str(t) for t in d["tips"]]
@@ -168,10 +113,8 @@ def load_calibration(path=CAL_NPZ):
 def tip_channels(ifn):
     """``{'X+': (board, chan), ...}`` from the run's own wiring descriptions.
 
-    Never a hardcoded table: a swapped +/- assignment inverts R and flips the
-    sign of every flow vector, which looks entirely plausible on a map. The
-    digitizer records only the four wired tips, so a missing one is an error
-    here rather than a silently absent axis.
+    Never a hardcoded table: a swapped +/- inverts R and flips the sign of every
+    flow vector, which looks entirely plausible on a map.
     """
     out = {}
     for (_adc, chan), desc in channel_wiring(ifn).items():
@@ -185,16 +128,12 @@ def tip_channels(ifn):
 
 
 def read_positions(ifn=IFN):
-    """The scan grid -> ``(pos_x, pos_y, xpos, ypos, npos, nshot, shot_nums)``.
+    """The scan grid. ``pos_x``/``pos_y`` are one coordinate per position;
+    ``shot_nums`` is position-major (entry ``p*nshot + k``).
 
-    ``pos_x``/``pos_y`` are one coordinate per position, ``shot_nums`` the shot
-    number of every shot position-major (entry ``p*nshot + k``).
-
-    The bapsflib reader already returns coordinates on exact grid nodes (checked:
-    max snap distance 0.0 cm), unlike the Jun-2026 drive whose ~0.1 cm scatter
-    needed snapping. That is *verified* rather than assumed -- a collision would
-    average two probe locations into one cell -- and so is the position-major
-    blocking that makes ``shot_nums`` meaningful.
+    Coordinates already land on exact nodes (checked: max snap 0.0 cm), so the
+    collision check is a guard, not a snap: a collision would average two probe
+    locations into one cell.
     """
     with open_lapd(ifn).session() as sess:
         pos_dict, xpos, ypos, _z, npos, nshot = sess.positions()
@@ -217,18 +156,12 @@ def read_positions(ifn=IFN):
 
 def batch_flow(ifn=IFN, cal_path=CAL_NPZ, bin_ms=BIN_MS, te_ev=TE_EV,
                out_path=None):
-    """Read the plane, reduce to time bins, apply kappa -> co-located npz.
+    """Read the plane, reduce to time bins, apply kappa -> co-located npz path.
 
-    The slow stage. Per position: read all four tips' shots, bin to ``bin_ms``,
-    form each axis' face ratio, convert with that axis' kappa. Only the reduced
-    ``(npos, nbin)`` arrays survive the loop -- a raw stack is ~1.7 MB per tip
-    per position and is dropped once binned, so peak memory is one position's
-    four stacks rather than the 1.25 GB run.
-
-    Covers the **whole stored record**; the window is read from the file's own
-    time axis rather than declared, so nothing is trimmed on an assumption.
-
-    Writes ``<run>-mach-flow-data.npz``. Returns its path.
+    The slow stage; run once. Only the reduced ``(npos, nbin)`` arrays survive
+    the loop, so peak memory is one position's four stacks (~1.7 MB each), not
+    the 1.25 GB run. The time window comes from the file's own axis rather than
+    being declared, so nothing is trimmed on an assumption.
     """
     kappa, kappa_err, method = load_calibration(cal_path)
     chans = tip_channels(ifn)
@@ -237,8 +170,6 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, bin_ms=BIN_MS, te_ev=TE_EV,
     shunts = parse_shunts(run.description().raw, tuple(chans))
     no_shunt = [t for t in chans if t not in shunts]
     if no_shunt:
-        # Never default: a guessed resistance yields a wrong current with
-        # nothing downstream complaining.
         raise ValueError(f"{ifn}: no shunt in description for {no_shunt}")
 
     pos_x, pos_y, _xs, _ys, npos, nshot, shot_nums = read_positions(ifn)
@@ -277,10 +208,6 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, bin_ms=BIN_MS, te_ev=TE_EV,
                         skipped.append((p, f"{axis}{sign}"))
                         stacks = None
                         break
-                    # volts across the shunt -> amps. All four tips are 45 ohm
-                    # in this run, but the value is read per tip anyway: the
-                    # Jun-2026 probe had 75/300/75/75, and a uniform assumption
-                    # is exactly what would carry over wrongly.
                     stack /= shunts[f"{axis}{sign}"]
                     stacks.append(stack)
                 if stacks is None:
@@ -289,10 +216,6 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, bin_ms=BIN_MS, te_ev=TE_EV,
                                                          edges)
                 n_valid[i, p] = counts
                 mach[axis][p] = mach_single(R, kappa[axis])
-                # Summed over the axes read: X+ + X- plus Y+ + Y-, so this is
-                # all four tips' current. n_axes_read tracks how many actually
-                # contributed, since a skipped axis would otherwise leave this
-                # position at half scale and drag the decay curve down.
                 signal[p] += amplitude
                 n_axes_read[p] += 1
 
@@ -301,14 +224,6 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, bin_ms=BIN_MS, te_ev=TE_EV,
         print(f"\n  {len(lost)} position(s) had no digitizer data and stay NaN: "
               f"{lost[:10]}{' ...' if len(lost) > 10 else ''}")
 
-    # Plane-averaged decay curve, and the last bin still above the floor. Both
-    # stored: the flag is derived from this run's own currents, never from a
-    # hardcoded "plasma ends at 10 ms".
-    #
-    # Only positions that read every axis enter the average. A position missing
-    # one axis holds half the current of a complete one, so including it would
-    # pull the plane mean down and retire the reliable flag early -- shrinking
-    # the analysable window for a reason that is about missing data, not plasma.
     complete = n_axes_read == len(AXES)
     if not complete.any():
         raise ValueError(f"{ifn}: no position read all of {list(AXES)}; the "
@@ -327,8 +242,6 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, bin_ms=BIN_MS, te_ev=TE_EV,
         "signal_a": signal, "signal_decay_a": decay, "reliable": reliable,
         "n_axes_read": n_axes_read,
         "min_signal_frac": np.float64(MIN_SIGNAL_FRAC),
-        # 'axes' is provenance, not indexing state: it lets a reader outside
-        # this repo learn the M_*/v_* key order without the module constant.
         "n_valid": n_valid, "axes": np.array(AXES),
         "kappa": np.array([kappa[a] for a in AXES]),
         "kappa_err_sys": np.array([kappa_err[a] for a in AXES]),
@@ -379,48 +292,20 @@ def _te_note(data):
             f"(not measured in this run); v scales as sqrt(T_e)")
 
 
-def _kappa_note(data):
-    """Per-axis kappa and its systematic bar, for the provenance banner."""
-    return {f"kappa_{a}": f"{k:.4f} x/÷{e:.3f}  [{m}]"
-            for a, k, e, m in zip(data["axes"], data["kappa"],
-                                  data["kappa_err_sys"], data["kappa_method"])}
-
-
-def _weakest_axis_note(data):
-    """Name the axis whose kappa carries the largest systematic bar.
-
-    Read from the npz, never a literal: a hardcoded "x/÷1.46" would keep reading
-    plausibly after a recalibration changed it.
-    """
-    axes = [str(a) for a in data["axes"]]
-    err = np.asarray(data["kappa_err_sys"], float)
-    w = int(np.argmax(err))
-    others = ", ".join(f"x/÷{e:.2f} for {a}"
-                       for a, e in zip(axes, err) if a != axes[w])
-    return (f"kappa_{axes[w]} carries a x/÷{err[w]:.2f} systematic ({others}), "
-            f"so the {axes[w]} component's magnitude is the weakest number here.")
-
-
 def find_flow_centre(data, window_ms=None):
     """The rotation centre over the bias window -> ``(cx, cy, ratio)`` cm.
 
-    Campaign wrapper over :func:`~data_analysis.plasma.flow.find_flow_centre`:
-    averages the bins the bias was on and hands it one velocity per position.
-    ``window_ms`` is in *stored* time; the default converts the description's
-    machine-time bias window, which is when an E x B rotation exists to have a
-    centre at all.
-
-    The returned ``ratio`` is the fit's own quality flag -- small means a
-    well-centred rotation, ~1 means there was none to centre.
+    ``window_ms`` is *stored* time; the default is the bias window, which is when
+    an E x B rotation exists to have a centre at all. ``ratio`` is the fit's own
+    quality flag -- small means well-centred, ~1 means there was no rotation.
     """
     if window_ms is None:
         offset = float(data["daq_trigger_ms"])
         b0, b1 = data["bias_machine_ms"]
         window_ms = (b0 - offset, b1 - offset)
     t = data["t_ms"]
-    # Unreliable bins are excluded from the fit, not just from the plot: their
-    # M is a ratio of decayed noise and would drag the centre toward whatever
-    # the noise happened to favour.
+    # Excluded from the fit, not just the plot: decayed-noise M would drag the
+    # centre toward whatever the noise favoured.
     win = (t >= window_ms[0]) & (t <= window_ms[1]) & data["reliable"]
     if not win.any():
         raise ValueError(
@@ -433,27 +318,42 @@ def find_flow_centre(data, window_ms=None):
     return _fit_centre(vx, vy, data["pos_x"], data["pos_y"])
 
 
+def prebias_offset(data, window_ms=PREBIAS_MACHINE_MS):
+    """Uniform (v_X, v_Y) offset [km/s] averaged over the no-bias window.
+
+    NOT known to be instrumental: a real uniform flow with the bias off would
+    look identical.
+    """
+    t = machine_ms(data["t_ms"])
+    win = (t >= window_ms[0]) & (t <= window_ms[1]) & data["reliable"]
+    if not win.any():
+        raise ValueError(
+            f"pre-bias window {window_ms} ms (machine) selects no reliable bin "
+            f"of {t[0]:.2f}..{t[-1]:.2f} ms machine.")
+    return (float(np.nanmean(data["v_X"][:, win])),
+            float(np.nanmean(data["v_Y"][:, win])))
+
+
 def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
-                     vmax=None):
+                     vmax=None, subtract_offset=False):
     """Time-slider page: v_X/v_Y quiver over |v|, plus v_theta and v_r.
 
-    **Panels, not dropdown groups**: they share one time slider, so every
-    component is read at the same instant rather than by switching.
-
-    ``vmax`` fixes all colour scales [km/s]; ``None`` autoscales per frame --
-    right while hunting for structure, wrong when comparing frames.
-
-    Three panels, not run 32's four: there is no v_Z because no Z current was
-    digitized (module docstring).
+    All components are panels on one time slider.
     """
     data = load_flow(npz_path)
     vx, vy = data["v_X"], data["v_Y"]
+
+    off = None
+    if subtract_offset:
+        # Subtract an offset that is uniform over the plane, averaged over the pre-bias window.
+        off = prebias_offset(data)
+        vx, vy = vx - off[0], vy - off[1]
+        data = dict(data, v_X=vx, v_Y=vy)
+
     cx, cy, ratio = find_flow_centre(data)
     v_r, v_th = polar_components(vx, vy, data["pos_x"], data["pos_y"], (cx, cy))
 
     bias = np.asarray(data["bias_machine_ms"], float)
-    rel = np.asarray(data["reliable"], bool)
-    last_ok = machine_ms(data["t_ms"][int(rel.sum()) - 1])
 
     # Ion saturation current itself, as a field: it is the amplitude the Mach
     # ratio divides away, so it is what tells a reader whether a frame shows
@@ -463,30 +363,32 @@ def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
               "frames": amp, "cmap": "magma",
               "vmin": 0.0 if vmax is not None else None, "vmax": None}]
 
-    name = f"{run_num_of(str(data['source_file']))}-mach-flow-slider"
+    run = run_num_of(str(data["source_file"]))
+    name = f"{run}-mach-flow-slider" + ("-offset-removed" if off else "")
+    params = {"bin": f"{float(data['bin_ms']):g} ms",
+              "shots/position": int(data["nshot"]),
+              "T_e assumed": f"{float(data['te_ev']):g} eV",
+              "multi-electrode bias": f"{bias[0]:g}-{bias[1]:g} ms"}
+    if off:
+        params["offset removed"] = (
+            f"({off[0]:+.3f}, {off[1]:+.3f}) km/s, the plane mean over "
+            f"{PREBIAS_MACHINE_MS[0]:g}-{PREBIAS_MACHINE_MS[1]:g} ms machine")
     return write_flow_slider(
         out or slider_path(name),
         pos_x=data["pos_x"], pos_y=data["pos_y"], vx=vx, vy=vy,
         v_r=v_r, v_th=v_th,
-        # The slider axis is machine time: the bias window a reader wants to
-        # find is quoted that way in the run log.
         t_axis=machine_ms(data["t_ms"]), axis_label="time (from discharge)",
-        title=f"Run {run_num_of(str(data['source_file']))} - "
-              f"calibrated Mach flow, P29 plane",
+        title=f"Run {run} - calibrated Mach flow, P29 plane"
+              + (" (pre-bias offset removed)" if off else ""),
         source=str(data["source_file"]),
-        params={"bin": f"{float(data['bin_ms']):g} ms",
-                "shots/position": int(data["nshot"]),
-                "T_e assumed": f"{float(data['te_ev']):g} eV",
-                "multi-electrode bias": f"{bias[0]:g}-{bias[1]:g} ms"},
+        params=params,
         quiver_step=quiver_step, vmax=vmax, extra_fields=extra)
 
 
 def slider_path(name):
     """Centralized ``.html`` location, beside this campaign's PNGs.
 
-    A slider page is a render, not data: it belongs under the output root with
-    the figures, never next to the raw HDF5. Same rule the PNG path follows in
-    :func:`plot_flow_frame`, so both renders of a frame land together.
+    A slider page is rendered from the npz processed data.
     """
     return fig_path(name, FIG_SUBDIR, ext=".html")
 
@@ -495,12 +397,8 @@ def plot_flow_frame(t_ms, npz_path=None, quiver_step=QUIVER_STEP, vmax=None,
                     machine_time=True, save_fig=True):
     """Static figure at the bin nearest ``t_ms``: in-plane, v_theta, v_r.
 
-    The publication counterpart of the slider: scrub the page to find the frame,
-    then draw it here. Carries the same panels in the same order, so a figure
-    and the page it came from cannot show different things.
-
-    ``t_ms`` is machine time by default (matching the slider and the run log);
-    pass ``machine_time=False`` to give it in stored, trigger-relative time.
+    Same panels in the same order as :func:`emit_flow_slider`, so a figure cannot
+    show something different from the page it was scrubbed on.
     """
     data = load_flow(npz_path)
     want = t_ms - float(data["daq_trigger_ms"]) if machine_time else t_ms
@@ -541,3 +439,4 @@ if __name__ == "__main__":
     if not os.path.exists(flow_npz_path()):
         batch_flow()
     print(emit_flow_slider())
+    print(emit_flow_slider(subtract_offset=True))

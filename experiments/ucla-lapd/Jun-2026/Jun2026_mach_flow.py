@@ -15,11 +15,6 @@ Two stages, because the read is the expensive part:
    re-runnable while choosing a frame or a colour scale. The axial ``v_Z`` panel
    is this campaign's addition to the three panels every in-plane map carries.
 
-Geometry
---------
-Tip labels are the probe's own axes: X/Y span the scan plane (the in-plane vector
-drawn as quiver), Z is along the machine axis (B) and gets its own map.
-
 Velocities assume a **constant** T_e (:data:`TE_EV`) -- run 32 digitized no swept
 tip, so none was measured. ``v = M * c_s`` scales as ``sqrt(T_e)``, making it a
 stated scale, not a measurement; it is recorded in the npz and printed on every
@@ -84,7 +79,9 @@ AXES = ("X", "Y", "Z")
 QUIVER_STEP = 2
 
 #: Window the rotation centre is fitted over [ms]. The bias-on stretch: that is
-#: when an E x B rotation exists to have a centre. See :func:`find_flow_centre`.
+#: when an E x B rotation exists to have a centre. Run 32 fits (+2.50, -1.25),
+#: ratio 0.22, stable across it; widening past the bias-off edge degenerates the
+#: fit (ratio ~0.7, centre on the search-box edge).
 CENTRE_FIT_MS = (0.0, 5.0)
 
 NPZ_SUFFIX = "-mach-flow-data.npz"
@@ -165,17 +162,11 @@ def snap_to_planned(pos):
 
 def batch_flow(ifn=IFN, cal_path=CAL_NPZ, window_ms=WINDOW_MS, bin_ms=BIN_MS,
                te_ev=TE_EV, out_path=None):
-    """Read the plane, reduce to time bins, apply kappa -> co-located npz.
-
-    The slow stage. Per position: read all six tips' shots, bin to ``bin_ms``,
-    form each axis' face ratio, convert with that axis' kappa. Only the reduced
-    ``(npos, nbin)`` arrays survive the loop -- raw stacks are ~2.4 MB per tip per
-    position and are dropped once binned, so peak memory is one position's six
-    stacks rather than the run.
+    """Read the plane, reduce to time bins, apply kappa -> co-located npz path.
 
     Writes ``<run>-mach-flow-data.npz``: ``M_X``/``M_Y``/``M_Z`` and the matching
     ``v_*`` [km/s], ``n_valid``, the position axes, the bin centres, and the
-    calibration and T_e that were applied. Returns the npz path.
+    calibration and T_e that were applied.
     """
     kappa, kappa_err, method = load_calibration(cal_path)
     chans = tip_channels(ifn)
@@ -210,10 +201,6 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, window_ms=WINDOW_MS, bin_ms=BIN_MS,
                     skipped.append((p, f"{axis}{sign}"))
                     stacks = None
                     break
-                # volts across the shunt -> amps, per tip (the tips differ:
-                # 75/300/75/75/43/43 ohm). In place: the read allocated this
-                # 4 MB stack and nothing else refers to it, so an out-of-place
-                # divide would copy it 10086 times over the run.
                 stack /= shunts[f"{axis}{sign}"]
                 stacks.append(stack)
             if stacks is None:
@@ -276,53 +263,18 @@ def _te_note(data):
             f"(not measured in this run); v scales as sqrt(T_e)")
 
 
-def _kappa_note(data):
-    """Per-axis kappa and its systematic bar, for the provenance banner.
-
-    Axis names come from the npz, not the module constant: these strings label a
-    banner nobody re-checks, so a reordered ``AXES`` would silently attach one
-    axis' kappa to another's name.
-    """
-    return {f"kappa_{a}": f"{k:.4f} x/÷{e:.3f}  [{m}]"
-            for a, k, e, m in zip(data["axes"], data["kappa"],
-                                  data["kappa_err_sys"], data["kappa_method"])}
-
-
-def _weakest_axis_note(data):
-    """Name the axis whose kappa carries the largest systematic bar.
-
-    Read from the npz, never a literal: a hardcoded "x/÷1.46" would keep reading
-    plausibly after a recalibration changed it. Same for the axis names -- see
-    :func:`_kappa_note`.
-    """
-    axes = [str(a) for a in data["axes"]]
-    err = np.asarray(data["kappa_err_sys"], float)
-    w = int(np.argmax(err))
-    others = ", ".join(f"x/÷{e:.2f} for {a}"
-                       for a, e in zip(axes, err) if a != axes[w])
-    return (f"kappa_{axes[w]} carries a x/÷{err[w]:.2f} systematic ({others}), "
-            f"so the {axes[w]} component's magnitude is the weakest number here.")
-
-
 def find_flow_centre(data, window_ms=CENTRE_FIT_MS):
     """The rotation centre over ``window_ms`` -> ``(cx, cy, ratio)`` cm.
 
     Campaign wrapper over :func:`~data_analysis.plasma.flow.find_flow_centre`:
-    picks the bins to average and hands it one velocity per position. The window
-    is the bias-on stretch -- that is when an E x B rotation exists to have a
-    centre at all.
-
-    Run 32: (+2.50, -1.25) during bias, ratio 0.22, stable across the window.
-    Outside it the fit degenerates (ratio ~0.7, centre at the search-box edge) --
-    correctly, since there is no rotation to centre when the plate is off.
+    averages the bins in the window, hands it one velocity per position. Only
+    meaningful over the bias-on stretch (:data:`CENTRE_FIT_MS`).
     """
     t = data["t_ms"]
     win = (t >= window_ms[0]) & (t <= window_ms[1])
     if not win.any():
         raise ValueError(f"centre-fit window {window_ms} ms selects no bin of "
                          f"{t[0]:.2f}..{t[-1]:.2f} ms")
-    # An all-NaN row is a position the scope never wrote (see batch_flow); it
-    # comes back NaN and the fit excludes it.
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "Mean of empty slice")
         vx = np.nanmean(data["v_X"][:, win], axis=1)
@@ -334,11 +286,10 @@ def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
                      vmax=None):
     """Time-slider page: v_X/v_Y quiver over |v|, beside the v_Z map.
 
-    **Panels, not dropdown groups**: they share one time slider, so every
-    component is read at the same instant rather than by switching.
-
-    ``vmax`` fixes all colour scales [km/s]; ``None`` autoscales per frame --
-    right while hunting for structure, wrong when comparing frames.
+    All components are panels on one time slider, so a frame shows every
+    component at the same instant. ``vmax`` fixes all colour scales [km/s];
+    ``None`` autoscales per frame -- right while hunting for structure, wrong
+    when comparing frames.
     """
     data = load_flow(npz_path)
     vx, vy, vz = (data[f"v_{a}"] for a in AXES)
@@ -369,12 +320,9 @@ def plot_flow_frame(t_ms, npz_path=None, quiver_step=QUIVER_STEP, vmax=None,
                     save_fig=True):
     """Static figure at the bin nearest ``t_ms``: in-plane, v_theta, v_r, v_Z.
 
-    The publication counterpart of the slider: scrub the page to find the frame,
-    then draw it here. Carries the same four panels in the same order, so a
-    figure and the page it came from cannot show different things. ``save_fig``
-    follows the campaign driver convention
-    (:func:`data_analysis.viz.plot_utils.resolve_save`): ``True`` -> the
-    centralized figure path, a string -> that path, falsey -> don't save.
+    Same four panels in the same order as :func:`emit_flow_slider`, so a figure
+    cannot show something different from the page it was scrubbed on.
+    ``save_fig`` per :func:`~data_analysis.viz.plot_utils.resolve_save`.
     """
     data = load_flow(npz_path)
     k = int(np.argmin(np.abs(data["t_ms"] - t_ms)))
