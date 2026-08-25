@@ -10,8 +10,10 @@ Two stages, because the read is the expensive part:
 1. :func:`batch_flow` -- reads 1681 positions x 6 tips x 5 shots, reduces each
    shot to :data:`BIN_MS` time bins, and writes a co-located npz. Slow (the whole
    run is ~10 GB of samples); run once.
-2. :func:`emit_flow_slider` / :func:`plot_flow_frame` -- read that npz and draw.
-   Fast, and re-runnable while choosing a frame or a colour scale.
+2. :func:`emit_flow_slider` / :func:`plot_flow_frame` -- read that npz and draw,
+   through the shared renders in :mod:`data_analysis.viz.flow_maps`. Fast, and
+   re-runnable while choosing a frame or a colour scale. The axial ``v_Z`` panel
+   is this campaign's addition to the three panels every in-plane map carries.
 
 Geometry
 --------
@@ -31,7 +33,6 @@ import os
 import re
 import warnings
 
-import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
@@ -40,14 +41,16 @@ import Jun2026_plot as jpl
 from Jun2026_slider import slider_path
 from data_analysis.io import open_lapd, parse_shunts, position_shots
 from data_analysis.io.probe_map import channel_wiring
+from data_analysis.plasma.flow import (find_flow_centre as _fit_centre,
+                                       polar_components)
 from data_analysis.plasma.mach import (K_HUTCHINSON, binned_face_ratio,
-                                       find_flow_centre as _fit_centre,
                                        flow_velocity, mach_single,
-                                       polar_components, time_bin_edges)
+                                       time_bin_edges)
 from data_analysis.utils import run_num_of
-from data_analysis.viz.plot_utils import (finalize_figure, grid_by_position,
-                                          grid_frames, resolve_save)
-from data_analysis.viz.slider_html import SCHEMA_VERSION, write_slider_html
+from data_analysis.viz.flow_maps import (plot_flow_frame as _draw_flow_frame,
+                                         write_flow_slider)
+from data_analysis.viz.plot_utils import (finalize_figure, grid_frames,
+                                          resolve_save)
 
 DATA_DIR = r"D:\data\LAPD\jun2026-jia"
 IFN = os.path.join(DATA_DIR, "32-He-800G-bias40V-Mach-plane_2026-06-13.hdf5")
@@ -304,7 +307,7 @@ def _weakest_axis_note(data):
 def find_flow_centre(data, window_ms=CENTRE_FIT_MS):
     """The rotation centre over ``window_ms`` -> ``(cx, cy, ratio)`` cm.
 
-    Campaign wrapper over :func:`~data_analysis.plasma.mach.find_flow_centre`:
+    Campaign wrapper over :func:`~data_analysis.plasma.flow.find_flow_centre`:
     picks the bins to average and hands it one velocity per position. The window
     is the bias-on stretch -- that is when an E x B rotation exists to have a
     centre at all.
@@ -338,65 +341,40 @@ def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
     right while hunting for structure, wrong when comparing frames.
     """
     data = load_flow(npz_path)
-    t_ms = data["t_ms"]
-
     vx, vy, vz = (data[f"v_{a}"] for a in AXES)
     cx, cy, ratio = find_flow_centre(data)
     v_r, v_th = polar_components(vx, vy, data["pos_x"], data["pos_y"], (cx, cy))
 
-    grid = lambda a: grid_frames(data["pos_x"], data["pos_y"], a)[0]
-    fx, xs, ys = grid_frames(data["pos_x"], data["pos_y"], vx)
-    fy, fs, fz = grid(vy), grid(np.hypot(vx, vy)), grid(vz)
-    f_th, f_r = grid(v_th), grid(v_r)
+    fz = grid_frames(data["pos_x"], data["pos_y"], vz)[0]
+    extra = [{"name": "axial flow (v_Z, along B)", "unit": "km/s",
+              "frames": fz, "cmap": "RdBu_r",
+              "vmin": -vmax if vmax is not None else None, "vmax": vmax}]
 
-    # vmin/vmax are set together (schema rule). Speed is unsigned -> sequential
-    # from 0; the three signed components are diverging about 0, because for them
-    # the sign is the physics -- one sign over the ring is a coherent rotation.
-    # v_r is the control: an E x B rotation has little radial flow.
-    fixed = vmax is not None
-    fields = [
-        {"name": "in-plane flow (v_X, v_Y)", "unit": "km/s", "frames": fs,
-         "cmap": "viridis", "vmin": 0.0 if fixed else None, "vmax": vmax,
-         "vectors": {"u": fx, "v": fy, "step": quiver_step}},
-        {"name": "azimuthal flow (v_theta, +ve CCW)", "unit": "km/s",
-         "frames": f_th, "cmap": "RdBu_r",
-         "vmin": -vmax if fixed else None, "vmax": vmax},
-        {"name": "radial flow (v_r, +ve outward)", "unit": "km/s",
-         "frames": f_r, "cmap": "RdBu_r",
-         "vmin": -vmax if fixed else None, "vmax": vmax},
-        {"name": "axial flow (v_Z, along B)", "unit": "km/s",
-         "frames": fz, "cmap": "RdBu_r",
-         "vmin": -vmax if fixed else None, "vmax": vmax},
-    ]
-
-    bundle = {
-        "schema": SCHEMA_VERSION,
-        "title": f"Run {run_num_of(str(data['source_file']))} - "
-                 f"calibrated Mach flow, P33 plane",
-        "geometry": "plane",
-        "axis": {"name": "time", "unit": "ms", "values": t_ms},
-        "x": {"label": "X position", "unit": "cm", "values": xs},
-        "y": {"label": "Y position", "unit": "cm", "values": ys},
-        "fields": fields,
-        "provenance": {
-            "source": str(data["source_file"]),
-            "params": {"bin": f"{float(data['bin_ms']):g} ms",
-                       "shots/position": int(data["nshot"]),
-                       "T_e assumed": f"{float(data['te_ev']):g} eV",
-                       "calibration": str(data["calibration_file"]),
-                       "arrow decimation": f"every {quiver_step} cells",
-                       # Coordinates are NOT shifted -- only the v_r/v_theta
-                       # projection uses this point.
-                       "v_r/v_theta centre": f"({cx:+.2f}, {cy:+.2f}) cm, "
-                                             f"fitted over "
-                                             f"{CENTRE_FIT_MS[0]:g}-{CENTRE_FIT_MS[1]:g} ms "
-                                             f"(|v_r|/|v_theta| = {ratio:.2f})"},
-            "details": _kappa_note(data),
-        },
-        "warning": _te_note(data) + ". " + _weakest_axis_note(data),
-    }
     name = f"{run_num_of(str(data['source_file']))}-mach-flow-slider"
-    return write_slider_html(bundle, out or slider_path(name))
+    return write_flow_slider(
+        out or slider_path(name),
+        pos_x=data["pos_x"], pos_y=data["pos_y"], vx=vx, vy=vy,
+        v_r=v_r, v_th=v_th,
+        # t=0 is bias start in this run, so the stored axis is already the
+        # frame a reader wants; nothing to convert.
+        t_axis=data["t_ms"], axis_label="time",
+        title=f"Run {run_num_of(str(data['source_file']))} - "
+              f"calibrated Mach flow, P33 plane",
+        source=str(data["source_file"]),
+        params={"bin": f"{float(data['bin_ms']):g} ms",
+                "shots/position": int(data["nshot"]),
+                "T_e assumed": f"{float(data['te_ev']):g} eV",
+                "calibration": str(data["calibration_file"]),
+                "arrow decimation": f"every {quiver_step} cells",
+                # Coordinates are NOT shifted -- only the v_r/v_theta
+                # projection uses this point.
+                "v_r/v_theta centre":
+                    f"({cx:+.2f}, {cy:+.2f}) cm, fitted over "
+                    f"{CENTRE_FIT_MS[0]:g}-{CENTRE_FIT_MS[1]:g} ms "
+                    f"(|v_r|/|v_theta| = {ratio:.2f})"},
+        details=_kappa_note(data),
+        warning=_te_note(data) + ". " + _weakest_axis_note(data),
+        quiver_step=quiver_step, vmax=vmax, extra_fields=extra)
 
 
 def plot_flow_frame(t_ms, npz_path=None, quiver_step=QUIVER_STEP, vmax=None,
@@ -412,64 +390,19 @@ def plot_flow_frame(t_ms, npz_path=None, quiver_step=QUIVER_STEP, vmax=None,
     """
     data = load_flow(npz_path)
     k = int(np.argmin(np.abs(data["t_ms"] - t_ms)))
-    cx, cy, ratio = find_flow_centre(data)
+    cx, cy, _ratio = find_flow_centre(data)
     v_r, v_th = polar_components(data["v_X"][:, k], data["v_Y"][:, k],
                                  data["pos_x"], data["pos_y"], (cx, cy))
-    # grid_by_position takes one value per position and returns the imshow
-    # extent as cell EDGES; building it from the axis vectors instead would put
-    # the limits at cell centres, shrinking the map by half a cell each side.
-    grid = lambda v: grid_by_position(data["pos_x"], data["pos_y"], v)
-    vx, extent = grid(data["v_X"][:, k])
-    vy, _ = grid(data["v_Y"][:, k])
-    vz, _ = grid(data["v_Z"][:, k])
-    g_th, _ = grid(v_th)
-    g_r, _ = grid(v_r)
-    speed = np.hypot(vx, vy)
-    peak = np.nanmax(speed)
-
-    fig, axs = plt.subplots(1, 4, figsize=(22, 5.4), sharey=True)
-    ax_p, ax_th, ax_r, ax_z = axs
-
-    im = ax_p.imshow(speed, origin="lower", extent=extent, cmap="viridis",
-                     vmin=None if vmax is None else 0.0, vmax=vmax,
-                     interpolation="nearest")
-    s = quiver_step
-    xs = np.linspace(extent[0], extent[1], vx.shape[1], endpoint=False)
-    ys = np.linspace(extent[2], extent[3], vx.shape[0], endpoint=False)
-    # Cell centres: extent gives edges, and an arrow belongs on the position it
-    # was measured at, not on the corner of its cell.
-    xs += (xs[1] - xs[0]) / 2 if xs.size > 1 else 0
-    ys += (ys[1] - ys[0]) / 2 if ys.size > 1 else 0
-    X, Y = np.meshgrid(xs[::s], ys[::s])
-    q = ax_p.quiver(X, Y, vx[::s, ::s], vy[::s, ::s], color="w",
-                    pivot="mid", scale_units="xy")
-    ax_p.quiverkey(q, 0.88, 1.03, peak or 1.0, f"{peak:.1f} km/s",
-                   labelpos="E", color="k")
-    ax_p.set_title("in-plane flow  (v_X, v_Y)")
-    ax_p.set_ylabel("Y [cm]")
-    fig.colorbar(im, ax=ax_p, label="|v| in-plane [km/s]")
-
-    for ax, g, title, label in (
-            (ax_th, g_th, r"azimuthal  ($v_\theta$, +ve CCW)", r"$v_\theta$ [km/s]"),
-            (ax_r, g_r, r"radial  ($v_r$, +ve outward)", r"$v_r$ [km/s]"),
-            (ax_z, vz, "axial  ($v_Z$, along B)", r"$v_Z$ [km/s]")):
-        lim = vmax or np.nanmax(np.abs(g))
-        img = ax.imshow(g, origin="lower", extent=extent, cmap="RdBu_r",
-                        vmin=-lim, vmax=lim, interpolation="nearest")
-        ax.set_title(title)
-        fig.colorbar(img, ax=ax, label=label)
-
-    # The fitted centre, marked on the two panels resolved about it. Machine
-    # coordinates throughout -- the marker moves, the axes do not.
-    for ax in (ax_th, ax_r):
-        ax.plot(cx, cy, "k+", ms=11, mew=1.6)
-    for ax in axs:
-        ax.set_xlabel("X [cm]")
 
     run_num = run_num_of(str(data["source_file"]))
-    fig.suptitle(f"Run {run_num}  -  t = {data['t_ms'][k]:+.2f} ms "
-                 f"(t=0 bias start)  -  {_te_note(data)}  -  "
-                 f"polar centre ({cx:+.2f}, {cy:+.2f}) cm", fontsize=9)
+    fig = _draw_flow_frame(
+        data["pos_x"], data["pos_y"], data["v_X"][:, k], data["v_Y"][:, k],
+        v_r, v_th, (cx, cy),
+        f"Run {run_num}  -  t = {data['t_ms'][k]:+.2f} ms (t=0 bias start)  -  "
+        f"{_te_note(data)}  -  polar centre ({cx:+.2f}, {cy:+.2f}) cm",
+        quiver_step=quiver_step, vmax=vmax,
+        extra_panels=[(data["v_Z"][:, k], "axial  ($v_Z$, along B)",
+                       r"$v_Z$ [km/s]")])
     name = f"{run_num}-mach-flow-{data['t_ms'][k]:+.2f}ms"
     finalize_figure(fig, save_fig=resolve_save(save_fig, name, jpl.FIG_SUBDIR))
 

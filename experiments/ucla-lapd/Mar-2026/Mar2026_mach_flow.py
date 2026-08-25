@@ -10,10 +10,13 @@ Two stages, because the read is the expensive part:
 1. :func:`batch_flow` -- reads 441 positions x 4 tips x 4 shots from the 1.25 GB
    file, reduces each shot to :data:`BIN_MS` bins, writes a co-located npz. Slow;
    run once.
-2. :func:`emit_flow_slider` / :func:`plot_flow_frame` -- read that npz and draw.
+2. :func:`emit_flow_slider` / :func:`plot_flow_frame` -- read that npz and draw,
+   through the shared renders in :mod:`data_analysis.viz.flow_maps`. What is
+   campaign-specific here is the time frame, the extra panel, and the caveat
+   text; the panel order and colour conventions are the shared module's.
 
-Differences from the Jun-2026 run-32 analysis this is modelled on, all forced by
-what run 054 actually recorded:
+Differences from the Jun-2026 run-32 analysis this shares its renders with, all
+forced by what run 054 actually recorded:
 
 **X and Y only.** The probe has six tips and the other two were functional, but
 the description's ``Channels:`` block wires only Vx+/Vx-/Vy+/Vy- to the
@@ -47,21 +50,21 @@ import datetime
 import os
 import re
 
-import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
 from data_analysis.io import open_lapd, parse_shunts
 from data_analysis.io.probe_map import channel_wiring
+from data_analysis.plasma.flow import (find_flow_centre as _fit_centre,
+                                       polar_components)
 from data_analysis.plasma.mach import (K_HUTCHINSON, binned_face_ratio,
-                                       find_flow_centre as _fit_centre,
                                        flow_velocity, mach_single,
-                                       polar_components, time_bin_edges)
+                                       time_bin_edges)
 from data_analysis.utils import run_num_of
+from data_analysis.viz.flow_maps import (plot_flow_frame as _draw_flow_frame,
+                                         write_flow_slider)
 from data_analysis.viz.plot_utils import (fig_path, finalize_figure,
-                                          grid_by_position, grid_frames,
-                                          resolve_save)
-from data_analysis.viz.slider_html import SCHEMA_VERSION, write_slider_html
+                                          grid_frames, resolve_save)
 
 DATA_DIR = r"D:\data\LAPD\Mar26-data"
 IFN = os.path.join(
@@ -391,7 +394,7 @@ def _weakest_axis_note(data):
 def find_flow_centre(data, window_ms=None):
     """The rotation centre over the bias window -> ``(cx, cy, ratio)`` cm.
 
-    Campaign wrapper over :func:`~data_analysis.plasma.mach.find_flow_centre`:
+    Campaign wrapper over :func:`~data_analysis.plasma.flow.find_flow_centre`:
     averages the bins the bias was on and hands it one velocity per position.
     ``window_ms`` is in *stored* time; the default converts the description's
     machine-time bias window, which is when an E x B rotation exists to have a
@@ -434,88 +437,58 @@ def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
     digitized (module docstring).
     """
     data = load_flow(npz_path)
-    # The slider axis is machine time: the bias window a reader wants to find is
-    # quoted that way in the run log.
-    t_axis = machine_ms(data["t_ms"])
-
     vx, vy = data["v_X"], data["v_Y"]
     cx, cy, ratio = find_flow_centre(data)
     v_r, v_th = polar_components(vx, vy, data["pos_x"], data["pos_y"], (cx, cy))
 
-    fx, xs, ys = grid_frames(data["pos_x"], data["pos_y"], vx)
-    grid = lambda a: grid_frames(data["pos_x"], data["pos_y"], a)[0]
-    fy, fs = grid(vy), grid(np.hypot(vx, vy))
-    f_th, f_r = grid(v_th), grid(v_r)
-
-    # vmin/vmax are set together (schema rule). Speed is unsigned -> sequential
-    # from 0; the signed components are diverging about 0, because for them the
-    # sign is the physics -- one sign over the ring is a coherent rotation.
-    # v_r is the control: an E x B rotation has little radial flow.
-    fixed = vmax is not None
-    fields = [
-        {"name": "in-plane flow (v_X, v_Y)", "unit": "km/s", "frames": fs,
-         "cmap": "viridis", "vmin": 0.0 if fixed else None, "vmax": vmax,
-         "vectors": {"u": fx, "v": fy, "step": quiver_step}},
-        {"name": "azimuthal flow (v_theta, +ve CCW)", "unit": "km/s",
-         "frames": f_th, "cmap": "RdBu_r",
-         "vmin": -vmax if fixed else None, "vmax": vmax},
-        {"name": "radial flow (v_r, +ve outward)", "unit": "km/s",
-         "frames": f_r, "cmap": "RdBu_r",
-         "vmin": -vmax if fixed else None, "vmax": vmax},
-    ]
-
     bias = np.asarray(data["bias_machine_ms"], float)
     rel = np.asarray(data["reliable"], bool)
     last_ok = machine_ms(data["t_ms"][int(rel.sum()) - 1])
+
     # Ion saturation current itself, as a field: it is the amplitude the Mach
     # ratio divides away, so it is what tells a reader whether a frame shows
     # flow in a plasma or a ratio of two decayed traces.
-    fields.append({"name": "summed tip current (signal amplitude)", "unit": "mA",
-                   "frames": grid(data["signal_a"] * 1e3), "cmap": "magma",
-                   "vmin": 0.0 if fixed else None, "vmax": None})
-    bundle = {
-        "schema": SCHEMA_VERSION,
-        "title": f"Run {run_num_of(str(data['source_file']))} - "
-                 f"calibrated Mach flow, P29 plane",
-        "geometry": "plane",
-        "axis": {"name": "time (from discharge)", "unit": "ms",
-                 "values": t_axis},
-        "x": {"label": "X position", "unit": "cm", "values": xs},
-        "y": {"label": "Y position", "unit": "cm", "values": ys},
-        "fields": fields,
-        "provenance": {
-            "source": str(data["source_file"]),
-            "params": {"bin": f"{float(data['bin_ms']):g} ms",
-                       "shots/position": int(data["nshot"]),
-                       "T_e assumed": f"{float(data['te_ev']):g} eV",
-                       "calibration": str(data["calibration_file"]),
-                       "multi-electrode bias":
-                           f"{bias[0]:g}-{bias[1]:g} ms",
-                       "signal above floor":
-                           f"through {last_ok:.2f} ms machine "
-                           f"({int(rel.sum())}/{rel.size} bins)",
-                       "DAQ trigger":
-                           f"{float(data['daq_trigger_ms']):g} ms "
-                           f"(slider shows machine time)",
-                       "arrow decimation": f"every {quiver_step} cell(s)",
-                       # Coordinates are NOT shifted -- only the v_r/v_theta
-                       # projection uses this point.
-                       "v_r/v_theta centre": f"({cx:+.2f}, {cy:+.2f}) cm, "
-                                             f"fitted over the bias window "
-                                             f"(|v_r|/|v_theta| = {ratio:.2f})"},
-            "details": _kappa_note(data),
-        },
-        "warning": (f"Plasma decays during the record: past {last_ok:.1f} ms the "
-                    f"summed tip current is under "
-                    f"{float(data['min_signal_frac']):.0%} of peak and the Mach "
-                    f"number is a ratio of two decayed traces -- it stays finite "
-                    f"and drifts smoothly, but it is NOT a flow measurement. "
-                    + _te_note(data) + ". " + _weakest_axis_note(data)
-                    + " No axial (v_Z) panel: the Z tips were never digitized "
-                      "in this run."),
-    }
+    amp = grid_frames(data["pos_x"], data["pos_y"], data["signal_a"] * 1e3)[0]
+    extra = [{"name": "summed tip current (signal amplitude)", "unit": "mA",
+              "frames": amp, "cmap": "magma",
+              "vmin": 0.0 if vmax is not None else None, "vmax": None}]
+
     name = f"{run_num_of(str(data['source_file']))}-mach-flow-slider"
-    return write_slider_html(bundle, out or slider_path(name))
+    return write_flow_slider(
+        out or slider_path(name),
+        pos_x=data["pos_x"], pos_y=data["pos_y"], vx=vx, vy=vy,
+        v_r=v_r, v_th=v_th,
+        # The slider axis is machine time: the bias window a reader wants to
+        # find is quoted that way in the run log.
+        t_axis=machine_ms(data["t_ms"]), axis_label="time (from discharge)",
+        title=f"Run {run_num_of(str(data['source_file']))} - "
+              f"calibrated Mach flow, P29 plane",
+        source=str(data["source_file"]),
+        params={"bin": f"{float(data['bin_ms']):g} ms",
+                "shots/position": int(data["nshot"]),
+                "T_e assumed": f"{float(data['te_ev']):g} eV",
+                "calibration": str(data["calibration_file"]),
+                "multi-electrode bias": f"{bias[0]:g}-{bias[1]:g} ms",
+                "signal above floor": f"through {last_ok:.2f} ms machine "
+                                      f"({int(rel.sum())}/{rel.size} bins)",
+                "DAQ trigger": f"{float(data['daq_trigger_ms']):g} ms "
+                               f"(slider shows machine time)",
+                "arrow decimation": f"every {quiver_step} cell(s)",
+                # Coordinates are NOT shifted -- only the v_r/v_theta
+                # projection uses this point.
+                "v_r/v_theta centre": f"({cx:+.2f}, {cy:+.2f}) cm, fitted over "
+                                      f"the bias window "
+                                      f"(|v_r|/|v_theta| = {ratio:.2f})"},
+        details=_kappa_note(data),
+        warning=(f"Plasma decays during the record: past {last_ok:.1f} ms the "
+                 f"summed tip current is under "
+                 f"{float(data['min_signal_frac']):.0%} of peak and the Mach "
+                 f"number is a ratio of two decayed traces -- it stays finite "
+                 f"and drifts smoothly, but it is NOT a flow measurement. "
+                 + _te_note(data) + ". " + _weakest_axis_note(data)
+                 + " No axial (v_Z) panel: the Z tips were never digitized "
+                   "in this run."),
+        quiver_step=quiver_step, vmax=vmax, extra_fields=extra)
 
 
 def slider_path(name):
@@ -542,57 +515,9 @@ def plot_flow_frame(t_ms, npz_path=None, quiver_step=QUIVER_STEP, vmax=None,
     data = load_flow(npz_path)
     want = t_ms - float(data["daq_trigger_ms"]) if machine_time else t_ms
     k = int(np.argmin(np.abs(data["t_ms"] - want)))
-    cx, cy, ratio = find_flow_centre(data)
+    cx, cy, _ratio = find_flow_centre(data)
     v_r, v_th = polar_components(data["v_X"][:, k], data["v_Y"][:, k],
                                  data["pos_x"], data["pos_y"], (cx, cy))
-    # grid_by_position takes one value per position and returns the imshow
-    # extent as cell EDGES; building it from the axis vectors instead would put
-    # the limits at cell centres, shrinking the map by half a cell each side.
-    grid = lambda v: grid_by_position(data["pos_x"], data["pos_y"], v)
-    vx, extent = grid(data["v_X"][:, k])
-    vy, _ = grid(data["v_Y"][:, k])
-    g_th, _ = grid(v_th)
-    g_r, _ = grid(v_r)
-    speed = np.hypot(vx, vy)
-    peak = np.nanmax(speed)
-
-    fig, axs = plt.subplots(1, 3, figsize=(17, 5.4), sharey=True)
-    ax_p, ax_th, ax_r = axs
-
-    im = ax_p.imshow(speed, origin="lower", extent=extent, cmap="viridis",
-                     vmin=None if vmax is None else 0.0, vmax=vmax,
-                     interpolation="nearest")
-    s = quiver_step
-    xs = np.linspace(extent[0], extent[1], vx.shape[1], endpoint=False)
-    ys = np.linspace(extent[2], extent[3], vx.shape[0], endpoint=False)
-    # Cell centres: extent gives edges, and an arrow belongs on the position it
-    # was measured at, not on the corner of its cell.
-    xs += (xs[1] - xs[0]) / 2 if xs.size > 1 else 0
-    ys += (ys[1] - ys[0]) / 2 if ys.size > 1 else 0
-    X, Y = np.meshgrid(xs[::s], ys[::s])
-    q = ax_p.quiver(X, Y, vx[::s, ::s], vy[::s, ::s], color="w",
-                    pivot="mid", scale_units="xy")
-    ax_p.quiverkey(q, 0.88, 1.03, peak or 1.0, f"{peak:.1f} km/s",
-                   labelpos="E", color="k")
-    ax_p.set_title("in-plane flow  (v_X, v_Y)")
-    ax_p.set_ylabel("Y [cm]")
-    fig.colorbar(im, ax=ax_p, label="|v| in-plane [km/s]")
-
-    for ax, g, title, label in (
-            (ax_th, g_th, r"azimuthal  ($v_\theta$, +ve CCW)", r"$v_\theta$ [km/s]"),
-            (ax_r, g_r, r"radial  ($v_r$, +ve outward)", r"$v_r$ [km/s]")):
-        lim = vmax or np.nanmax(np.abs(g))
-        img = ax.imshow(g, origin="lower", extent=extent, cmap="RdBu_r",
-                        vmin=-lim, vmax=lim, interpolation="nearest")
-        ax.set_title(title)
-        fig.colorbar(img, ax=ax, label=label)
-
-    # The fitted centre, marked on the two panels resolved about it. Machine
-    # coordinates throughout -- the marker moves, the axes do not.
-    for ax in (ax_th, ax_r):
-        ax.plot(cx, cy, "k+", ms=11, mew=1.6)
-    for ax in axs:
-        ax.set_xlabel("X [cm]")
 
     bias = np.asarray(data["bias_machine_ms"], float)
     t_mach = machine_ms(data["t_ms"][k])
@@ -601,15 +526,22 @@ def plot_flow_frame(t_ms, npz_path=None, quiver_step=QUIVER_STEP, vmax=None,
     # A frame past the signal floor is labelled as such on the figure itself:
     # the map still looks like a flow field, so the caveat has to travel with it.
     if not bool(data["reliable"][k]):
-        fig.suptitle(
-            f"Run {run_num}  -  t = {t_mach:.2f} ms from discharge  -  "
-            f"NOT A FLOW MEASUREMENT: summed tip current is below "
-            f"{float(data['min_signal_frac']):.0%} of peak here; this is the "
-            f"ratio of two decayed traces", fontsize=9, color="firebrick")
+        suptitle = (f"Run {run_num}  -  t = {t_mach:.2f} ms from discharge  -  "
+                    f"NOT A FLOW MEASUREMENT: summed tip current is below "
+                    f"{float(data['min_signal_frac']):.0%} of peak here; this "
+                    f"is the ratio of two decayed traces")
+        color = "firebrick"
     else:
-        fig.suptitle(f"Run {run_num}  -  t = {t_mach:.2f} ms from discharge "
-                     f"({on}; bias {bias[0]:g}-{bias[1]:g} ms)  -  {_te_note(data)}"
-                     f"  -  polar centre ({cx:+.2f}, {cy:+.2f}) cm", fontsize=9)
+        suptitle = (f"Run {run_num}  -  t = {t_mach:.2f} ms from discharge "
+                    f"({on}; bias {bias[0]:g}-{bias[1]:g} ms)  -  "
+                    f"{_te_note(data)}  -  polar centre "
+                    f"({cx:+.2f}, {cy:+.2f}) cm")
+        color = None
+
+    fig = _draw_flow_frame(data["pos_x"], data["pos_y"], data["v_X"][:, k],
+                           data["v_Y"][:, k], v_r, v_th, (cx, cy), suptitle,
+                           quiver_step=quiver_step, vmax=vmax,
+                           suptitle_color=color)
     # 'p' for the decimal point: a '.' in the stem is read as a file extension.
     name = f"{run_num}-mach-flow-{t_mach:.2f}ms".replace(".", "p")
     finalize_figure(fig, save_fig=resolve_save(save_fig, name, FIG_SUBDIR))
