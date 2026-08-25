@@ -40,8 +40,10 @@ import Jun2026_plot as jpl
 from Jun2026_slider import slider_path
 from data_analysis.io import open_lapd, parse_shunts, position_shots
 from data_analysis.io.probe_map import channel_wiring
-from data_analysis.plasma.mach import (K_HUTCHINSON, face_ratio, flow_velocity,
-                                       mach_single, valid_current_mask)
+from data_analysis.plasma.mach import (K_HUTCHINSON, binned_face_ratio,
+                                       find_flow_centre as _fit_centre,
+                                       flow_velocity, mach_single,
+                                       polar_components, time_bin_edges)
 from data_analysis.utils import run_num_of
 from data_analysis.viz.plot_utils import (finalize_figure, grid_by_position,
                                           grid_frames, resolve_save)
@@ -81,13 +83,6 @@ QUIVER_STEP = 2
 #: Window the rotation centre is fitted over [ms]. The bias-on stretch: that is
 #: when an E x B rotation exists to have a centre. See :func:`find_flow_centre`.
 CENTRE_FIT_MS = (0.0, 5.0)
-
-#: Fewest samples a time bin may hold. A bin is a shot-and-sample pool that one
-#: face ratio is formed from, so a handful of samples yields a ratio dominated by
-#: whichever sample happened to land in it. Run 32 holds 1000 per bin, far above
-#: this -- the floor exists to fail loudly if BIN_MS is ever set near the sample
-#: interval, rather than to bind here.
-MIN_BIN_SAMPLES = 10
 
 NPZ_SUFFIX = "-mach-flow-data.npz"
 
@@ -165,54 +160,6 @@ def snap_to_planned(pos):
     return pos.xpos[ix], pos.ypos[iy]
 
 
-def bin_edges(tarr, window_ms=WINDOW_MS, bin_ms=BIN_MS):
-    """Sample-index edges of the time bins -> ``(edges, centres_ms)``.
-
-    ``edges`` has ``nbin+1`` entries indexing ``tarr``; bin ``k`` is
-    ``[edges[k], edges[k+1])``. Bins are defined on the *time* axis and then
-    located in samples, so a bin is ``bin_ms`` wide by construction even where
-    the sample count per bin is not exactly constant.
-    """
-    t0, t1 = window_ms
-    nbin = int(round((t1 - t0) / bin_ms))
-    t_edges = t0 + bin_ms * np.arange(nbin + 1)
-    edges = np.searchsorted(tarr, t_edges * 1e-3)
-    thin = np.flatnonzero(np.diff(edges) < MIN_BIN_SAMPLES)
-    if thin.size:
-        k = int(thin[0])
-        raise ValueError(
-            f"bin {k} ({t_edges[k]:g}-{t_edges[k + 1]:g} ms) holds "
-            f"{int(edges[k + 1] - edges[k])} sample(s), below the "
-            f"{MIN_BIN_SAMPLES} needed for a meaningful ratio; the record spans "
-            f"{tarr[0] * 1e3:.2f}-{tarr[-1] * 1e3:.2f} ms at "
-            f"{1e-6 / (tarr[1] - tarr[0]):.1f} MHz, so WINDOW_MS reaches outside "
-            f"it or BIN_MS is shorter than the sample interval.")
-    return edges, t_edges[:-1] + bin_ms / 2
-
-
-def _binned_face_ratio(plus, minus, edges):
-    """Face ratio per time bin from two ``(nshot, nt)`` stacks -> ``(nbin,)``.
-
-    Reduces over both shots and the bin's samples, keeping ``face_ratio``'s
-    average-then-divide invariant: the bin is flattened so the pooled mean of
-    each face is formed before the division, never a mean of per-sample ratios.
-    Also returns the valid-sample count per bin, so an empty bin is visible as a
-    count rather than as a plausible NaN.
-    """
-    nbin = edges.size - 1
-    ratio = np.full(nbin, np.nan)
-    counts = np.zeros(nbin, dtype=np.int32)
-    for k in range(nbin):
-        p = plus[:, edges[k]:edges[k + 1]].ravel()
-        m = minus[:, edges[k]:edges[k + 1]].ravel()
-        ok = valid_current_mask(p, m)
-        counts[k] = ok.sum()
-        if counts[k]:
-            # axis=0 on the flattened pair: one ratio for the whole bin.
-            ratio[k] = face_ratio(p, m, axis=0, mask=ok)
-    return ratio, counts
-
-
 def batch_flow(ifn=IFN, cal_path=CAL_NPZ, window_ms=WINDOW_MS, bin_ms=BIN_MS,
                te_ev=TE_EV, out_path=None):
     """Read the plane, reduce to time bins, apply kappa -> co-located npz.
@@ -239,7 +186,7 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, window_ms=WINDOW_MS, bin_ms=BIN_MS,
 
     pos = jiv.read_lp_positions(ifn)
     tarr = run.time_array(scope_name=SCOPE)
-    edges, t_ms = bin_edges(tarr, window_ms, bin_ms)
+    edges, t_ms = time_bin_edges(tarr, window_ms, bin_ms)
     nbin = t_ms.size
 
     mach = {a: np.full((pos.npos, nbin), np.nan) for a in AXES}
@@ -268,7 +215,11 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, window_ms=WINDOW_MS, bin_ms=BIN_MS,
                 stacks.append(stack)
             if stacks is None:
                 continue
-            R, counts = _binned_face_ratio(stacks[0], stacks[1], edges)
+            # Amplitude is unused here: run 32 has no decay flag (see the
+            # Mar-2026 script, which does). Named rather than indexed so the
+            # omission is visible as a choice.
+            R, counts, _amplitude = binned_face_ratio(stacks[0], stacks[1],
+                                                      edges)
             n_valid[i, p] = counts
             mach[axis][p] = mach_single(R, kappa[axis])
 
@@ -323,69 +274,42 @@ def _te_note(data):
 
 
 def _kappa_note(data):
-    """Per-axis kappa and its systematic bar, for the provenance banner."""
+    """Per-axis kappa and its systematic bar, for the provenance banner.
+
+    Axis names come from the npz, not the module constant: these strings label a
+    banner nobody re-checks, so a reordered ``AXES`` would silently attach one
+    axis' kappa to another's name.
+    """
     return {f"kappa_{a}": f"{k:.4f} x/÷{e:.3f}  [{m}]"
-            for a, k, e, m in zip(AXES, data["kappa"], data["kappa_err_sys"],
-                                  data["kappa_method"])}
+            for a, k, e, m in zip(data["axes"], data["kappa"],
+                                  data["kappa_err_sys"], data["kappa_method"])}
 
 
 def _weakest_axis_note(data):
     """Name the axis whose kappa carries the largest systematic bar.
 
     Read from the npz, never a literal: a hardcoded "x/÷1.46" would keep reading
-    plausibly after a recalibration changed it.
+    plausibly after a recalibration changed it. Same for the axis names -- see
+    :func:`_kappa_note`.
     """
+    axes = [str(a) for a in data["axes"]]
     err = np.asarray(data["kappa_err_sys"], float)
     w = int(np.argmax(err))
     others = ", ".join(f"x/÷{e:.2f} for {a}"
-                       for a, e in zip(AXES, err) if a != AXES[w])
-    return (f"kappa_{AXES[w]} carries a x/÷{err[w]:.2f} systematic ({others}), "
-            f"so the {AXES[w]} component's magnitude is the weakest number here.")
+                       for a, e in zip(axes, err) if a != axes[w])
+    return (f"kappa_{axes[w]} carries a x/÷{err[w]:.2f} systematic ({others}), "
+            f"so the {axes[w]} component's magnitude is the weakest number here.")
 
 
-def polar_components(vx, vy, pos_x, pos_y, centre):
-    """In-plane flow resolved about ``centre`` -> ``(v_r, v_theta)``, same shape.
+def find_flow_centre(data, window_ms=CENTRE_FIT_MS):
+    """The rotation centre over ``window_ms`` -> ``(cx, cy, ratio)`` cm.
 
-    ``v_r`` is positive outward; ``v_theta`` is positive counter-clockwise (the
-    +z sense, with z out of the x-y plane along B). The plate drives an azimuthal
-    E x B flow, which in Cartesian components reverses sign across the column and
-    averages to nearly zero; ``v_theta`` states it as one number per cell.
+    Campaign wrapper over :func:`~data_analysis.plasma.mach.find_flow_centre`:
+    picks the bins to average and hands it one velocity per position. The window
+    is the bias-on stretch -- that is when an E x B rotation exists to have a
+    centre at all.
 
-    ``centre`` is in the *same machine coordinates* as ``pos_x``/``pos_y`` and is
-    used only by the projection -- nothing is translated, so a feature at
-    x = 5 cm stays at x = 5 cm on every plot.
-    """
-    dx = np.asarray(pos_x, float) - centre[0]
-    dy = np.asarray(pos_y, float) - centre[1]
-    r = np.hypot(dx, dy)
-    # r == 0 has no defined direction; one cell at most, left NaN rather than
-    # given an arbitrary unit vector.
-    with np.errstate(invalid="ignore", divide="ignore"):
-        ur, ut = np.where(r > 0, dx / r, np.nan), np.where(r > 0, dy / r, np.nan)
-    # Broadcast the per-position unit vectors against (npos, nbin) cubes.
-    if vx.ndim == 2:
-        ur, ut = ur[:, None], ut[:, None]
-    return vx * ur + vy * ut, -vx * ut + vy * ur
-
-
-def find_flow_centre(data, window_ms=CENTRE_FIT_MS, search_cm=3.0, step_cm=0.25,
-                     r_min=3.0, r_max=15.0):
-    """The rotation centre, fitted from the flow field itself -> ``(cx, cy)`` cm.
-
-    A rigid rotation has one stagnation point, and about the true centre the flow
-    is purely azimuthal. This scans candidate centres and takes the one
-    minimising ``mean|v_r| / mean|v_theta|`` over the annulus ``r_min..r_max``,
-    averaged over ``window_ms``.
-
-    Fitted rather than taken from the run log's "plate centred ~(0,0)": that
-    position is approximate, and v_r/v_theta are sensitive to the centre in a way
-    the Cartesian components are not.
-
-    The annulus bounds both move the answer (measured): r < r_min lets the
-    near-stagnant core, where direction is ill-defined, dominate the ratio, and
-    the plane edge lets low-signal cells win by having no flow to be radial.
-
-    Run 32: (+2.5, -1.5) during bias, ratio 0.22, stable across the window.
+    Run 32: (+2.50, -1.25) during bias, ratio 0.22, stable across the window.
     Outside it the fit degenerates (ratio ~0.7, centre at the search-box edge) --
     correctly, since there is no rotation to centre when the plate is off.
     """
@@ -395,30 +319,12 @@ def find_flow_centre(data, window_ms=CENTRE_FIT_MS, search_cm=3.0, step_cm=0.25,
         raise ValueError(f"centre-fit window {window_ms} ms selects no bin of "
                          f"{t[0]:.2f}..{t[-1]:.2f} ms")
     # An all-NaN row is a position the scope never wrote (see batch_flow); it
-    # comes back NaN and is excluded by the isfinite masks below.
+    # comes back NaN and the fit excludes it.
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "Mean of empty slice")
         vx = np.nanmean(data["v_X"][:, win], axis=1)
         vy = np.nanmean(data["v_Y"][:, win], axis=1)
-    px, py = data["pos_x"], data["pos_y"]
-
-    grid = np.arange(-search_cm, search_cm + step_cm / 2, step_cm)
-    best = None
-    for cx in grid:
-        for cy in grid:
-            r = np.hypot(px - cx, py - cy)
-            keep = (r > r_min) & (r < r_max) & np.isfinite(vx) & np.isfinite(vy)
-            if keep.sum() < 50:
-                continue
-            vr, vt = polar_components(vx[keep], vy[keep], px[keep], py[keep],
-                                      (cx, cy))
-            ratio = np.mean(np.abs(vr)) / (np.mean(np.abs(vt)) + 1e-12)
-            if best is None or ratio < best[0]:
-                best = (ratio, float(cx), float(cy))
-    if best is None:
-        raise ValueError("no candidate centre had enough valid cells in the "
-                         f"annulus {r_min}-{r_max} cm")
-    return best[1], best[2], best[0]
+    return _fit_centre(vx, vy, data["pos_x"], data["pos_y"])
 
 
 def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
