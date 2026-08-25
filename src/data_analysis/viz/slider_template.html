@@ -35,7 +35,7 @@
     color: var(--ink);
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
-  main { max-width: 1180px; margin: 0 auto; }
+  main { max-width: 1600px; margin: 0 auto; }
   h1 { font-size: 1.3rem; margin: 0 0 0.4rem; font-weight: 600; }
   .banner { color: var(--muted); font-size: 0.82rem; margin-bottom: 0.8rem; }
   /* Second banner line: per-item text (channel descriptions), set apart from
@@ -85,7 +85,7 @@
      whether its row is full or not. */
   #panels {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
     gap: 1rem;
   }
   figure {
@@ -158,7 +158,7 @@ const IS_PLANE = DATA.geometry === "plane";
 
 // Canvas geometry. The canvas is drawn at this fixed pixel size and scaled to
 // the panel width by CSS, so layout math never depends on the viewport.
-const PAD = { left: 58, right: 66, top: 10, bottom: 42 };
+const PAD = { left: 58, right: 66, top: 24, bottom: 42 };
 const PLOT_W = 420;
 const PLOT_H = IS_PLANE ? 360 : 260;
 const CANVAS_W = PAD.left + PLOT_W + PAD.right;
@@ -668,6 +668,9 @@ function drawPlanePanel(ctx, panel, p, i) {
  */
 const ARROW_HEAD = 0.32, ARROW_ANGLE = 0.42, ARROW_HEAD_MAX_PX = 8;
 
+// All-frame arrow peak, keyed "<group>:<panel>" like globalLimits.
+const globalPeaks = new Map();
+
 /**
  * Arrows over a plane panel, if this panel carries a vector overlay.
  *
@@ -691,12 +694,30 @@ function drawVectors(ctx, panel, p, i) {
   const nx = DATA.x.values.length, ny = DATA.y.values.length;
   const { cw, ch } = cellSize();
 
-  let peak = 0;
-  for (let iy = 0; iy < ny; iy += step) {
-    for (let ix = 0; ix < nx; ix += step) {
-      const a = u[iy][ix], b = v[iy][ix];
-      if (isNum(a) && isNum(b)) peak = Math.max(peak, Math.hypot(a, b));
+  const framePeak = (uf, vf) => {
+    let m = 0;
+    for (let iy = 0; iy < ny; iy += step) {
+      for (let ix = 0; ix < nx; ix += step) {
+        const a = uf[iy][ix], b = vf[iy][ix];
+        if (isNum(a) && isNum(b)) m = Math.max(m, Math.hypot(a, b));
+      }
     }
+    return m;
+  };
+
+  let peak;
+  if (scaleSelect.value === "frame") {
+    peak = framePeak(u, v);
+  } else {
+    const key = `${groupSelect.value}:${p}`;
+    if (!globalPeaks.has(key)) {
+      let m = 0;
+      for (let f = 0; f < cubes[p][0].length; f++) {
+        m = Math.max(m, framePeak(cubes[p][0][f], cubes[p][1][f]));
+      }
+      globalPeaks.set(key, m);
+    }
+    peak = globalPeaks.get(key);
   }
   if (!peak) return;                       // nothing finite to draw this frame
   const scale = (step * Math.min(cw, ch)) / peak;

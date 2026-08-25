@@ -1,9 +1,17 @@
 """Mar-2026 run 054: calibrated Mach-probe flow over the 21x21 P29 plane.
 
-Applies the Jun-2026 ``17-20-mach-calibration.npz`` area ratios to the Mar-2026
-coarse plane. kappa binds to the **probe**, not the port or the campaign -- the
-same 6-tip probe was moved from P33 to P29 -- so no Mar-2026 recalibration is
-needed, and the calibration file it came from is recorded in the npz.
+Applies the Mar-2026 ``055-056-mach-calibration.npz`` area ratios
+(``Mar2026_mach_cal``) to the coarse plane. Runs 055/056 rotate this probe 180
+deg at (0,0) with the bias off, on the same day and port as run 054, so both
+axes' kappa come from a rotation pair rather than an assumption.
+
+**This replaced the Jun-2026 calibration**, which was used first on the rule
+that kappa binds to the probe rather than the port. That rule holds, but
+Jun-2026 could only reach kappa_X through its no-x-flow assumption (x/÷1.458 --
+the weakest number in that file), and the value it gave, 1.9077 against the
+rotation pair's 0.833, put a spurious uniform -0.19 on every M_X in the plane.
+That was the constant pre-bias offset the maps showed. The 055/056 pair measures
+both axes to x/÷1.02, so nothing here rests on an assumed-zero flow.
 
 Two stages, because the read is the expensive part:
 
@@ -70,7 +78,9 @@ DATA_DIR = r"D:\data\LAPD\Mar26-data"
 IFN = os.path.join(
     DATA_DIR,
     "054-mach-4tip-p29-xycoarse-varbias-p30Vmax 2026-03-06 14.42.54.hdf5")
-CAL_NPZ = r"D:\data\LAPD\jun2026-jia\17-20-mach-calibration.npz"
+#: Same-campaign calibration, written by ``Mar2026_mach_cal`` from runs 055/056
+#: (module docstring for why this replaced the Jun-2026 file).
+CAL_NPZ = os.path.join(DATA_DIR, "055-056-mach-calibration.npz")
 
 #: Subdirectory under the output root that this campaign's renders land in.
 FIG_SUBDIR = "Mar-2026"
@@ -467,27 +477,7 @@ def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
         params={"bin": f"{float(data['bin_ms']):g} ms",
                 "shots/position": int(data["nshot"]),
                 "T_e assumed": f"{float(data['te_ev']):g} eV",
-                "calibration": str(data["calibration_file"]),
-                "multi-electrode bias": f"{bias[0]:g}-{bias[1]:g} ms",
-                "signal above floor": f"through {last_ok:.2f} ms machine "
-                                      f"({int(rel.sum())}/{rel.size} bins)",
-                "DAQ trigger": f"{float(data['daq_trigger_ms']):g} ms "
-                               f"(slider shows machine time)",
-                "arrow decimation": f"every {quiver_step} cell(s)",
-                # Coordinates are NOT shifted -- only the v_r/v_theta
-                # projection uses this point.
-                "v_r/v_theta centre": f"({cx:+.2f}, {cy:+.2f}) cm, fitted over "
-                                      f"the bias window "
-                                      f"(|v_r|/|v_theta| = {ratio:.2f})"},
-        details=_kappa_note(data),
-        warning=(f"Plasma decays during the record: past {last_ok:.1f} ms the "
-                 f"summed tip current is under "
-                 f"{float(data['min_signal_frac']):.0%} of peak and the Mach "
-                 f"number is a ratio of two decayed traces -- it stays finite "
-                 f"and drifts smoothly, but it is NOT a flow measurement. "
-                 + _te_note(data) + ". " + _weakest_axis_note(data)
-                 + " No axial (v_Z) panel: the Z tips were never digitized "
-                   "in this run."),
+                "multi-electrode bias": f"{bias[0]:g}-{bias[1]:g} ms"},
         quiver_step=quiver_step, vmax=vmax, extra_fields=extra)
 
 

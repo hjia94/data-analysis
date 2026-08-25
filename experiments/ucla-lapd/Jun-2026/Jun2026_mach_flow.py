@@ -355,25 +355,13 @@ def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
         out or slider_path(name),
         pos_x=data["pos_x"], pos_y=data["pos_y"], vx=vx, vy=vy,
         v_r=v_r, v_th=v_th,
-        # t=0 is bias start in this run, so the stored axis is already the
-        # frame a reader wants; nothing to convert.
         t_axis=data["t_ms"], axis_label="time",
         title=f"Run {run_num_of(str(data['source_file']))} - "
               f"calibrated Mach flow, P33 plane",
         source=str(data["source_file"]),
         params={"bin": f"{float(data['bin_ms']):g} ms",
                 "shots/position": int(data["nshot"]),
-                "T_e assumed": f"{float(data['te_ev']):g} eV",
-                "calibration": str(data["calibration_file"]),
-                "arrow decimation": f"every {quiver_step} cells",
-                # Coordinates are NOT shifted -- only the v_r/v_theta
-                # projection uses this point.
-                "v_r/v_theta centre":
-                    f"({cx:+.2f}, {cy:+.2f}) cm, fitted over "
-                    f"{CENTRE_FIT_MS[0]:g}-{CENTRE_FIT_MS[1]:g} ms "
-                    f"(|v_r|/|v_theta| = {ratio:.2f})"},
-        details=_kappa_note(data),
-        warning=_te_note(data) + ". " + _weakest_axis_note(data),
+                "T_e assumed": f"{float(data['te_ev']):g} eV"},
         quiver_step=quiver_step, vmax=vmax, extra_fields=extra)
 
 
