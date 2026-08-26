@@ -244,17 +244,9 @@ def read_lp_positions(fn, motion_group_name=None, interactive=False):
     axes (for a line scan one of them is a single value) and ``shot_nums`` is the
     shot number of every shot this group owns, position-major.
 
-    ``pos_array`` holds only this group's **live** rows. Where two probes scan
-    sequentially into one file, each group's array is padded with ``shot_num==0``
-    for the shots the *other* probe owns; those rows sit at the null coordinate,
-    so leaving them in makes the leading-run ``nshot`` heuristic below count
-    padding as one long first position (measured: 4805 instead of 5 for the
-    second probe of a two-phase plane).
-
     With more than one motion group the caller must say which one it means:
     ``motion_group_name``, or ``interactive=True`` for the notebook picker.
-    Defaulting would silently stamp one probe's coordinates onto the other's
-    signals -- shapes and x values match, so nothing errors.
+    ``pos_array`` holds only the selected motion group's **live** rows.
     """
     with h5py.File(fn, "r") as f:
         if "Control/Positions" not in f:
@@ -286,9 +278,7 @@ def read_lp_positions(fn, motion_group_name=None, interactive=False):
         raw = mg["positions_array"][:]
         setup = mg["positions_setup_array"][:]  # planned unique positions
 
-    # shot_num == 0 is the pydaq padding convention (verified campaign-wide: the
-    # null coordinate never collides with a real measured position). Reads select
-    # by shot NUMBER, so the live rows need not be contiguous or start at row 0.
+
     pos_array = raw[raw["shot_num"] != 0]
     if pos_array.size == 0:
         raise ValueError(
@@ -302,8 +292,6 @@ def read_lp_positions(fn, motion_group_name=None, interactive=False):
     xpos = np.unique(np.round(setup["x"], 3))
     ypos = np.unique(np.round(setup["y"], 3))
 
-    # nshot = number of leading shots at the first position (first row where the
-    # position changes; whole run if it never does).
     x = np.round(pos_array["x"], 2)
     y = np.round(pos_array["y"], 2)
     same = (x == x[0]) & (y == y[0])
@@ -321,20 +309,12 @@ def read_lp_positions(fn, motion_group_name=None, interactive=False):
 def _read_reshaped(run, scope_name, I_chan, V_chan, pos, pos_index=None):
     """Read one probe tip's V and I into ``(npos, nshot, nsamples)`` arrays.
 
-    Shared core for :func:`get_IV_arr` and :func:`get_IV_at_position`.  ``pos`` is
-    the tip's :class:`ProbePositions`.  Voltage is left as-is (LAPD_DAQ folds the
-    probe attenuation into the scope ``vertical_gain``, so this is already true
-    probe volts); current is scaled to current density via
-    ``I_SIGN``/``RESISTOR``/``Aprobe``.  Returns ``(tarr, V3d, I3d)``, both 3-D.
-
     Both paths select by recorded shot number
     (:func:`data_analysis.io.position_shots`), so the whole-run read and the
     single-position read return the same rows for the same position.
 
-    * ``pos_index=None`` -> the whole run's ``npos*nshot`` shots, reshaped to
-      ``(npos, nshot, nsamples)``.
-    * ``pos_index=k``    -> only that position's ``nshot`` shots read off disk,
-      reshaped to ``(1, nshot, nsamples)``.
+    * ``pos_index=None`` -> the whole run's ``npos*nshot`` shots, reshaped to ``(npos, nshot, nsamples)``.
+    * ``pos_index=k``    -> only that position's ``nshot`` shots, reshaped to ``(1, nshot, nsamples)``.
     """
     npos, nshot = pos.npos, pos.nshot
     if pos_index is None:

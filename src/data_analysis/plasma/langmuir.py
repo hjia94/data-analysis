@@ -520,20 +520,7 @@ def _eval_polyfit(coeffs, V):
 def analyze_IV(voltage, current, plot=False, calibrated=True):
     """Analyze one IV curve; returns ``(Vp, Te, ne)``.
 
-    ``ne`` is built from ``I_esat``, the current where the transition and Esat
-    fit lines cross.  ``Vp`` is that crossing's voltage, reported separately and
-    rejected on its own criteria -- a ``nan`` Vp does not invalidate ``ne``, and
-    a negative Vp is physical.
-
-    ``calibrated`` selects what ``ne`` *is*, and therefore its units:
-
-    * ``True`` (default): ``I_esat`` itself [A/cm^2], a relative proxy
-      independent of the noisy per-shot Te.  Absolute scale comes from the
-      downstream interferometer calibration (:func:`calibrate_plasma_npz`),
-      which supplies the cm^-3 units -- do not read this value as a density.
-    * ``False``: a density [cm^-3] via :func:`ne_from_esat` (``I_esat/(e*vth)``),
-      for runs with no interferometer.  Carries the Te fit's per-shot scatter,
-      and is ``nan`` wherever Te was rejected.
+    ``calibrated`` refers to against interferometer
 
     Both are the same current density up to the Te factor; the units differ, so
     callers that mix runs must not plot them on one axis.
@@ -674,10 +661,6 @@ def analyze_IV(voltage, current, plot=False, calibrated=True):
     
     d_esat = _apply_linear_fit(esat_volt, esat_curr)
 
-    # Intersection of the two fit lines.  Both lines pass through it, so I_esat
-    # is evaluated *at* V_cross -- never at abs(V_cross), which is a different
-    # point on the Esat line and, for a negative crossing, one where the line
-    # has no physical meaning.
     denom = d_esat[0] - c_trans[0]
     if abs(denom) < DENOM_THRESHOLD:
         V_cross = np.nan
@@ -685,18 +668,10 @@ def analyze_IV(voltage, current, plot=False, calibrated=True):
     else:
         V_cross = (d_esat[1] - c_trans[1]) / denom
         I_esat = _eval_polyfit(d_esat, np.array([V_cross]))[0]
-        # Isat is subtracted above, so the current where the two fit lines meet
-        # is positive whenever both fits are sound; <= 0 means one of them is
-        # not (noise-dominated trace).  NaN keeps the point out of the profile
-        # and out of the interferometer calibration rather than pulling the
-        # chord average down with a negative density.
+
         if I_esat <= 0:
             I_esat = np.nan
 
-    # Vp is the reported plasma potential -- the same crossing, but a separate
-    # output.  A |Vp| beyond the sweep's reach means the two slopes were too
-    # close to locate it; that invalidates Vp alone.  I_esat stays: it is the
-    # current where the fits meet, and a negative Vp is physical.
     Vp = np.nan if abs(V_cross) >= VP_MAX_V else V_cross
 
     # === DIAGNOSTIC PLOT 2: VP INTERSECTION ===
@@ -750,10 +725,6 @@ def analyze_IV_safe(voltage, current, file_name="", verbose=False, calibrated=Tr
         return Vp, Te, ne
         
     except Exception as e:
-        # Any exception raised by analyze_IV (e.g. unreachable amplitude
-        # threshold, failed exponential fit) is caught here. Print the id and
-        # the specific error message. (Note: an out-of-range Te per TE_MAX_EV is
-        # flagged as NaN inside analyze_IV, not raised, so it returns normally.)
         if verbose:
             print(f"[{file_name}] Analysis failed: {e}")
 
@@ -773,20 +744,11 @@ def prepare_sweep_data(tarr, Vswp_arr, Iswp_arr, padding=10, trim_percent=10,
     sample axis.  ``Vswp_arr`` is ``(npos, nsamples)`` (shot-averaged) and
     ``Iswp_arr`` is ``(npos, nshot, nsamples)``.
 
-    Returns ``(Vswp_arr_rs, Iswp_arr_rs, data_timestamp, sweep_t_start,
-    sweep_t_stop)`` -- the reshaped sweep arrays ready for
-    :func:`process_iv_and_save`, one representative timestamp per sweep (the
-    middle of each detected sweep), and each sweep's start/stop time on the
-    scope time base.  The windows let :func:`calibrate_plasma_npz` average the
-    interferometer over the exact extent of each sweep; ``data_timestamp`` is
-    still their midpoint.
     """
     start_t_ls, stop_t_ls = find_sweep_indices(Vswp_arr[0], padding=padding)
 
     mid_indices = [(start + stop) // 2 for start, stop in zip(start_t_ls, stop_t_ls)]
     data_timestamp = tarr[mid_indices]
-    # Backstop: a duplicate/out-of-order sweep axis must fail here, at
-    # generation, not later in a plot bundle validator.
     if not np.all(np.diff(data_timestamp) > 0):
         raise ValueError(
             "data_timestamp is not strictly increasing -- non-monotonic tarr, "
@@ -866,11 +828,6 @@ def process_iv_and_save(voltage_data, current_data, save_path, calibrated=True):
                 # Analyze trace
                 Vp, Te, ne = analyze_IV_safe(V_trace, I_trace, file_name=trace_id,
                                              calibrated=calibrated)
-
-                # Each quantity is kept or dropped on its own: an out-of-range Vp
-                # does not invalidate the density (they come from the same fit
-                # intersection but fail independently), and mean_sem filters the
-                # NaNs per-quantity.  fail_count tracks ne, the pipeline's output.
                 if np.isnan(ne):
                     fail_count += 1
                 temp["Vp"].append(Vp)
