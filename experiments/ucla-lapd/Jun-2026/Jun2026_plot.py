@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 
 from data_analysis.io import open_lapd, parse_gas_puff
 from data_analysis.plasma.langmuir import (
-    load_plasma_data, load_ne_calibrated, load_sweep_axes, tip_tag)
+    load_plasma_data, load_ne, load_sweep_axes, tip_tag)
 from data_analysis.signal.core import downsample_blockmean
 from data_analysis.utils import run_num_of
 from data_analysis.viz import plot_utils
@@ -145,25 +145,28 @@ def discover_tips(ifn):
 #  Figure: IV line-scan (Vp / Te / ne vs x + Isat reference)
 # =========================================================================== #
 
-def _draw_iv_panels(axs4, Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, title):
+def _draw_iv_panels(axs4, Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, title,
+                    ne_unit="cm$^{-3}$"):
     """Draw the Vp / Te / ne / Te*ne vs x panels at the selected sweep times.
 
     ``axs4`` is the four axes to draw into (Vp, Te, ne, Te*ne, top to bottom).
     The fourth panel is the pressure-like product Te*ne derived from the Te and
     ne arrays (panels 2 and 3).  Each ``tndx_list`` time index is plotted in a
     rainbow colour across all four panels; the title goes on the top panel and
-    the x-label on the bottom one.  Returns ``marked_times`` -- the
-    ``(colour, time_ms)`` of each drawn time, so a caller (the IV line-scan's
-    Isat panel) can mark the same instants elsewhere.  Shared by
-    :func:`plot_iv_line` and :func:`plot_iv_isat_combined` so the line-scan
-    styling lives in one place.
+    the x-label on the bottom one.  ``ne_unit`` labels the ne (and Te*ne)
+    panel: the default fits the interferometer-calibrated array; pass
+    ``"A/cm$^2$"`` when plotting the raw ``analyze_IV`` proxy.  Returns
+    ``marked_times`` -- the ``(colour, time_ms)`` of each drawn time, so a
+    caller (the IV line-scan's Isat panel) can mark the same instants
+    elsewhere.  Shared by :func:`plot_iv_line` and :func:`plot_iv_isat_combined`
+    so the line-scan styling lives in one place.
     """
     colors = plt.cm.rainbow(np.linspace(0, 1, len(tndx_list)))
     Tene_arr = Te_arr * ne_arr   # pressure-like product, derived from panels 2-3
     panels = [(axs4[0], Vp_arr, "Vp [V]", "o-"),
               (axs4[1], Te_arr, "Te [eV]", "s-"),
-              (axs4[2], ne_arr, "ne [cm$^{-3}$]", "^-"),
-              (axs4[3], Tene_arr, "Te*ne [eV cm$^{-3}$]", "D-")]
+              (axs4[2], ne_arr, f"ne [{ne_unit}]", "^-"),
+              (axs4[3], Tene_arr, f"Te*ne [eV {ne_unit}]", "D-")]
 
     marked_times = []
     for color, t_idx in zip(colors, tndx_list):
@@ -202,7 +205,7 @@ def _draw_iv_panels(axs4, Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, title):
 
 def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
                  show=False, title=None, isat=None, fft=None,
-                 fft_fmax_khz=80.0):
+                 fft_fmax_khz=80.0, ne_unit="cm$^{-3}$"):
     """
     Plot the line scan: Vp, Te, and ne vs x at selected sweep (time) indices,
     plus a reference Isat trace.
@@ -237,7 +240,7 @@ def plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, tndx_list, save_fig=None,
     # one changed setting vs the baseline, e.g. "01: puff voltage 75V for 25ms").
     # The Isat panel marks the same instants the Vp/Te/ne/Te*ne panels show.
     marked_times = _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls,
-                                   tndx_list, title)
+                                   tndx_list, title, ne_unit=ne_unit)
     _draw_isat_panel(axs[4], isat, marked_times,
                      title=f"Isat reference (stationary probe, "
                            f"'{ISAT_SCOPE}'/{ISAT_CHAN}, single shot @ mid position)")
@@ -380,24 +383,9 @@ def _read_isat_fft(ifn, fft_npz=None):
         return None
 
 
-def _load_ne(data_dir, run_num, load_tip, raw_ne, calibrated):
-    """Pick the ne to plot: interferometer-calibrated if available, else raw.
-
-    ``calibrated`` True swaps in ``ne_cal_arr`` (written by
-    :func:`data_analysis.plasma.langmuir.calibrate_plasma_npz`).  If the run
-    hasn't been calibrated yet the plasma npz has no calibrated array, so we
-    fall back to ``raw_ne`` (the array from :func:`load_plasma_data`) and print
-    a note pointing at the calibration step.  ``calibrated`` False just returns
-    ``raw_ne``.
-    """
-    if not calibrated:
-        return raw_ne
-    try:
-        return load_ne_calibrated(data_dir, run_num, tip=load_tip)[0]
-    except KeyError:
-        print(f"  (ne: run {run_num}{tip_tag(load_tip)} not calibrated yet -- "
-              "plotting raw ne; run Jun2026_IV.calibrate_plasma_npz to calibrate)")
-        return raw_ne
+def _ne_unit(is_density):
+    """Mathtext unit for an ne array by its :func:`load_ne` unit flag."""
+    return "cm$^{-3}$" if is_density else "A/cm$^2$"
 
 
 def _plot_iv_line_tip(data_dir, run_num, tip, tndx_list=None, save_fig=True,
@@ -412,11 +400,12 @@ def _plot_iv_line_tip(data_dir, run_num, tip, tndx_list=None, save_fig=True,
     blank panel.  ``save_fig`` True routes the PNG through :func:`fig_path`;
     pass a path to override, or False to skip saving.  ``calibrated`` True
     (default) plots the interferometer-calibrated ne when it exists, falling
-    back to raw ne otherwise (see :func:`_load_ne`).
+    back to raw ne otherwise (see :func:`data_analysis.plasma.langmuir.load_ne`).
     """
     load_tip = None if tip in (None, "override") else tip
-    Vp_arr, Te_arr, ne_arr, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=load_tip)
-    ne_arr = _load_ne(data_dir, run_num, load_tip, ne_arr, calibrated)
+    Vp_arr, Te_arr, raw_ne, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=load_tip)
+    ne_arr, ne_cal = load_ne(data_dir, run_num, raw_ne, tip=load_tip,
+                             prefer_calibrated=calibrated)
     xpos, *_ = load_sweep_axes(data_dir, run_num, tip=load_tip)
 
     ndx = tndx_list if tndx_list is not None else list(
@@ -425,7 +414,7 @@ def _plot_iv_line_tip(data_dir, run_num, tip, tndx_list=None, save_fig=True,
     name = f"{run_num}{tip_tag(load_tip)}-line"
     plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, ndx,
                  save_fig=_resolve_save(save_fig, name), show=show,
-                 title=title, isat=isat, fft=fft)
+                 title=title, isat=isat, fft=fft, ne_unit=_ne_unit(ne_cal))
 
 
 def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=False,
@@ -529,8 +518,9 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
     tndx_list = tndx_list if tndx_list is not None else [-7, -5, -3, -1]
 
     # Panels 1-3: IV arrays + axes from the IV run's saved .npz.
-    Vp_arr, Te_arr, ne_arr, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=iv_tip)
-    ne_arr = _load_ne(data_dir, run_num, iv_tip, ne_arr, calibrated)
+    Vp_arr, Te_arr, raw_ne, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=iv_tip)
+    ne_arr, ne_cal = load_ne(data_dir, run_num, raw_ne, tip=iv_tip,
+                             prefer_calibrated=calibrated)
     xpos, *_ = load_sweep_axes(data_dir, run_num, tip=iv_tip)
 
     # Panels 4-5: raw Isat (shot-averaged) + the all-shot-averaged FFT loaded
@@ -546,7 +536,8 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
     # description.  marked_times = the (colour, time) of each IV sweep instant,
     # scattered onto the Isat trace below.
     marked_times = _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls,
-                                   tndx_list, puff_title(iv_ifn))
+                                   tndx_list, puff_title(iv_ifn),
+                                   ne_unit=_ne_unit(ne_cal))
 
     # Panel 5: Isat raw, shot-averaged, 0..isat_tmax_ms; y clipped to 0..1.  The
     # IV sweep instants are scattered on the line, coloured to match the IV panels.

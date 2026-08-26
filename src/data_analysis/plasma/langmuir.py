@@ -314,68 +314,87 @@ def EEPF(I, V, smooth=True, plot=False):
 #===========================================================================================================
 def find_sweep_indices(V, padding=10):
     """
-    Extracts start and stop indices for pulsed voltage sweeps of any size, 
-    duration, baseline, or polarity.
+    Extracts start and stop indices for pulsed voltage sweeps of any size,
+    duration, baseline, or polarity.  Emits one window per *physical* sweep:
+    duplicate peaks on one ramp are merged and partial edge sweeps dropped
+    here, so windows, timestamps and reshaped arrays always describe the same
+    sweeps.  Raises ``ValueError`` when no sweep is found.
     """
     # 0. FORCE 1D ARRAY: This strips out any hidden dimensions (like (N, 1) -> (N,))
     V = np.asarray(V).flatten()
-    
+
     # 1. Dynamically find the resting baseline.
     baseline = np.median(V)
-    
+
     # 2. "Rectify" the signal. By taking the absolute difference from the baseline,
     # all sweeps become positive spikes starting from 0.
     rectified_V = np.abs(V - baseline)
-    
+
     # 3. Dynamically set a noise floor.
     # FORCE FLOAT: Wrapping this in float() guarantees SciPy reads it as a single scalar number,
     # preventing the "interval border must match x" ValueError.
     noise_floor = float(np.max(rectified_V) * 0.10)
-    
+
     # 4. Find the tips of the triangles
     peaks, _ = find_peaks(rectified_V, prominence=noise_floor, distance=10)
-    
+
     if len(peaks) == 0:
-        print("No prominent sweeps found in this data.")
-        return [], []
-    
+        raise ValueError("No prominent sweeps found in this data.")
+
     # 5. Find the base of each peak (98% of the way down from the tip)
-    widths, width_heights, left_ips, right_ips = peak_widths(rectified_V, peaks, rel_height=0.98)
-    
-    # 6. Extract the start (left) and stop (right) indices.
-    start_t_ls = np.maximum(0, np.floor(left_ips) - padding).astype(int).tolist()
-    stop_t_ls = np.minimum(len(V) - 1, np.ceil(right_ips) + padding).astype(int).tolist()
-    
-    return start_t_ls, stop_t_ls
+    _, _, left_ips, right_ips = peak_widths(rectified_V, peaks, rel_height=0.98)
+
+    # 6. Merge overlapping windows.  distance=10 above is far smaller than a
+    # sweep, so a noisy ramp apex can register two peaks whose 98%-height bases
+    # coincide -- the same physical sweep twice.  Overlap is judged on the
+    # unpadded ips so +/-padding cannot glue genuinely adjacent pulses.
+    windows = sorted(zip(left_ips, right_ips))
+    merged = [list(windows[0])]
+    for lo, hi in windows[1:]:
+        if lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    if len(merged) < len(windows):
+        print(f"Merged {len(windows) - len(merged)} duplicate sweep window(s).")
+
+    # 7. Pad into integer windows, then drop partial sweeps.  All pulses share
+    # one length, so a window much shorter than the longest is a ramp cut off
+    # at the record edge.  Dropping it here (not in reshape_IV) keeps every
+    # downstream per-sweep axis -- timestamps, calibration windows, reshaped
+    # arrays -- in step.
+    lo, hi = np.array(merged).T
+    start = np.maximum(0, np.floor(lo).astype(int) - padding)
+    stop = np.minimum(len(V) - 1, np.ceil(hi).astype(int) + padding)
+    full = (stop - start) >= 0.5 * (stop - start).max()
+    if not full.all():
+        print(f"Dropped {(~full).sum()} partial sweep(s) at the record edge.")
+
+    return start[full].tolist(), stop[full].tolist()
 
 def reshape_IV(Vsweep_arr, Isweep_arr, start_t_ls, stop_t_ls, trim_percent=1.0):
     """
     Slices the raw arrays into individual sweeps and trims a percentage off each
     edge to remove switching noise.
 
-    All voltage pulses have the same length, so a sweep that comes out
-    significantly shorter than the rest is a partial ramp at the edge of the
-    record (the digitizer started or stopped mid-pulse); it is dropped.  The
-    remaining sweeps are sliced to a common length so they stack into one array.
+    One output sweep per input window: ``find_sweep_indices`` already merged
+    duplicates and dropped partial edge sweeps, so nothing is dropped here --
+    the sweep axis stays aligned with the windows (and any timestamps derived
+    from them).  Windows are sliced to the common minimum length so they stack
+    into one array.
     """
     lengths = np.array([stop - start for start, stop in zip(start_t_ls, stop_t_ls)])
-
-    # Drop partial sweeps (much shorter than a full pulse); keep the rest.
-    keep = lengths >= 0.5 * lengths.max()
-    sweep_len = int(lengths[keep].min())
+    sweep_len = int(lengths.min())
     trim_points = int(sweep_len * (trim_percent / 100.0))
     final_len = sweep_len - (2 * trim_points)
 
-    print(f"Sweep length: {sweep_len} points "
-          f"({(~keep).sum()} partial sweep(s) dropped).")
+    print(f"Sweep length: {sweep_len} points.")
     print(f"Trimming {trim_percent}% ({trim_points} points) from each end.")
     print(f"Final sweep length stacked: {final_len} points.")
 
     I_chunks = []
     V_chunks = []
-    for start, kept in zip(start_t_ls, keep):
-        if not kept:
-            continue
+    for start in start_t_ls:
         a = start + trim_points
         b = a + final_len
         I_chunks.append(Isweep_arr[:, :, a:b])
@@ -403,8 +422,7 @@ ESAT_THRESHOLD_PCT = 0.80  # Electron saturation region at 80% of max amplitude
 
 # Physical parameter limits
 TE_MAX_EV = 10  # Flag Te as unreasonable if > 10 eV
-TE_DUMMY_EV = 0.1  # Placeholder constant (deprecated - no longer used)
-VP_MAX_V = 100  # Flag Vp as unreasonable if > 100 V (extreme voltage limit)
+VP_MAX_V = 100  # Flag Vp as unreasonable if |Vp| > 100 V (Vp itself may be negative)
 
 # Boundary detection parameters
 MIN_ISAT_IDX = 5  # Minimum index to avoid edge effects when fitting Isat region
@@ -420,6 +438,28 @@ MIN_STOP_IDX_GAP = 5  # Minimum gap between start_idx and stop_idx for transitio
 EXP_FIT_MAXFEV = 5000  # Maximum number of iterations for exponential curve_fit optimization
 LIN_FIT_ORDER = 1  # Polynomial order for linear fits (1 = linear, 2 = quadratic, etc.)
 DENOM_THRESHOLD = 1e-10  # Tolerance threshold to avoid division by zero when computing Vp intersection
+
+
+def ne_from_esat(I_esat, Te):
+    """Density [cm^-3] from an electron-saturation current density and Te.
+
+    ``I_esat`` [A/cm^2] is the current where ``analyze_IV``'s transition and Esat
+    fit lines cross; ``Te`` [eV].  Both may be arrays.
+    ``ne = I_esat / (e * vth)``, ``vth = sqrt(e*Te/m_e)`` -- the LAPD LP recipe
+    this pipeline has always used.  Non-positive or non-finite Te -> ``nan``
+    (never a placeholder Te: a fabricated value yields a real-looking density).
+
+    Absolute scale is only as good as ``Aprobe`` and the ``vth`` convention:
+    this omits the standard flux-average factor sqrt(2*pi)/4 ~ 0.63, so it is a
+    consistent relative measure, not an absolute density.  Prefer
+    :func:`calibrate_plasma_npz` when interferometer data exists.
+    """
+    Te = np.asarray(Te, dtype=float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        vth_cm = np.sqrt(constants.e * Te / constants.m_e) * 100  # m/s -> cm/s
+        return np.where(Te > 0, np.asarray(I_esat, dtype=float) / (vth_cm * constants.e),
+                        np.nan)
+
 
 def exponential_func(V, a, b):
     return a * np.exp(b * V)
@@ -477,8 +517,27 @@ def _eval_polyfit(coeffs, V):
     """Evaluate polynomial fit at given voltages."""
     return np.polyval(coeffs, V)
 
-def analyze_IV(voltage, current, plot=False):
-    """Main function to analyze IV curve and extract Vp, Te, ne."""
+def analyze_IV(voltage, current, plot=False, calibrated=True):
+    """Analyze one IV curve; returns ``(Vp, Te, ne)``.
+
+    ``ne`` is built from ``I_esat``, the current where the transition and Esat
+    fit lines cross.  ``Vp`` is that crossing's voltage, reported separately and
+    rejected on its own criteria -- a ``nan`` Vp does not invalidate ``ne``, and
+    a negative Vp is physical.
+
+    ``calibrated`` selects what ``ne`` *is*, and therefore its units:
+
+    * ``True`` (default): ``I_esat`` itself [A/cm^2], a relative proxy
+      independent of the noisy per-shot Te.  Absolute scale comes from the
+      downstream interferometer calibration (:func:`calibrate_plasma_npz`),
+      which supplies the cm^-3 units -- do not read this value as a density.
+    * ``False``: a density [cm^-3] via :func:`ne_from_esat` (``I_esat/(e*vth)``),
+      for runs with no interferometer.  Carries the Te fit's per-shot scatter,
+      and is ``nan`` wherever Te was rejected.
+
+    Both are the same current density up to the Te factor; the units differ, so
+    callers that mix runs must not plot them on one axis.
+    """
     sort_idx = np.argsort(voltage)
     V = voltage[sort_idx]
     I_raw = current[sort_idx]
@@ -574,13 +633,10 @@ def analyze_IV(voltage, current, plot=False):
     # 4b. Check for Unreasonable Te
     # ==========================================
     if Te > TE_MAX_EV or Te <= 0:  # Hard threshold
-        Te = np.nan  # Flag returned Te as NaN
-        Te_calc = TE_DUMMY_EV  # Use dummy value for ne calculation
-    else:
-        Te_calc = Te
+        Te = np.nan  # Flag returned Te as NaN (ne below does not use Te)
 
     # ==========================================
-    # 5. Find Vp by two linear fit and cross point
+    # 5. Cross point of the transition and Esat linear fits -> I_esat, Vp
     # ==========================================
     I_sub_max = np.max(I_sub)
     trans_upper_thresh = I_sub_max * TRANS_UPPER_PCT
@@ -618,17 +674,30 @@ def analyze_IV(voltage, current, plot=False):
     
     d_esat = _apply_linear_fit(esat_volt, esat_curr)
 
-    # Compute Vp from intersection
+    # Intersection of the two fit lines.  Both lines pass through it, so I_esat
+    # is evaluated *at* V_cross -- never at abs(V_cross), which is a different
+    # point on the Esat line and, for a negative crossing, one where the line
+    # has no physical meaning.
     denom = d_esat[0] - c_trans[0]
     if abs(denom) < DENOM_THRESHOLD:
-        Vp = np.nan
-        I_Vp = np.nan
+        V_cross = np.nan
+        I_esat = np.nan
     else:
-        Vp = abs((d_esat[1] - c_trans[1]) / denom) 
-        I_Vp = _eval_polyfit(d_esat, np.array([Vp]))[0]
+        V_cross = (d_esat[1] - c_trans[1]) / denom
+        I_esat = _eval_polyfit(d_esat, np.array([V_cross]))[0]
+        # Isat is subtracted above, so the current where the two fit lines meet
+        # is positive whenever both fits are sound; <= 0 means one of them is
+        # not (noise-dominated trace).  NaN keeps the point out of the profile
+        # and out of the interferometer calibration rather than pulling the
+        # chord average down with a negative density.
+        if I_esat <= 0:
+            I_esat = np.nan
 
-    if Vp >= VP_MAX_V:  # Unreasonable Vp; hard threshold
-        Vp = np.nan
+    # Vp is the reported plasma potential -- the same crossing, but a separate
+    # output.  A |Vp| beyond the sweep's reach means the two slopes were too
+    # close to locate it; that invalidates Vp alone.  I_esat stays: it is the
+    # current where the fits meet, and a negative Vp is physical.
+    Vp = np.nan if abs(V_cross) >= VP_MAX_V else V_cross
 
     # === DIAGNOSTIC PLOT 2: VP INTERSECTION ===
     if plot:
@@ -644,9 +713,10 @@ def analyze_IV(voltage, current, plot=False):
         plt.plot(trans_voltage, trans_current, 'o', color='tab:red', label='Transition Data Points', markersize=5)
         plt.plot(esat_volt, esat_curr, 'o', color='tab:purple', label='Esat Data Points', markersize=5)
         
-        if not np.isnan(Vp):
-            plt.axvline(Vp, color='k', linestyle=':', linewidth=2, label=f'Vp = {Vp:.2f} V')
-            plt.plot(Vp, I_Vp, 'X', color='black', markersize=10)
+        if not np.isnan(V_cross):
+            plt.axvline(V_cross, color='k', linestyle=':', linewidth=2,
+                        label=f'Vp = {V_cross:.2f} V')
+            plt.plot(V_cross, I_esat, 'X', color='black', markersize=10)
         
         plt.ylim(np.min(I_sub) - 0.1 * np.max(I_sub), np.max(I_sub) * 1.1)
         plt.xlabel('Voltage (V)')
@@ -657,26 +727,26 @@ def analyze_IV(voltage, current, plot=False):
         plt.show()
 
     # ==========================================
-    # 6. Calculate Electron Density
+    # 6. Density
     # ==========================================
-    if Te_calc > 0:
-        vth_SI = math.sqrt(constants.e * Te_calc / constants.m_e) 
-        vth_cm = vth_SI * 100                     
-        ne = I_Vp / (vth_cm * constants.e)           
-    else:
-        ne = np.nan
+    # Calibrated path keeps Te out: the absolute scale comes from the
+    # interferometer, and dividing by a per-shot vth(Te) would only inject the
+    # Te fit's scatter into the profile.
+    ne = I_esat if calibrated else float(ne_from_esat(I_esat, Te))
 
     return (Vp, Te, ne)
 
-def analyze_IV_safe(voltage, current, file_name="", verbose=False):
+def analyze_IV_safe(voltage, current, file_name="", verbose=False, calibrated=True):
     """
-    Wrapper function to safely execute analyze_IV. 
-    Catches any fitting errors or data quality exceptions, logs them, 
+    Wrapper function to safely execute analyze_IV.
+    Catches any fitting errors or data quality exceptions, logs them,
     and returns NaNs to prevent the batch loop from crashing.
+
+    ``calibrated`` selects the ``ne`` convention -- see :func:`analyze_IV`.
     """
     try:
         # Try to run the main analysis function
-        Vp, Te, ne = analyze_IV(voltage, current)
+        Vp, Te, ne = analyze_IV(voltage, current, calibrated=calibrated)
         return Vp, Te, ne
         
     except Exception as e:
@@ -715,6 +785,12 @@ def prepare_sweep_data(tarr, Vswp_arr, Iswp_arr, padding=10, trim_percent=10,
 
     mid_indices = [(start + stop) // 2 for start, stop in zip(start_t_ls, stop_t_ls)]
     data_timestamp = tarr[mid_indices]
+    # Backstop: a duplicate/out-of-order sweep axis must fail here, at
+    # generation, not later in a plot bundle validator.
+    if not np.all(np.diff(data_timestamp) > 0):
+        raise ValueError(
+            "data_timestamp is not strictly increasing -- non-monotonic tarr, "
+            "or sweep detection emitted duplicate/out-of-order windows.")
     sweep_t_start = tarr[start_t_ls]
     sweep_t_stop = tarr[stop_t_ls]
     print(f"Number of sweeps: {len(data_timestamp)}")
@@ -741,7 +817,7 @@ def mean_sem(vals):
     return np.mean(vals), sem
 
 
-def process_iv_and_save(voltage_data, current_data, save_path):
+def process_iv_and_save(voltage_data, current_data, save_path, calibrated=True):
     """
     Loops through the multi-dimensional Langmuir probe dataset, extracting
     plasma parameters. Averages the valid shots for each location/sweep combination,
@@ -752,6 +828,10 @@ def process_iv_and_save(voltage_data, current_data, save_path):
     ``(n_locs, n_shots, n_sweeps, nsamples)`` -- the reshaped arrays from
     :func:`prepare_sweep_data`.  Returns
     ``(Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err)``.
+
+    ``calibrated`` selects the ``ne`` convention (:func:`analyze_IV`) and is
+    saved into the npz as ``ne_is_proxy``, so loaders know the units of
+    ``ne_arr`` without being told.
     """
     n_locs, n_shots, n_sweeps, _ = current_data.shape
 
@@ -784,16 +864,18 @@ def process_iv_and_save(voltage_data, current_data, save_path):
                 trace_id = f"Loc:{loc}|Shot:{sht}|Swp:{swp}"
 
                 # Analyze trace
-                Vp, Te, ne = analyze_IV_safe(V_trace, I_trace, file_name=trace_id)
+                Vp, Te, ne = analyze_IV_safe(V_trace, I_trace, file_name=trace_id,
+                                             calibrated=calibrated)
 
-                # A NaN Vp marks a failed fit; ne can also be NaN if Te was forced
-                # to 0, so mean_sem filters NaNs per-quantity below.
-                if np.isnan(Vp):
+                # Each quantity is kept or dropped on its own: an out-of-range Vp
+                # does not invalidate the density (they come from the same fit
+                # intersection but fail independently), and mean_sem filters the
+                # NaNs per-quantity.  fail_count tracks ne, the pipeline's output.
+                if np.isnan(ne):
                     fail_count += 1
-                else:
-                    temp["Vp"].append(Vp)
-                    temp["Te"].append(Te)
-                    temp["ne"].append(ne)
+                temp["Vp"].append(Vp)
+                temp["Te"].append(Te)
+                temp["ne"].append(ne)
 
             # Mean + standard error of the valid shots, identically for each quantity.
             for key, (arr, err) in arrs.items():
@@ -802,7 +884,8 @@ def process_iv_and_save(voltage_data, current_data, save_path):
         # Incremental save of all 6 arrays after every location.
         np.savez(save_path,
                  **{f"{k}_arr": arr for k, (arr, _) in arrs.items()},
-                 **{f"{k}_err": err for k, (_, err) in arrs.items()})
+                 **{f"{k}_err": err for k, (_, err) in arrs.items()},
+                 ne_is_proxy=calibrated)
 
         # Live running fail rate alongside the progress bar
         traces_done = (loc + 1) * n_sweeps * n_shots
@@ -908,6 +991,40 @@ def load_ne_calibrated(data_dir, run_num, tip=None):
         return ps_data["ne_cal_arr"], ps_data["cal_factor"]
 
 
+def load_ne(data_dir, run_num, raw_ne, tip=None, prefer_calibrated=True):
+    """The ne to use for one run/tip, with its unit: ``(ne, is_density)``.
+
+    ``prefer_calibrated`` True swaps in the interferometer-calibrated
+    ``ne_cal_arr`` when :func:`calibrate_plasma_npz` has written it, falling
+    back to ``raw_ne`` with a printed note otherwise.
+
+    ``is_density`` reports the unit of what is *returned*, not what was asked
+    for -- True means [cm^-3], False means :func:`analyze_IV`'s proxy [A/cm^2].
+    So an uncalibrated run whose npz was written with ``calibrated=False``
+    (``ne_arr`` already a density via :func:`ne_from_esat`) still reports True:
+    the fallback is a real density, just not interferometer-scaled.
+    """
+    if prefer_calibrated:
+        try:
+            return load_ne_calibrated(data_dir, run_num, tip=tip)[0], True
+        except KeyError:
+            print(f"  (ne: run {run_num}{tip_tag(tip)} not calibrated yet -- "
+                  "using raw ne; run calibrate_plasma_npz to calibrate)")
+    return raw_ne, not ne_arr_is_proxy(data_dir, run_num, tip=tip)
+
+
+def ne_arr_is_proxy(data_dir, run_num, tip=None):
+    """Is this run's saved ``ne_arr`` the [A/cm^2] proxy rather than a density?
+
+    Reads the ``ne_is_proxy`` flag :func:`process_iv_and_save` writes.  npz from
+    before that flag existed are proxies (it was the only convention then), so a
+    missing key reads as True.
+    """
+    _, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
+    with np.load(plasma_path) as ps:
+        return bool(ps["ne_is_proxy"]) if "ne_is_proxy" in ps else True
+
+
 def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
                                interf_ne_line, t_offset=0.0):
     """Per-sweep calibration of a probe profile against interferometer density.
@@ -915,8 +1032,8 @@ def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
     Programmatic version of the legacy recipe (LP_analysis Langmuir_Iisat.ipynb):
     line-average the probe profile along the interferometer chord and ratio it
     against the interferometer line-averaged ne.  Works for any probe quantity
-    proportional to ne -- IV-derived ne [cm^-3] (factor is a dimensionless
-    correction) or raw Isat [A/cm^2] (factor converts to cm^-3).
+    proportional to ne -- the IV-derived ne proxy from :func:`analyze_IV` or
+    raw Isat (both [A/cm^2]; the factor converts to cm^-3).
 
     profile_arr : (n_locs, n_sweeps) probe quantity proportional to ne
     x           : (n_locs,) positions [cm] along the interferometer chord
@@ -934,8 +1051,10 @@ def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
                          [t_start[k], t_stop[k]] + t_offset)
                     / line_average(profile_arr[:, k], x)
 
-    A sweep with an empty window or a non-finite line average gets a ``nan``
-    factor (no exception), and the count of calibrated sweeps is printed.  But
+    A sweep with an empty window, or whose line average is not finite and
+    positive, gets a ``nan`` factor (no exception), and the count of calibrated
+    sweeps is printed.  Failed-fit ``nan`` positions are excluded from the line
+    average, not treated as zeros.  But
     if *no* sweep window overlaps the interferometer trace at all -- the usual
     symptom of a wrong ``t_offset`` -- this raises ``ValueError`` rather than
     silently returning an all-``nan`` calibration.  Returns
@@ -959,11 +1078,16 @@ def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
 
     n_sweeps = profile_arr.shape[1]
     factor = np.full(n_sweeps, np.nan)
+    # NaN positions are failed fits; line_average integrates the finite subset,
+    # so they are excluded rather than pulling the chord average toward 0.
     chord_avg = np.array([line_average(profile_arr[:, k], x) for k in range(n_sweeps)])
     n_hit = 0
     for k in range(n_sweeps):
         in_win = (interf_t >= t_start[k]) & (interf_t <= t_stop[k])
-        if in_win.any() and np.isfinite(chord_avg[k]) and chord_avg[k] != 0:
+        # > 0, not != 0: a non-positive chord average is unphysical for a
+        # density-proportional quantity, and a negative one would flip the sign
+        # of the whole calibrated profile.
+        if in_win.any() and np.isfinite(chord_avg[k]) and chord_avg[k] > 0:
             factor[k] = np.nanmean(interf_ne_line[in_win]) / chord_avg[k]
             n_hit += 1
     if n_hit == 0:
@@ -1027,6 +1151,12 @@ def calibrate_plasma_npz(ifn, interf_chan, tip=None, t_offset=0.0):
     with np.load(plasma_path) as ps:
         saved = dict(ps)             # keep the 6 arrays to re-save alongside
     ne_arr = saved["ne_arr"]
+    if not bool(saved.get("ne_is_proxy", True)):
+        raise ValueError(
+            f"{plasma_path} was written with calibrated=False -- ne_arr is "
+            "already a density [cm^-3] from ne_from_esat, so scaling it against "
+            "the interferometer would double-apply a density scale. Regenerate "
+            "with process_iv_and_save(..., calibrated=True) to calibrate.")
 
     ch = read_interferometer(ifn, channels=[interf_chan])[interf_chan]
     if ch.phase.shape[0] == 0:

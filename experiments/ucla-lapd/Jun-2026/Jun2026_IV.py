@@ -66,13 +66,10 @@ from data_analysis.io import (open_lapd, choose_from_list, position_shots,
                               motion_group_for_channel)
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
 from data_analysis.plasma.langmuir import (
-    find_sweep_indices, reshape_IV, analyze_IV_safe,
-    prepare_sweep_data, process_iv_and_save, sweep_npz_paths,
+    analyze_IV_safe, prepare_sweep_data, process_iv_and_save, sweep_npz_paths,
     calibrate_plasma_npz,
 )
 from data_analysis.utils import run_num_of
-
-from scipy.ndimage import gaussian_filter1d
 
 # ========================================================================== #
 #  >>> USER OVERRIDE: set which scope / channels are the LP I and V <<<
@@ -390,22 +387,18 @@ def get_IV_arr(run, scope_name, I_chan, V_chan, pos):
 
 
 def analyze_tip_at_position(run, scope_name, I_chan, V_chan, pos,
-                            pos_index, sweep_idx, padding=10, trim_percent=5,
-                            smooth_sigma=10):
-    """Run the full sweep pipeline for one tip at one position/sweep.
-
-    Reads -> detects sweeps -> ``reshape_IV`` -> smooths -> shot-averages the
-    chosen sweep -> ``analyze_IV_safe``.  Returns ``(Vp, Te, ne)`` (NaNs on
-    failure).  This is the per-tip body used to inspect both probes at a
-    position; the steps mirror :func:`save_IV_data` so what you see matches the
-    batch pass.
+                            pos_index, sweep_idx, **prep_kwargs):
+    """Analyze one tip at one position/sweep: the batch pipeline
+    (:func:`prepare_sweep_data`) on that position's shots, then
+    ``analyze_IV_safe`` on the shot-averaged sweep.  ``prep_kwargs``
+    (``padding`` / ``trim_percent`` / ``smooth_sigma``) forward to
+    ``prepare_sweep_data``, which owns the defaults -- so inspection and batch
+    cannot drift apart.  Returns ``(Vp, Te, ne)`` (NaNs on failure).
     """
-    _, Vpos, Ipos = get_IV_at_position(run, scope_name, I_chan, V_chan, pos,
-                                       pos_index)
-    start_ls, stop_ls = find_sweep_indices(Vpos, padding=padding)
-    V_rs, I_rs = reshape_IV(Vpos[None, :], Ipos[None, :, :], start_ls, stop_ls,
-                            trim_percent)
-    I_rs = gaussian_filter1d(I_rs, smooth_sigma, axis=-1)
+    tarr, Vpos, Ipos = get_IV_at_position(run, scope_name, I_chan, V_chan, pos,
+                                          pos_index)
+    V_rs, I_rs, *_ = prepare_sweep_data(tarr, Vpos[None, :], Ipos[None, :, :],
+                                        **prep_kwargs)
     I_trace = I_rs[0, :, sweep_idx, :].mean(0)
     return analyze_IV_safe(V_rs[0, sweep_idx], I_trace)
 
@@ -502,7 +495,7 @@ def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=No
 # imports them from there directly.
 
 
-def process_run(ifn, motion_group_name=None):
+def process_run(ifn, motion_group_name=None, calibrated=True):
     """Run the full batch pipeline for **every complete-pair tip** in a run.
 
     For each tip with a complete I+V pair (from :func:`discover_lp_channels`):
@@ -524,6 +517,11 @@ def process_run(ifn, motion_group_name=None):
 
     Current orientation comes from the module-level ``I_SIGN`` (``-1`` for this
     experiment); change it at the top of the file if a run needs the other sign.
+
+    ``calibrated`` True (default) saves the [A/cm^2] proxy for
+    :func:`calibrate_plasma_npz` to scale; False saves a Te-based density
+    (:func:`data_analysis.plasma.langmuir.ne_from_esat`) for runs with no
+    interferometer, which must NOT then be calibrated.
     """
     data_dir = os.path.dirname(ifn)
     run_num = run_num_of(ifn)
@@ -550,7 +548,8 @@ def process_run(ifn, motion_group_name=None):
         Vswp_arr_rs, Iswp_arr_rs = save_IV_data(
             ifn, sweep_path, tip=tip, run=run, channels=channels,
             positions=read_lp_positions(ifn, group))
-        process_iv_and_save(Vswp_arr_rs, Iswp_arr_rs, plasma_path)
+        process_iv_and_save(Vswp_arr_rs, Iswp_arr_rs, plasma_path,
+                            calibrated=calibrated)
 
         results[tip if tip is not None else "override"] = (sweep_path, plasma_path)
 
@@ -564,15 +563,23 @@ if __name__ == '__main__':
 
     ifn = r"D:\data\LAPD\jun2026-jia\06-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
 
+    # False for a run with no merged interferometer data: ne comes from
+    # ne_from_esat(I_esat, Te) instead, and the calibration step is skipped.
+    CALIBRATED = True
+
     # Batch-process every complete-pair tip and save the .npz results.  Draw the
     # figures afterwards from the saved .npz with Jun2026_plot.plot_iv_line_run(ifn).
-    results = process_run(ifn)
+    results = process_run(ifn, calibrated=CALIBRATED)
 
     # Calibrate each processed tip's ne against the interferometer chord
     INTERF_CHAN = "phase_p29"
     T_OFFSET = 0.012
-    for tip in results:
-        calibrate_plasma_npz(ifn, INTERF_CHAN,
-                             tip=None if tip == "override" else tip,
-                             t_offset=T_OFFSET)
+    if CALIBRATED:
+        for tip in results:
+            calibrate_plasma_npz(ifn, INTERF_CHAN,
+                                 tip=None if tip == "override" else tip,
+                                 t_offset=T_OFFSET)
+    else:
+        print("\nCALIBRATED=False: ne is a Te-based density [cm^-3]; "
+              "skipping interferometer calibration.")
 

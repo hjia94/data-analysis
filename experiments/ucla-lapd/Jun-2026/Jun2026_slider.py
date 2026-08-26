@@ -62,7 +62,8 @@ from collections import namedtuple
 import numpy as np
 
 from data_analysis.io import open_lapd, parse_gas_puff
-from data_analysis.plasma.langmuir import load_plasma_data, load_sweep_axes
+from data_analysis.plasma.langmuir import (load_ne, load_plasma_data,
+                                           load_sweep_axes)
 from data_analysis.utils import run_num_of
 from data_analysis.viz.plot_utils import fig_path, grid_frames
 from data_analysis.viz.slider_html import SCHEMA_VERSION, write_slider_html
@@ -375,10 +376,12 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
     timestamp. Runs need not agree on their tips: the page's groups carry their
     own trace names.
 
-    ``ne_calibrated`` is what actually happened, not what was asked for:
-    :func:`Jun2026_plot._load_ne` falls back to raw ne for any tip whose
-    calibration array is missing, and a banner that repeated the *request*
-    would label raw densities as interferometer-calibrated.
+    ``ne_calibrated`` is the *unit* of the ne actually loaded, not what was
+    asked for -- True only if every tip returned a density [cm^-3]
+    (:func:`data_analysis.plasma.langmuir.load_ne`).  A tip falling back to the
+    [A/cm^2] proxy clears it; a run processed with ``calibrated=False`` (already
+    a Te-based density) does not.  A banner repeating the *request* would label
+    proxy values as densities.
     """
     traces_by_field = {name: [] for name, _ in IV_FIELDS}
     ne_calibrated = calibrated
@@ -395,12 +398,9 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
             print(f"  (IV: run {run_num} tip {tip} unreadable: {exc}; "
                   "skipping the tip)")
             continue
-        # _load_ne hands back the very array it was given when the run has no
-        # calibration yet (it only prints a note), so identity is the signal.
-        ne_cal = jpl._load_ne(data_dir, run_num, tip, ne, calibrated)
-        if ne_cal is ne:
-            ne_calibrated = False
-        ne = ne_cal
+        ne, ok = load_ne(data_dir, run_num, ne, tip=tip,
+                         prefer_calibrated=calibrated)
+        ne_calibrated = ne_calibrated and ok
 
         # Some runs store one more timestamp than they have sweeps. The static
         # figure indexes t_ls[t_idx] for t_idx < n_sweeps, i.e. it uses the
@@ -448,6 +448,9 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
         # The first tip's timestamps label the frames; the check above has
         # established the others match to well within a sweep.
         "axis": {"name": "time", "unit": "ms", "values": axis_values},
+        # Units are the placeholders from IV_FIELDS; the caller rewrites the ne
+        # pair once it knows whether EVERY run calibrated -- the schema requires
+        # one field signature across groups, so a per-run unit cannot stand.
         "fields": [{"name": name, "unit": unit, "cmap": "viridis",
                     # No natural physical scale, and the per-frame range varies
                     # by ~10x across a run, so these follow the page's toggle.
@@ -471,8 +474,11 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
         ifns: The run ``.hdf5`` paths, in dropdown order. Each needs its saved
             ``-tip*-plasma-data.npz`` beside it (:func:`Jun2026_IV.process_run`).
         out: Destination ``.html``; defaults under :func:`slider_path`.
-        calibrated (bool): Prefer interferometer-calibrated ne, falling back to
-            raw with a note -- the rule :func:`Jun2026_plot._load_ne` applies.
+        calibrated (bool): Prefer interferometer-calibrated ne -- the rule
+            :func:`data_analysis.plasma.langmuir.load_ne` applies. One page
+            carries one ne unit, so a run that cannot be calibrated is dropped
+            (and named) rather than forcing every run's label down to the raw
+            proxy; pass False to render every run's raw ne instead.
         name (str): Output stem, when the default is not wanted.
 
     Runs keep their own time axes: they differ in both sweep count and span, so
@@ -483,6 +489,7 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
     # False as soon as ANY rendered run fell back to raw ne: one banner covers
     # the whole page, so it must state the weakest guarantee on it.
     ne_calibrated = calibrated
+    group_calibrated = []          # per-group, parallel to `groups`
     for ifn in ifns:
         data_dir = os.path.dirname(ifn)
         run_num = run_num_of(ifn)
@@ -519,10 +526,35 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
                 f"{group['name']} was measured on a different probe line than "
                 f"{shared_label}; they cannot share one page's x-axis.")
         groups.append(group)
+        group_calibrated.append(run_ne_calibrated)
 
     if not groups:
         print("  (IV: no run could be read; nothing to render)")
         return None
+
+    # A group is either a density [cm^-3] or analyze_IV's [A/cm^2] proxy.  The
+    # schema shares ONE field row across groups, so a page cannot caption both
+    # -- and relabelling everything to the proxy unit would mislabel the real
+    # densities.  Drop the proxy runs instead, naming them, unless no group is a
+    # density (then the page is uniformly the proxy).
+    if calibrated and not ne_calibrated:
+        kept = [g for g, ok in zip(groups, group_calibrated) if ok]
+        dropped = [g["name"] for g, ok in zip(groups, group_calibrated) if not ok]
+        if kept:
+            print(f"  (IV: dropping uncalibrated run(s) {', '.join(dropped)} -- "
+                  "a page carries one ne unit; run calibrate_plasma_npz to include them)")
+            groups = kept
+            ne_calibrated = True
+        else:
+            print("  (IV: no run is calibrated; rendering the raw ne proxy)")
+
+    if not ne_calibrated:                      # every remaining group is the proxy
+        for group in groups:
+            for field in group["fields"]:
+                if field["name"] == "ne":
+                    field["unit"] = "A/cm^2"
+                elif field["name"] == "Te*ne":
+                    field["unit"] = "eV A/cm^2"
 
     bundle = {
         "schema": SCHEMA_VERSION,
@@ -958,12 +990,17 @@ def emit_isat_fft_sliders(ifns, **kwargs):
     return [p for p in (emit_isat_fft_slider(f, **kwargs) for f in ifns) if p]
 
 
-def _ne_provenance(requested, actual):
-    """Banner text for the ne density: what was used, not what was asked for."""
+def _ne_provenance(requested, is_density):
+    """Banner text for the ne density: what was used, not what was asked for.
+
+    ``is_density`` distinguishes the two non-interferometer cases, which the
+    request alone cannot: a Te-based density (npz written with
+    ``calibrated=False``) versus analyze_IV's uncalibrated [A/cm^2] proxy.
+    """
     if not requested:
-        return "raw"
-    return ("interferometer-calibrated" if actual
-            else "raw (calibration missing; run calibrate_plasma_npz)")
+        return "Te-based (ne_from_esat)" if is_density else "raw proxy [A/cm^2]"
+    return ("interferometer-calibrated" if is_density
+            else "raw proxy (calibration missing; run calibrate_plasma_npz)")
 
 
 def _puff_run_entry(ifn, run_num):
