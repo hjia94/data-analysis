@@ -41,30 +41,21 @@ DATA_DIR = r"D:\data\LAPD\jun2026-jia"
 FILE_FMT = "{run}-Mach-p33-calibration_2026-06-12.hdf5"
 RUNS = {17: "normal", 18: "90cw", 19: "180", 20: "90ccw"}
 
-# Jun-2026 only. t=0 is bias start; 0-5 ms is the settled plateau (the +/-
-# ratios drift before t=0 during breakdown, and the signal decays after ~10 ms).
-# A property of this campaign's bias timing, not of Mach calibration -- which is
-# why plasma.mach takes no window and this constant lives here.
+# calibration window
 CAL_WINDOW_MS = (0.0, 5.0)
 
 STEM = "17-20-mach-calibration"
 PAIRINGS = [(17, 19), (18, 20)]          # orientations 180 deg apart
 AXES = ("X", "Y", "Z")
 FIT_AXES = ("Y", "Z")                    # X contributes no row -- see module docstring
-# How each axis' kappa was obtained; travels into the npz so a consumer never has
-# to infer that X's provenance differs.
 METHOD = {"X": "no-x-flow-assumption", "Y": "joint-fit", "Z": "joint-fit"}
-RAW_PANEL_TIPS = ("X+", "Y+", "Z+")
-RAW_PANEL_SHOT = 0
+# Isat signal to plot as examples
+RAW_PANEL_SHOT = 5
+RAW_PANEL_AXES = ("X", "Z")
 
 # Which lab flow component each face pair faces, and with what sign, per
 # orientation: (component index, s) where s=+1 means the '+' tip looks upstream.
 # Rotating the probe moves the Y pair into the lab axis Z occupied and back.
-#
-# Only two possibilities exist per entry, so this is fixed by running rather than
-# by deriving: if the fit disagrees with the per-pair cross-check (which cannot
-# be fooled by a sign error, since the product cancels the exponent either way),
-# flip the signs of one axis. The table used is stored in the npz.
 ORIENTATION = {
     #        Y pair          Z pair
     17: {"Y": (0, +1), "Z": (1, +1)},
@@ -131,14 +122,14 @@ def load_run(run, keep_full=()):
 
 def main():
     runs = sorted(RUNS)
-    data, shunts, tip_channels, raw_traces = {}, None, None, None
+    data, shunts, tip_channels = {}, None, None
+    raw_traces = {}                          # {run: {tip: (tarr, one shot)}}
     tarr_win = None
 
     for run in runs:
-        keep = RAW_PANEL_TIPS if run == runs[0] else ()
-        data[run], tarr_win, shunts, tip_channels, full = load_run(run, keep_full=keep)
-        if full:
-            raw_traces = full
+        data[run], tarr_win, shunts, tip_channels, full = load_run(
+            run, keep_full=[f"{a}{s}" for a in RAW_PANEL_AXES for s in "+-"])
+        raw_traces[run] = full
         print(f"run {run:>3} ({RUNS[run]:>6}): shunts " +
               ", ".join(f"{t}={shunts[t]:g}" for t in sorted(shunts)))
 
@@ -351,35 +342,46 @@ def main():
     _figure(png_path, results, raw_traces)
 
 
-def _figure(path, results, raw_traces):
-    """Five panels: the evidence that the kappa in the npz is trustworthy.
+def _raw_panel(ax, raw_traces, axis, runs):
+    """Both signs of one axis pair, single-shot, across every orientation.
 
-    Reads ``results`` -- the exact dict written to the npz -- by name, so the
-    figure cannot drift from the saved numbers.
+    One distinct colour per line (8 = 2 signs x 4 runs): a shared colour per sign
+    was unreadable at this sample density, and dashes smear.
+    """
+    k = 0
+    for run in runs:
+        for s in "+-":
+            tarr_full, trace = raw_traces[run][f"{axis}{s}"]
+            ax.plot(tarr_full * 1e3, trace * 1e3, lw=0.5, color=f"C{k}",
+                    label=f"{axis}{s} ({run}/{RUNS[run]})")
+            k += 1
+    ax.set_ylabel("Isat [mA]")
+    ax.set_title(f"{axis} tips, all orientations, shot {RAW_PANEL_SHOT} - "
+                 f"single-shot traces (shunt-corrected)")
+    ax.legend(fontsize=7, ncol=len(runs))
+
+
+def _figure(path, results, raw_traces):
+    """figure generated to show calibration results, saved to ``path``.
     """
     kappa, kappa_t = results["kappa"], results["kappa_t"]
     err_fit, n_valid = results["kappa_err_fit"], results["n_valid"]
     kappa_pairwise, tarr_win = results["kappa_pairwise"], results["tarr_win"]
     residuals, row_labels = results["fit_residuals"], results["fit_row_labels"]
-    fig, axs = plt.subplots(5, 1, figsize=(9, 14),
-                            gridspec_kw={"height_ratios": [2, 2, 2, 1.5, 1]})
-    ax_raw, ax_kt, ax_k, ax_res, ax_n = axs
-    for ax in (ax_raw, ax_kt, ax_n):     # sharex by hand: ax_k/ax_res are not time
-        ax.sharex(ax_raw)
+    fig, axs = plt.subplots(6, 1, figsize=(9, 16),
+                            gridspec_kw={"height_ratios": [2, 2, 2, 2, 1.5, 1]})
+    ax_raw0, ax_raw1, ax_kt, ax_k, ax_res, ax_n = axs
+    for ax in (ax_raw1, ax_kt, ax_n):    # sharex by hand: ax_k/ax_res are not time
+        ax.sharex(ax_raw0)
 
-    for tip, (tarr_full, trace) in raw_traces.items():
-        ax_raw.plot(tarr_full * 1e3, trace * 1e3, lw=0.4, label=tip)
-    ax_raw.set_ylabel("Isat [mA]")
-    ax_raw.set_title(f"Run {sorted(RUNS)[0]}, shot {RAW_PANEL_SHOT} - "
-                     f"single-shot traces (shunt-corrected)")
-    ax_raw.legend(fontsize=8, ncol=len(raw_traces))
+    runs = sorted(RUNS)
+    _raw_panel(ax_raw0, raw_traces, RAW_PANEL_AXES[0], runs)
+    _raw_panel(ax_raw1, raw_traces, RAW_PANEL_AXES[1], runs)
 
     for i, axis in enumerate(AXES):
         for j, (ra, rb) in enumerate(PAIRINGS):
             if np.all(np.isnan(kappa_t[i, j])):
                 continue
-            # X carries no pairing (see kappa_t above) -- label it by the single
-            # run it actually came from, not as a pair.
             ax_kt.plot(tarr_win * 1e3, kappa_t[i, j], lw=0.6,
                        label=f"{axis} {ra}" if axis == "X" else f"{axis} {ra}/{rb}")
     ax_kt.set_ylabel(r"$\kappa(t)$")
@@ -388,9 +390,6 @@ def _figure(path, results, raw_traces):
     x = np.arange(len(AXES))
     for i, axis in enumerate(AXES):
         if axis == "X":
-            # Open marker, no error bar: different provenance (assumed, not
-            # fitted), and its bar is x/÷1.5 -- drawing it beside x/÷1.03 bars
-            # would imply a comparability that does not exist.
             ax_k.plot(i, kappa[i], "o", mfc="none", ms=10, color="C3",
                       label="X: assumed no x-flow")
         else:
@@ -416,10 +415,10 @@ def _figure(path, results, raw_traces):
     ax_n.set_ylabel("valid shots")
     ax_n.set_xlabel("Time [ms]  (t=0 = bias start)")
 
-    for ax in (ax_raw, ax_kt, ax_n):
+    for ax in (ax_raw0, ax_raw1, ax_kt, ax_n):
         ax.axvspan(*CAL_WINDOW_MS, color="0.85", zorder=0)
         ax.grid(alpha=0.3)
-    ax_raw.set_xlim(-5, 15)
+    ax_raw0.set_xlim(-5, 15)
 
     finalize_figure(fig, save_fig=path, dpi=140)
 

@@ -5,20 +5,6 @@ HDF5 and save arrays; ``Jun2026_plot`` draws static publication figures; this
 module builds :mod:`data_analysis.viz.slider_html` bundles from those same saved
 arrays and renders a self-contained interactive page.
 
-It is **additive and read-only**: nothing here changes the analysis modules, the
-static figures, or the co-located data ``.npz`` files. A slider page is a
-preliminary-data tool -- scrub the scan axis to find the interesting frame, then
-draw that frame properly with ``Jun2026_plot``.
-
-Why an adapter per diagnostic
---------------------------------------------------------------------------
-Only this layer knows an experiment's storage layout -- xcorr's multi-pair key
-prefixes here, the IV pipeline's per-tip file pair for a future
-``emit_iv_slider``. The renderer downstream knows none of it: it takes a
-validated bundle of prepared frames (see the schema in
-:mod:`data_analysis.viz.slider_html`) and nothing else. Adding a diagnostic is
-one more small function here, against a frozen schema.
-
 Every adapter follows the same five steps:
 
 1. load the saved arrays for one product,
@@ -73,21 +59,14 @@ import Jun2026_Isat as jis
 import Jun2026_IV as jiv
 
 
-# Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/ -- the same place
-# the static Jun-2026 PNGs go; a slider page is a render, not data.
+# Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/ 
 FIG_SUBDIR = jpl.FIG_SUBDIR
 
-# Upper edge of the frequency band shipped to the page, kHz.  Run 26's measured
-# coherence all lies below ~10 kHz (strongest bins 4.88 / 3.66 / 8.54 / 2.44 kHz),
-# so 20 kHz covers every real feature; 50 kHz would add ~24 bins of near-zero
-# coherence -- payload and scrub distance spent on noise.  An emit-time
-# parameter, recorded in the page's provenance banner.
+# Upper edge of the frequency band for fft correlation plot
 XCORR_FMAX_KHZ = 20.0
 
 
-#: Shown when no coherence floor was applied.  Held here rather than inlined
-#: because both the one-pair and the all-pairs page must carry the identical
-#: caveat -- an unmasked phase map that does not say it is unmasked is a trap.
+#: Shown on html page when no coherence floor was applied.
 _XCORR_WARNING = (
     "No coherence floor applied — cross-phase is random noise wherever γ² is "
     "near zero. Read the phase map only where the coherence map beside it is high.")
@@ -96,9 +75,6 @@ _XCORR_WARNING = (
 def slider_path(name, subdir=FIG_SUBDIR):
     """Centralized ``.html`` location: :func:`data_analysis.viz.plot_utils.fig_path`
     with this campaign's default subdirectory and an ``.html`` extension.
-
-    Pages land under ``$DATA_ANALYSIS_OUTPUT/figures/<subdir>/`` beside the PNGs
-    -- a slider page is a render, not data -- never next to the raw data.
     """
     return fig_path(name, subdir, ext=".html")
 
@@ -107,10 +83,7 @@ def _xcorr_params(freq_khz, fmax_khz, gamma2_floor, stored=None):
     """The provenance ``params`` block shared by both xcorr pages.
 
     ``stored`` is the npz's own record of the batch settings
-    (:func:`Jun2026_xcorr.stored_settings`). The module constants are only a
-    fallback for a file written before they were recorded: they are read at
-    *render* time, so a constant edited between batch and render would state a
-    window no stored pair was ever computed with.
+    (:func:`Jun2026_xcorr.stored_settings`). 
     """
     stored = stored or {}
     window = stored.get("window")
@@ -126,11 +99,6 @@ def _xcorr_params(freq_khz, fmax_khz, gamma2_floor, stored=None):
 
 def _xcorr_pair_fields(ifn, ch_a, ch_b, npz_path, fmax_khz, gamma2_floor):
     """Prepare one channel pair into slider *fields*: band-limit, gate, grid.
-
-    The single place a stored pair becomes drawable frames, so the one-pair page
-    and one channel of the all-pairs page cannot end up preparing the same data
-    differently.  Returns ``(fields, freq_khz, xs, ys)``, or ``None`` (having
-    printed why) when the pair has no saved entry.
     """
     loaded = jpl._load_xcorr_run(ifn, ch_a, ch_b, npz_path)
     if loaded is None:
@@ -283,11 +251,6 @@ def emit_xcorr_slider_all(ifn, npz_path=None, pairs=None,
         label = jxc.pair_label(ch_a, ch_b)
         rendered.append((ch_a, ch_b))
 
-        # One page carries one axis and one probe plane for every channel, so
-        # the pairs must agree on them.  They come from the same npz and always
-        # do -- but a page that silently adopted one pair's axis and labelled
-        # another pair's data with it would be wrong in a way no reader could
-        # see, so it is checked rather than assumed.
         if shared is None:
             shared, shared_label = axes, label
         elif not all(np.array_equal(a, b) for a, b in zip(axes, shared)):
@@ -402,24 +365,9 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
             ne_calibrated = False
         ne = ne_cal
 
-        # Some runs store one more timestamp than they have sweeps. The static
-        # figure indexes t_ls[t_idx] for t_idx < n_sweeps, i.e. it uses the
-        # leading timestamps and ignores the trailing one; match that exactly
-        # so the page and the PNG label the same frame with the same time.
         n_sweeps = Vp.shape[1]
         times_ms = np.asarray(t_ls, float)[:n_sweeps] * 1e3
 
-        # Tips of one run are the same acquisition, so they agree on the time
-        # axis and the probe line. Checked rather than assumed: silently
-        # adopting one tip's axis for the other's data would mislabel every
-        # frame with no visible symptom. Checked *before* accumulating, so a
-        # rejected tip never leaves half-built traces behind.
-        #
-        # Compared to a tolerance, not bit-for-bit: the two tips are timed
-        # independently and their recorded sweep times differ by roughly
-        # IV_TIP_JITTER_MS. That is the same instant recorded twice, so
-        # requiring equality would reject every real run; a *sweep* apart is a
-        # different acquisition and still fails.
         if axis_values is None:
             axis_values, xpos, first_tip = times_ms, np.asarray(xs, float), tip
         else:
@@ -461,11 +409,6 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
 def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
     """Every IV run on **one** page: runs in the dropdown, tips overlaid.
 
-    Replaces the ``IV_line_*.png`` family, where each figure fixed a handful of
-    timestamps and each run needed its own file. Here the slider scrubs the
-    timestamps and the dropdown switches runs, so "how does this profile evolve,
-    and how does that differ between gas puffs?" is two controls rather than
-    seven files.
 
     Args:
         ifns: The run ``.hdf5`` paths, in dropdown order. Each needs its saved
