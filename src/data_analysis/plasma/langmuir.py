@@ -661,7 +661,10 @@ def analyze_IV(voltage, current, plot=False, calibrated=True):
     
     d_esat = _apply_linear_fit(esat_volt, esat_curr)
 
-    denom = d_esat[0] - c_trans[0]
+    # c[0]*V + c[1] = d[0]*V + d[1]  =>  V = (d[1] - c[1]) / (c[0] - d[0]).
+    # polyfit returns [slope, intercept], so the slope difference is c[0]-d[0];
+    # the reverse order negates every crossing (a prior abs() hid this).
+    denom = c_trans[0] - d_esat[0]
     if abs(denom) < DENOM_THRESHOLD:
         V_cross = np.nan
         I_esat = np.nan

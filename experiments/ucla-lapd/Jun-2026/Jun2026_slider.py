@@ -78,11 +78,8 @@ import Jun2026_IV as jiv
 # the static Jun-2026 PNGs go; a slider page is a render, not data.
 FIG_SUBDIR = jpl.FIG_SUBDIR
 
-# Upper edge of the frequency band shipped to the page, kHz.  Run 26's measured
-# coherence all lies below ~10 kHz (strongest bins 4.88 / 3.66 / 8.54 / 2.44 kHz),
-# so 20 kHz covers every real feature; 50 kHz would add ~24 bins of near-zero
-# coherence -- payload and scrub distance spent on noise.  An emit-time
-# parameter, recorded in the page's provenance banner.
+# Upper limit of the frequency band rendered to the html page, kHz.
+# For correlation and Isat FFT
 XCORR_FMAX_KHZ = 20.0
 
 
@@ -365,6 +362,14 @@ IV_FIELDS = (("Vp", "V"), ("Te", "eV"), ("ne", "cm^-3"), ("Te*ne", "eV cm^-3"))
 #: still fails. A property of the DAQ clock, not of any one run's spacing.
 IV_TIP_JITTER_MS = 0.02
 
+#: Half-width of the rendered probe line [cm]; positions outside |x| > this are
+#: dropped before the frames are built, so they leave the colour/y scaling as
+#: well as the plot. The scan runs to +-30 cm, but past ~25 cm the probe is in
+#: the density skirt where the IV fit is noise-dominated: those points are not
+#: the physics of interest and their scatter otherwise sets the scale for every
+#: frame. Widen it to see them again -- nothing else depends on the value.
+IV_X_LIMIT_CM = 25.0
+
 
 def _iv_run_group(data_dir, run_num, tips, calibrated=True):
     """One run as a slider *group*: per-tip traces of each field, vs position.
@@ -402,24 +407,16 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
                          prefer_calibrated=calibrated)
         ne_calibrated = ne_calibrated and ok
 
-        # Some runs store one more timestamp than they have sweeps. The static
-        # figure indexes t_ls[t_idx] for t_idx < n_sweeps, i.e. it uses the
-        # leading timestamps and ignores the trailing one; match that exactly
-        # so the page and the PNG label the same frame with the same time.
+        # Crop data in xarray space, where no plasma exists
+        keep = np.abs(np.asarray(xs, float)) <= IV_X_LIMIT_CM
+        xs = np.asarray(xs, float)[keep]
+        Vp, Te, ne = Vp[keep], Te[keep], ne[keep]
+
+        # Some runs store one more timestamp than they have sweeps.
         n_sweeps = Vp.shape[1]
         times_ms = np.asarray(t_ls, float)[:n_sweeps] * 1e3
 
-        # Tips of one run are the same acquisition, so they agree on the time
-        # axis and the probe line. Checked rather than assumed: silently
-        # adopting one tip's axis for the other's data would mislabel every
-        # frame with no visible symptom. Checked *before* accumulating, so a
-        # rejected tip never leaves half-built traces behind.
-        #
-        # Compared to a tolerance, not bit-for-bit: the two tips are timed
-        # independently and their recorded sweep times differ by roughly
-        # IV_TIP_JITTER_MS. That is the same instant recorded twice, so
-        # requiring equality would reject every real run; a *sweep* apart is a
-        # different acquisition and still fails.
+
         if axis_values is None:
             axis_values, xpos, first_tip = times_ms, np.asarray(xs, float), tip
         else:
@@ -532,11 +529,7 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
         print("  (IV: no run could be read; nothing to render)")
         return None
 
-    # A group is either a density [cm^-3] or analyze_IV's [A/cm^2] proxy.  The
-    # schema shares ONE field row across groups, so a page cannot caption both
-    # -- and relabelling everything to the proxy unit would mislabel the real
-    # densities.  Drop the proxy runs instead, naming them, unless no group is a
-    # density (then the page is uniformly the proxy).
+    # A group is either a density [cm^-3] or analyze_IV's [A/cm^2] proxy.
     if calibrated and not ne_calibrated:
         kept = [g for g, ok in zip(groups, group_calibrated) if ok]
         dropped = [g["name"] for g, ok in zip(groups, group_calibrated) if not ok]
