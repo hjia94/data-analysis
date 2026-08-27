@@ -109,3 +109,55 @@ def plot_bdot_stft_comparison(group_a, group_b, labels=("Group A", "Group B"),
 		fig.savefig(save_path, dpi=150, bbox_inches='tight')
 		log('PLOT', f"Saved comparison figure to {save_path}")
 
+
+def plot_band_power_comparison(power_a, power_b, labels=("Group A", "Group B"),
+							   band=None, bin_s=None, save_path=None):
+	"""Plot shot-averaged band power vs time for two groups, one panel per channel.
+
+	Shaded band is +/- std/sqrt(n), the error on the mean: where the two shaded
+	bands overlap, the groups are not distinguishable in that bin.
+
+	power_*: {ch: (bin_centers_s, mean_dB, sem_dB, n_shots)} from
+	compute_group_avg_stft.
+	band: (f_lo_Hz, f_hi_Hz) and bin_s: bin width (s), for the title only.
+	"""
+	channels = sorted(set(power_a.keys()) & set(power_b.keys()))
+	if not channels:
+		log('PLOT', "No common channels between groups")
+		return None
+
+	num_channels = len(channels)
+	fig, axes = plt.subplots(num_channels, 1,
+							 figsize=(9, 2.6 * num_channels + 1),
+							 num="Bdot_band_power_comparison",
+							 sharex=True, squeeze=False)
+	axes = axes[:, 0]
+
+	for i, ch in enumerate(channels):
+		ax = axes[i]
+		for (t_s, p_db, sem_db, n), label, color in [
+			(power_a[ch], labels[0], 'tab:red'),
+			(power_b[ch], labels[1], 'tab:blue'),
+		]:
+			t_ms = np.asarray(t_s) * 1e3
+			ax.fill_between(t_ms, p_db - sem_db, p_db + sem_db,
+							color=color, alpha=0.2, lw=0)
+			ax.plot(t_ms, p_db, '-o', ms=5, lw=1.5,
+					color=color, label=f"{label} (n={n})")
+		ax.set_ylabel(f"{ch}\nPower (dB)")
+		ax.grid(True, alpha=0.3)
+		if i == 0:
+			ax.legend(fontsize=14)
+
+	axes[-1].set_xlabel('Time (ms)')
+	if band is not None and bin_s is not None:
+		axes[0].set_title(f"{band[0]/1e6:.0f}-{band[1]/1e6:.0f} MHz, "
+						  f"{bin_s*1e3:.0f} ms bins", fontsize=16)
+
+	fig.tight_layout()
+	if save_path:
+		import os as _os
+		_os.makedirs(_os.path.dirname(save_path), exist_ok=True)
+		fig.savefig(save_path, dpi=150, bbox_inches='tight')
+		log('PLOT', f"Saved band-power figure to {save_path}")
+
