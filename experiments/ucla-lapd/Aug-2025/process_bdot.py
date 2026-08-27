@@ -9,7 +9,6 @@ import h5py
 from lapd_io import log, get_bdot_data
 from data_analysis.io.scope_reader import read_hdf5_all_scopes_channels
 from data_analysis.signal.core import calculate_stft
-from plot_bdot import plot_averaged_bdot_stft
 
 
 def calculate_bdot_stft(tarr, bdot_data, freq_bins=1000, overlap_fraction=0.05, freq_min=200e6, freq_max=2000e6):
@@ -44,7 +43,7 @@ def calculate_bdot_stft(tarr, bdot_data, freq_bins=1000, overlap_fraction=0.05, 
 	return stft_time, freq, stft_matrices
 
 
-def process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq_max=1000e6, plot=True):
+def process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq_max=1000e6):
 	"""Process Bdot data from an HDF5 file by averaging STFT across all shots for each channel.
 
 	Parameters:
@@ -53,7 +52,6 @@ def process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq
 	- overlap_fraction: Fraction of overlap for STFT windows
 	- freq_min: Minimum frequency to include in STFT (Hz)
 	- freq_max: Maximum frequency to include in STFT (Hz)
-	- plot: Whether to create and display plots
 
 	Returns:
 	- Dictionary of averaged STFT matrices by channel
@@ -100,12 +98,13 @@ def process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq
 			avg_stft_matrices[channel] = np.mean(np.array(matrices), axis=0)
 			log('BDOT', f"Averaged {len(matrices)} STFT matrices for channel {channel}")
 
-	if plot and avg_stft_matrices:
-		plot_averaged_bdot_stft(avg_stft_matrices, descriptions, stft_tarr_final, freq_arr_final)
-
 	return avg_stft_matrices, descriptions, stft_tarr_final, freq_arr_final
 
 
 if __name__ == "__main__":
+	# Imported here, not at module scope: plot_bdot imports this module, so a
+	# top-level import would be circular.
+	from plot_bdot import plot_averaged_bdot_stft
+
 	ifn = r"F:\AUG2025\P24\27_He1kG430G_5800A_K-5_2025-08-12.hdf5"
-	process_bdot(ifn)
+	plot_averaged_bdot_stft(*process_bdot(ifn))

@@ -11,13 +11,12 @@ import re
 
 import numpy as np
 import h5py
-import matplotlib.pyplot as plt
 
 from lapd_io import log, get_bdot_data
 from data_analysis.io.scope_reader import read_hdf5_all_scopes_channels
-from data_analysis.viz.plot_utils import plot_stft
 from process_bdot import calculate_bdot_stft
-from plot_bdot import plot_bdot_stft_comparison
+from plot_bdot import (plot_bdot_stft_comparison, plot_band_power_comparison,
+					   show_example_shot)
 
 
 # ============================================================
@@ -45,7 +44,17 @@ FREQ_MIN = 50e6
 FREQ_MAX = 1000e6
 
 # Number of shots per group for the comparison.
-N_PER_GROUP = 5
+N_PER_GROUP = 20
+
+# Bdot channels to process/plot; None means all channels on the scope.
+CHANNELS = ("C1")
+
+# Frequency band (Hz) integrated for the band-power-vs-time curves.
+BAND_MIN = 600e6
+BAND_MAX = 900e6
+
+# Width (seconds) of the time bins the band power is averaged over.
+BAND_BIN_S = 1e-3
 
 # Tracking results filename (relative to dir_path).
 TRACKING_FILENAME = "tracking_result.npy"
@@ -53,9 +62,12 @@ TRACKING_FILENAME = "tracking_result.npy"
 # Where to save the averaged-STFT comparison figure (set to None to skip saving).
 SAVE_FIG_PATH = r"C:\Users\hjia9\Documents\lapd\e-ring\diagnostic_fig\compare_bdot_groups.png"
 
+# Band-power-vs-time figure, saved alongside SAVE_FIG_PATH.
+SAVE_POWER_FIG_PATH = r"C:\Users\hjia9\Documents\lapd\e-ring\diagnostic_fig\compare_bdot_band_power.png"
+
 # Toggle which actions run when this file is executed as a script.
-RUN_SHOW_EXAMPLE = True
-RUN_COMPARE_GROUPS = False
+RUN_SHOW_EXAMPLE = False
+RUN_COMPARE_GROUPS = True
 # ============================================================
 
 CINE_PREFIX_RE = re.compile(r"^(\d{2})_.*_shot(\d{3})\.cine$", re.IGNORECASE)
@@ -192,16 +204,52 @@ def select_shots(tracking_npy_path, base_dir, n_pass=5, n_fail=5,
 	return pass_map, fail_map, diag
 
 
+def _band_bin_edges(stft_tarr, bin_s):
+	return np.arange(stft_tarr[0], stft_tarr[-1] + bin_s, bin_s)
+
+
+def _band_bin_centers(stft_tarr, bin_s=BAND_BIN_S):
+	"""Centers (s) of the bin_s-wide time bins _band_power_vs_time reduces into."""
+	return _band_bin_edges(stft_tarr, bin_s)[:-1] + 0.5 * bin_s
+
+
+def _band_power_vs_time(stft_mat, freq_arr, stft_tarr, bin_s=BAND_BIN_S,
+						f_lo=BAND_MIN, f_hi=BAND_MAX):
+	"""Band power (dB) per bin_s-wide time bin; length matches _band_bin_centers.
+
+	stft_mat is (n_time, n_freq) linear magnitude. |STFT|^2 is summed over freq
+	bins in [f_lo, f_hi], then *averaged* (not summed) over the STFT time bins
+	falling in each interval, so a short trailing bin isn't artificially low.
+	dB has an arbitrary reference (the constant df factor is dropped): only
+	differences between shots/groups are meaningful.
+	"""
+	mask = (freq_arr >= f_lo) & (freq_arr <= f_hi)
+	p_t = np.sum(stft_mat[:, mask] ** 2, axis=1)  # per STFT time bin
+
+	# stft_tarr is uniform and increasing, so bins are contiguous index ranges.
+	edges = _band_bin_edges(stft_tarr, bin_s)
+	starts = np.searchsorted(stft_tarr, edges[:-1])
+	counts = np.diff(np.append(starts, len(stft_tarr)))
+	return 10.0 * np.log10(np.add.reduceat(p_t, starts) / counts)
+
+
 def compute_group_avg_stft(shot_map):
 	"""Compute per-channel averaged Bdot STFT across all shots in shot_map.
 
 	shot_map: {hdf5_path: [(shot_num, _ignored), ...]}
-	Returns (avg_stft_matrices, descriptions, stft_tarr, freq_arr).
+	Returns (avg_stft_matrices, descriptions, stft_tarr, freq_arr, band_power)
+	where band_power is {ch: (bin_centers_s, mean_dB, sem_dB, n_shots)}, averaged
+	in the log domain so one hot shot can't dominate the group mean. sem_dB is
+	std(ddof=1)/sqrt(n): the error on the mean, not the shot-to-shot spread.
 	"""
-	all_matrices = {}
+	# Running sum, not a list of slabs: one STFT is ~0.5 GB, so keeping all
+	# n_shots x n_channels of them to average at the end costs tens of GB.
+	stft_sums = {}
+	stft_counts = {}
 	stft_tarr = None
 	freq_arr = None
 	descriptions = {}
+	power_curves = {}   # ch -> [per-shot dB array]
 
 	for hdf5_path, shot_list in shot_map.items():
 		with h5py.File(hdf5_path, "r") as f:
@@ -209,6 +257,8 @@ def compute_group_avg_stft(shot_map):
 				log("BDOT", f"{os.path.basename(hdf5_path)} shot {shot_num}")
 				result = read_hdf5_all_scopes_channels(f, shot_num)
 				tarr_B, bdot_data, descs = get_bdot_data(f, result)
+				if CHANNELS is not None:
+					bdot_data = {ch: v for ch, v in bdot_data.items() if ch in CHANNELS}
 				if tarr_B is None or len(bdot_data) == 0:
 					log("BDOT", f"  no Bdot data, skipping")
 					continue
@@ -220,46 +270,32 @@ def compute_group_avg_stft(shot_map):
 				for ch, m in stft_matrices.items():
 					if m is None:
 						continue
-					all_matrices.setdefault(ch, []).append(m)
+					if ch in stft_sums:
+						stft_sums[ch] += m
+					else:
+						stft_sums[ch] = m.astype(float, copy=True)
+					stft_counts[ch] = stft_counts.get(ch, 0) + 1
+					power_curves.setdefault(ch, []).append(
+						_band_power_vs_time(m, freq_out, tarr_out))
 				if tarr_out is not None and freq_out is not None:
 					stft_tarr = tarr_out
 					freq_arr = freq_out
 
 	avg = {}
-	for ch, mats in all_matrices.items():
-		avg[ch] = np.mean(np.array(mats), axis=0)
-		log("BDOT", f"Averaged {len(mats)} STFT matrices for channel {ch}")
+	for ch, total in stft_sums.items():
+		avg[ch] = total / stft_counts[ch]
+		log("BDOT", f"Averaged {stft_counts[ch]} STFT matrices for channel {ch}")
 
-	return avg, descriptions, stft_tarr, freq_arr
+	bin_centers = _band_bin_centers(stft_tarr) if stft_tarr is not None else None
+	band_power = {}
+	for ch, curves in power_curves.items():
+		arr = np.array(curves)                      # (n_shots, n_bins)
+		n = arr.shape[0]
+		sem = (arr.std(axis=0, ddof=1) / np.sqrt(n) if n > 1
+			   else np.full(arr.shape[1], np.nan))
+		band_power[ch] = (bin_centers, arr.mean(axis=0), sem, n)
 
-
-def show_example_shot(shot_map):
-	"""Display one raw Bdot trace and its STFT for the last shot in shot_map."""
-	hdf5_path = list(shot_map.keys())[-1]
-	shot_num, _ = shot_map[hdf5_path][0]
-	with h5py.File(hdf5_path, "r") as f:
-		result = read_hdf5_all_scopes_channels(f, shot_num)
-		tarr_B, bdot_data, descs = get_bdot_data(f, result)
-
-	first_ch = sorted(bdot_data.keys())[0]
-	sig = bdot_data[first_ch]
-	stft_t, freq, stft_mats = calculate_bdot_stft(
-		tarr_B, {first_ch: sig}, FREQ_BINS, OVERLAP_FRACTION,
-		FREQ_MIN, FREQ_MAX,
-	)
-	stft_mat = stft_mats[first_ch]
-
-	fig, axes = plt.subplots(2, 1, figsize=(8, 7),
-							 num=f"Example_{os.path.basename(hdf5_path)}_shot{shot_num}_{first_ch}")
-	axes[0].plot(tarr_B * 1e3, sig, lw=0.5)
-	axes[0].set_xlabel("Time (ms)")
-	axes[0].set_ylabel(f"{first_ch} signal")
-	axes[0].set_title(descs.get(first_ch, first_ch))
-
-	plot_stft(stft_t, freq, stft_mat, ax=axes[1], fig=fig)
-	axes[1].set_xlabel("Time (ms)")
-	plt.tight_layout()
-	plt.show(block=True)
+	return avg, descriptions, stft_tarr, freq_arr, band_power
 
 
 def run_selection(base_dir=dir_path,
@@ -311,18 +347,29 @@ def run_selection(base_dir=dir_path,
 
 
 def compare_bdot_groups(pass_map, fail_map, base_dir=dir_path):
-	"""Compute averaged STFTs for the two groups and produce the comparison plot."""
+	"""Compute averaged STFTs for the two groups and produce both comparison
+	figures: the STFT spectrograms and the band-power-vs-time curves."""
 	log("BDOT", "=== Group A: pass-y ===")
 	group_a = compute_group_avg_stft(pass_map)
 	log("BDOT", "=== Group B: tracking failed ===")
 	group_b = compute_group_avg_stft(fail_map)
 
-	port_match = re.search(r"P\d+", base_dir)
-	port_label = port_match.group(0) if port_match else "P??"
+	stft_a, desc_a, tarr_a, freq_a, power_a = group_a
+	stft_b, desc_b, tarr_b, freq_b, power_b = group_b
+	labels = ("with Tungsten", "no Tungsten")
+
 	plot_bdot_stft_comparison(
-		group_a, group_b,
-		labels=(f"with Tungsten {port_label}", "no Tungsten"),
+		(stft_a, desc_a, tarr_a, freq_a),
+		(stft_b, desc_b, tarr_b, freq_b),
+		labels=labels,
 		save_path=SAVE_FIG_PATH,
+	)
+	plot_band_power_comparison(
+		power_a, power_b,
+		labels=labels,
+		title=f"{BAND_MIN/1e6:.0f}-{BAND_MAX/1e6:.0f} MHz, "
+			  f"{BAND_BIN_S*1e3:.0f} ms bins",
+		save_path=SAVE_POWER_FIG_PATH,
 	)
 	return group_a, group_b
 
@@ -333,6 +380,7 @@ if __name__ == "__main__":
 		if sel is not None:
 			pass_map, fail_map, _diag, _tracking_path = sel
 			if RUN_SHOW_EXAMPLE:
-				show_example_shot(pass_map)
+				show_example_shot(pass_map, FREQ_BINS, OVERLAP_FRACTION,
+								  FREQ_MIN, FREQ_MAX)
 			if RUN_COMPARE_GROUPS:
 				compare_bdot_groups(pass_map, fail_map)
