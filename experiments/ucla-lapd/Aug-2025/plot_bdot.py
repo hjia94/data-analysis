@@ -1,15 +1,33 @@
 #!/usr/bin/env python3
 """Plotting routines for averaged Bdot STFT data."""
 
+import os
+
 import numpy as np
+import h5py
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 
+from data_analysis.io.scope_reader import read_hdf5_all_scopes_channels
 from data_analysis.viz.plot_utils import floor_for_lognorm, plot_stft
-from lapd_io import log
+from lapd_io import log, get_bdot_data
+from process_bdot import calculate_bdot_stft
 
 plt.rcParams.update({'font.size': 18})
 plt.rcParams.update({'xtick.labelsize': 18, 'ytick.labelsize': 18})
+
+
+def _save_figure(fig, save_path, what):
+	"""Save fig to save_path, creating its directory. No-op if save_path is falsy.
+
+	Not viz.plot_utils.finalize_figure: that one closes/shows the figure, but
+	callers here leave it open for a later plt.show(block=True).
+	"""
+	if not save_path:
+		return
+	os.makedirs(os.path.dirname(save_path), exist_ok=True)
+	fig.savefig(save_path, dpi=150, bbox_inches='tight')
+	log('PLOT', f"Saved {what} figure to {save_path}")
 
 
 def plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr):
@@ -39,6 +57,36 @@ def plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr):
 				  ax=axes[i], fig=fig, title=description[channel])
 
 	axes[-1].set_xlabel('Time (ms)')
+	plt.show(block=True)
+
+
+def show_example_shot(shot_map, freq_bins=1000, overlap_fraction=0.05,
+					  freq_min=50e6, freq_max=1000e6):
+	"""Raw Bdot trace over its STFT, for the first channel of the last shot in
+	shot_map. STFT defaults match process_bdot.process_bdot."""
+	hdf5_path = list(shot_map.keys())[-1]
+	shot_num, _ = shot_map[hdf5_path][0]
+	with h5py.File(hdf5_path, "r") as f:
+		result = read_hdf5_all_scopes_channels(f, shot_num)
+		tarr_B, bdot_data, descs = get_bdot_data(f, result)
+
+	first_ch = sorted(bdot_data.keys())[0]
+	sig = bdot_data[first_ch]
+	stft_t, freq, stft_mats = calculate_bdot_stft(
+		tarr_B, {first_ch: sig}, freq_bins, overlap_fraction,
+		freq_min, freq_max,
+	)
+
+	fig, axes = plt.subplots(2, 1, figsize=(8, 7),
+							 num=f"Example_{os.path.basename(hdf5_path)}_shot{shot_num}_{first_ch}")
+	axes[0].plot(tarr_B * 1e3, sig, lw=0.5)
+	axes[0].set_xlabel("Time (ms)")
+	axes[0].set_ylabel(f"{first_ch} signal")
+	axes[0].set_title(descs.get(first_ch, first_ch))
+
+	plot_stft(stft_t, freq, stft_mats[first_ch], ax=axes[1], fig=fig)
+	axes[1].set_xlabel("Time (ms)")
+	plt.tight_layout()
 	plt.show(block=True)
 
 
@@ -103,15 +151,11 @@ def plot_bdot_stft_comparison(group_a, group_b, labels=("Group A", "Group B"),
 						wspace=0.05, hspace=0.05)
 	cbar_ax = fig.add_axes([0.92, 0.08, 0.02, 0.87])
 	fig.colorbar(im, cax=cbar_ax, label='Magnitude')
-	if save_path:
-		import os as _os
-		_os.makedirs(_os.path.dirname(save_path), exist_ok=True)
-		fig.savefig(save_path, dpi=150, bbox_inches='tight')
-		log('PLOT', f"Saved comparison figure to {save_path}")
+	_save_figure(fig, save_path, "comparison")
 
 
 def plot_band_power_comparison(power_a, power_b, labels=("Group A", "Group B"),
-							   band=None, bin_s=None, save_path=None):
+							   title=None, save_path=None):
 	"""Plot shot-averaged band power vs time for two groups, one panel per channel.
 
 	Shaded band is +/- std/sqrt(n), the error on the mean: where the two shaded
@@ -119,7 +163,6 @@ def plot_band_power_comparison(power_a, power_b, labels=("Group A", "Group B"),
 
 	power_*: {ch: (bin_centers_s, mean_dB, sem_dB, n_shots)} from
 	compute_group_avg_stft.
-	band: (f_lo_Hz, f_hi_Hz) and bin_s: bin width (s), for the title only.
 	"""
 	channels = sorted(set(power_a.keys()) & set(power_b.keys()))
 	if not channels:
@@ -150,14 +193,9 @@ def plot_band_power_comparison(power_a, power_b, labels=("Group A", "Group B"),
 			ax.legend(fontsize=14)
 
 	axes[-1].set_xlabel('Time (ms)')
-	if band is not None and bin_s is not None:
-		axes[0].set_title(f"{band[0]/1e6:.0f}-{band[1]/1e6:.0f} MHz, "
-						  f"{bin_s*1e3:.0f} ms bins", fontsize=16)
+	if title:
+		axes[0].set_title(title, fontsize=16)
 
 	fig.tight_layout()
-	if save_path:
-		import os as _os
-		_os.makedirs(_os.path.dirname(save_path), exist_ok=True)
-		fig.savefig(save_path, dpi=150, bbox_inches='tight')
-		log('PLOT', f"Saved band-power figure to {save_path}")
+	_save_figure(fig, save_path, "band-power")
 
