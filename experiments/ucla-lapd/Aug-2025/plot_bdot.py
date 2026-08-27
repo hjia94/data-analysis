@@ -95,7 +95,7 @@ def plot_bdot_stft_comparison(group_a, group_b, labels=("Group A", "Group B"),
 			if i == 0:
 				ax.set_title(labels[col])
 			if col == 0:
-				ax.set_ylabel(f"{_strip_x100(desc_a.get(ch, ch))}\nFreq (MHz)")
+				ax.set_ylabel("Freq (MHz)")
 			if i == num_channels - 1:
 				ax.set_xlabel('Time (ms)')
 
