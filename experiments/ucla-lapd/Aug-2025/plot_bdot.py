@@ -171,8 +171,8 @@ def plot_band_power_comparison(power_a, power_b, labels=("Group A", "Group B"),
 
 	num_channels = len(channels)
 	fig, axes = plt.subplots(num_channels, 1,
-							 figsize=(9, 2.6 * num_channels + 1),
-							 num="Bdot_band_power_comparison",
+							 figsize=(9, 3.6 * num_channels + 1),
+							 num="Bdot_band_power_comparison", clear=True,
 							 sharex=True, squeeze=False)
 	axes = axes[:, 0]
 
@@ -186,8 +186,8 @@ def plot_band_power_comparison(power_a, power_b, labels=("Group A", "Group B"),
 			ax.fill_between(t_ms, p_db - sem_db, p_db + sem_db,
 							color=color, alpha=0.2, lw=0)
 			ax.plot(t_ms, p_db, '-o', ms=5, lw=1.5,
-					color=color, label=f"{label}")
-		ax.set_ylabel(f"Whistler Wave Power (dB)")
+					color=color, label=label)
+		ax.set_ylabel("Whistler Wave Power (dB)")
 		ax.grid(True, alpha=0.3)
 		if i == 0:
 			ax.legend(fontsize=14)

@@ -40,14 +40,14 @@ USE_UW_FROM_HDF5 = False
 # STFT / FFT parameters.
 FREQ_BINS = 1000
 OVERLAP_FRACTION = 0.05
-FREQ_MIN = 50e6
+FREQ_MIN = 200e6
 FREQ_MAX = 1000e6
 
 # Number of shots per group for the comparison.
 N_PER_GROUP = 20
 
 # Bdot channels to process/plot; None means all channels on the scope.
-CHANNELS = ("C1")
+CHANNELS = ("C1",)
 
 # Frequency band (Hz) integrated for the band-power-vs-time curves.
 BAND_MIN = 600e6
@@ -366,8 +366,6 @@ def compare_bdot_groups(pass_map, fail_map, base_dir=dir_path):
 	plot_band_power_comparison(
 		power_a, power_b,
 		labels=labels,
-		title=f"{BAND_MIN/1e6:.0f}-{BAND_MAX/1e6:.0f} MHz, "
-			  f"{BAND_BIN_S*1e3:.0f} ms bins",
 		save_path=SAVE_POWER_FIG_PATH,
 	)
 	return group_a, group_b
