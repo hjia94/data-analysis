@@ -8,13 +8,16 @@ imports readers from here and never re-implements parsing.
 
 | Module | What it reads / does |
 |--------|----------------------|
-| `lapd_hdf5.py` | Unified LAPD HDF5 reader — `open_lapd()`, `LapdRun`, `LapdSession`. |
+| `lapd_hdf5.py` | Unified LAPD HDF5 reader — `open_lapd()`, `LapdRun`, `LapdSession` — plus the run-description helpers (`compare_runs`, `gas_puff`, `parse_shunts`, `print_run_description`) and `position_shots`. |
+| `probe_map.py` | Joins moving probes (motion groups) to the digitizer channels that recorded them, by port number parsed from both sides. Campaign-independent; works on pydaq and bapsflib layouts. |
+| `interferometer.py` | Interferometer phase traces merged into pydaq datarun files by `interf_merge_lapd_daq.py` (`read_interferometer`, `InterferometerChannel`). |
 | `scope_reader.py` | Reads oscilloscope traces: LeCroy `.trc`, `.txt`, and scope groups inside HDF5. Optional `scope_io` (from the sibling `LAPD_DAQ` repo) is discovered lazily. |
 | `cine.py` | Phantom high-speed-camera `.cine` movies (+ AVI conversion, motion overlays). |
 | `network_analyzer.py` | Vector network-analyzer CSV exports (`read_NA_data`). |
 | `LeCroy_Scope_Header.py` | LeCroy binary trace header parsing (used by `scope_reader.py`). |
 | `paths.py` | Central output-location resolver (`output_path`) so writers don't hard-code paths. |
-| `_backends/` | **Private.** Per-provenance LAPD HDF5 parsers behind `lapd_hdf5`. Not a public import. |
+| `prompts.py` | Format-agnostic `choose_from_list` — the one interactive picker readers delegate to on an ambiguous choice. |
+| `_backends/` | **Private.** Per-provenance LAPD HDF5 parsers behind `lapd_hdf5`, plus the `run_description` parser. Not a public import. |
 
 ## The unified LAPD reader
 
@@ -83,6 +86,51 @@ per-path and cheaply, so calling `session()` on them raises `NotImplementedError
 — use the `LapdRun` methods directly. Likewise, where a backend lacks a concept
 (e.g. per-shot reads on the 2018 layout), the method raises `NotImplementedError`
 rather than guessing.
+
+## Probe ↔ channel mapping
+
+Nothing in an LAPD HDF5 file structurally links a motion group to the channels
+that recorded it. Both sides are operator-written free text whose only shared key
+is the **port number** (`'<Hermes>  p29_LP'` ↔ `'Isat, LP@P29-R'`), so
+`probe_map.py` parses ports from both sides and joins on them:
+
+```python
+from data_analysis.io import probe_channel_map, moving_group, STATIONARY, UNMAPPED
+
+mapping = probe_channel_map(path)        # {(scope, chan): group | STATIONARY | UNMAPPED}
+group   = moving_group(mapping, ("LPscope", "C1"))   # None when stationary/unmapped
+```
+
+The map covers **every** described channel, so a caller sees stationary and
+unmapped channels explicitly rather than inferring them from absence. A channel
+whose port is claimed by two motion groups raises `AmbiguousProbeMap` — that is a
+real ambiguity in the file, and picking either group would be a guess.
+
+Channel wiring is read from `Configuration/experiment_config`'s `[channels]`
+block, falling back to the per-scope `<CH>_description` attrs; the two disagree in
+real campaigns, and whole blocks of runs have only one of them. bapsflib files
+keep both sides elsewhere (digitizer config + `bmotion`), so each function
+dispatches on the layout while the join itself is unchanged.
+
+## Interferometer traces (pydaq)
+
+`interf_merge_lapd_daq.py` (bapsf_interferometer repo) merges **two** traces per
+channel into a datarun — the one nearest the run's first shot and the one nearest
+its last — under `diagnostics/interferometer/`:
+
+```python
+from data_analysis.io import read_interferometer
+
+chans = read_interferometer(path)   # {name: InterferometerChannel}, all phase_* groups
+```
+
+Each channel carries its calibration factor (m⁻³/rad, assuming a 40 cm plasma
+length) and microwave frequency from the file's own attrs. `phase_p40` shots may
+be zero-filled placeholders flagged `rigol_missing`; those are dropped from
+`phase` and **recorded in `.skipped`** rather than returned as zeros, so a caller
+can tell a missing shot from a real one. A channel whose shots are all missing
+comes back with an empty `phase`. Feeds the absolute `n_e` calibration in
+`data_analysis.plasma.langmuir.interferometer_calibration`.
 
 ## Run-description parser & diff (pydaq)
 

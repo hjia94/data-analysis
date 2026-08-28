@@ -26,7 +26,8 @@ in the package reorg — import from the canonical paths above.
 
 ```python
 from data_analysis.io.cine import read_cine, overlay_motion_frames
-from data_analysis.tracking.track_object import track_object
+from data_analysis.tracking.track_object import (
+    track_object_per_frame, track_object_sparse, chamber_cm_per_px)
 
 cine_path = "path/to/movie.cine"
 avi_path  = cine_path.replace(".cine", ".avi")
@@ -34,13 +35,23 @@ avi_path  = cine_path.replace(".cine", ".avi")
 # 1. Load raw frames (also produces a usable .avi via convert_cine_to_avi)
 tarr, frarr, dt = read_cine(cine_path)
 
-# 2. Track the ball across the whole video (chamber is hardcoded; see below)
-result = track_object(avi_path)
+# 2a. Every-frame tracking (chamber is hardcoded; see below)
+result = track_object_per_frame(avi_path)
 positions, frame_numbers, min_ydiff_frame = result   # TrackingResult is tuple-unpackable
+
+# 2b. Or the sparse tracker: ~5 well-separated frames, fit a line. Needs the
+#     .cine for timing (fps/t_start) even though detection runs on the .avi.
+fit = track_object_sparse(avi_path, cine_path, cm_per_px=chamber_cm_per_px())
 
 # 3. Visualize the trail around any frame
 overlay_motion_frames(frarr, center_frame=min_ydiff_frame, n_frames=30, mode="min")
 ```
+
+**Which tracker.** `track_object_sparse` is what produces the
+`tracking_result.npy` line fits the Aug-2025 X-ray pipeline consumes; it samples
+only enough frames to constrain a line, so it is far cheaper over a campaign.
+`track_object_per_frame` returns every detection and is for inspecting a single
+shot.
 
 ## `data_analysis.io.cine`
 
@@ -62,21 +73,23 @@ Override only if the camera is physically remounted.
 | Function | Description |
 |----------|-------------|
 | `get_chamber()` | Returns `(CHAMBER_CX, CHAMBER_CY, CHAMBER_RADIUS) = (1121, 1113, 609)`. |
-| `chamber_cm_per_px(radius_px=CHAMBER_RADIUS)` | `18 cm / radius_px`. Lies on the chamber back-wall plane, so it does NOT equal the per-port gravity-fit cm/px (see `data_analysis.tracking.evaluate_freefall_accuracy --port-ratio`). |
+| `chamber_cm_per_px(chamber_radius_px=CHAMBER_RADIUS)` | `(CHAMBER_DIAMETER_CM / 2) / chamber_radius_px`. Uses only the known 36 cm chamber disk, independent of the parabola fit — but it lies on the chamber **back-wall** plane, farther from the camera than any port plane, so it is NOT expected to equal the per-port gravity-fit cm/px (see `data_analysis.tracking.evaluate_freefall_accuracy --port-ratio`). Using one where the other belongs rescales every position. |
 
 ### Tracking
 
 | Function | Description |
 |----------|-------------|
-| `track_object(avi_path, cx=None, cy=None, chamber_radius=None, n_workers=1)` | Track the ball through the whole video. Chamber comes from `get_chamber()` unless `cx/cy/chamber_radius` are passed explicitly. Uses a fast cropped-ROI search around the last detection and falls back to full-chamber Hough after `BALL_ROI_LOSS_LIMIT` misses. Set `n_workers>1` to split frames into contiguous ranges across a `multiprocessing.Pool`. Returns a `TrackingResult` dataclass. |
-| `TrackingResult` | Fields: `positions` `(N, 2)`, `frame_numbers` `(N,)`, `min_ydiff_frame`. Iterable, so `pos, fn, mf = track_object(...)` still works. |
+| `track_object_per_frame(avi_path, cx=None, cy=None, chamber_radius=None, n_workers=1)` | Track the ball through every frame of the video. Chamber comes from `get_chamber()` unless `cx/cy/chamber_radius` are passed explicitly. Uses a fast cropped-ROI search around the last detection and falls back to full-chamber Hough after `BALL_ROI_LOSS_LIMIT` misses. Set `n_workers>1` to split frames into contiguous ranges across a `multiprocessing.Pool`. Returns a `TrackingResult`. |
+| `track_object_sparse(avi_path, cine_path, cm_per_px, cx=None, cy=None, chamber_radius=None)` | Sample ~`SPARSE_TARGET_POINTS` frames at least `SPARSE_MIN_SEPARATION_CM` apart and fit a line. Returns a **dict** (the `tracking_result.npy` entry schema), not a `TrackingResult`. Detection runs on the `.avi`; fps and `t_start` come from `cine_path`. |
+| `TrackingResult` | Fields: `positions` `(N, 2)`, `frame_numbers` `(N,)`, `min_ydiff_frame`. Iterable, so `pos, fn, mf = track_object_per_frame(...)` still works. |
+| `position_from_fit(t_ms, fit)`, `get_ball_position_at_time(...)` | Evaluate a saved sparse line fit at a time. |
 
 ### Calibration
 
 | Function | Description |
 |----------|-------------|
-| `extract_calibration(cine_path)` | Track one cine and fit `y_px(τ) = a + bτ + cτ²` to deduce `cm/px = -0.5 g·100 / c`. Returns `(cm_per_px_gravity, cm_per_px_chamber, x_cm)`. |
-| `average_calibration(dir_path, n=5)` | Run `extract_calibration` over up to `n` files matching a port tag in `dir_path`, save the per-port summary to `E:/calibration_factor_P{N}.npy`. |
+| `extract_calibration(cine_path)` | Track one cine and fit `y_px(τ) = a + bτ + cτ²` to deduce `cm/px = -0.5 g·100 / c`. Returns `(cm_per_px_gravity, cm_per_px_chamber, x_cm)`, or `(None, None, None)` on failure — check before using, since the three are not distinguishable from a valid result by shape. |
+| `average_calibration(dir_path, n=5, pattern="*.cine", out_dir=r"E:\\")` | Run `extract_calibration` over up to `n` files in `dir_path` and save a per-port summary under `out_dir`. The port tag (`P21`, `P30`, …) is parsed from the filenames and must be consistent across the sampled files. Drift is summarized per shot as `np.ptp(x_cm)`. |
 
 ### Tracking results dictionary
 
@@ -109,6 +122,10 @@ bodies:
 - `CHAMBER_CX`, `CHAMBER_CY`, `CHAMBER_RADIUS`, `CHAMBER_DIAMETER_CM`
 - `BALL_RADIUS_PX_RANGE`, `BALL_HOUGH_PARAMS`,
   `BALL_ROI_RADIUS_PX`, `BALL_ROI_LOSS_LIMIT`
+- Sparse tracker: `SPARSE_FIRST_DETECT_STRIDE`, `SPARSE_TARGET_POINTS`,
+  `SPARSE_MIN_SEPARATION_CM`, `SPARSE_SWEEP_MAX_FRAMES` (the last is a safety cap
+  on the forward sweep, so a shot the tracker never resolves terminates instead
+  of scanning the whole video)
 
 ## Logging
 

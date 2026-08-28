@@ -20,7 +20,7 @@ count maps.
 | [export_xray_npz.py](export_xray_npz.py) | Export filtered, baseline-subtracted per-shot X-ray traces joined with ball y-position to `.npz` bundles for external sharing. |
 | [process_bdot.py](process_bdot.py)   | Per-shot STFT of every Bdot channel and shot-average across the file. |
 | [plot_bdot.py](plot_bdot.py)         | Plots the shot-averaged STFT spectrograms (LogNorm, `jet`, one panel per channel). |
-| [compare_bdot_groups.py](compare_bdot_groups.py) | Compare averaged Bdot STFT between tracked-vs-untracked shot groups in P24. |
+| [compare_bdot_groups.py](compare_bdot_groups.py) | Compare tracked-vs-untracked shot groups in P24: group-averaged Bdot STFT plus band power vs time per channel (mean ± SEM over shots, averaged in the log domain so one hot shot cannot dominate). |
 | [movie_maker.py](movie_maker.py)     | Interactive / MP4 animation of normalized X-ray counts vs. y-position over time, plus a trajectory-coverage diagnostic movie. |
 | [lp.ipynb](lp.ipynb)                 | Working notebook for the XY-plane Langmuir probe sweep (`lpscope` C1 / C2 → averaged Isat profiles). |
 | [test.ipynb](test.ipynb)             | Single-shot sandbox for tuning the X-ray `Photons` detector parameters. |
@@ -79,13 +79,15 @@ where `file_prefix` is the leading two characters of the HDF5 filename
 | Function | Description |
 |----------|-------------|
 | `calculate_bdot_stft(tarr, bdot_data, freq_bins=1000, overlap_fraction=0.05, freq_min=200e6, freq_max=2000e6)` | Hanning-windowed STFT (via `data_analysis.signal.core.calculate_stft`) for each channel; returns `(stft_time, freq, {channel: matrix})`. |
-| `process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq_max=1000e6, plot=True)` | Iterate every shot in the file, compute per-shot STFT, then average across shots per channel. Plots when `plot=True`. |
+| `process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq_max=1000e6)` | Iterate every shot in the file, compute per-shot STFT, then average across shots per channel. Returns the averages; plotting is the caller's job. |
 | `plot_averaged_bdot_stft(stft_matrices, description, stft_tarr, freq_arr)` | One LogNorm `jet` panel per channel, x in ms, y in MHz. |
-| `_floor_for_lognorm(matrix)` | Replace non-positive entries with the smallest positive value so `LogNorm` does not blow up. |
+| `plot_bdot_stft_comparison(group_a, group_b, labels=..., ...)` | Two groups side by side under one shared `LogNorm` so the panels are comparable. |
+| `plot_band_power_comparison(power_a, power_b, labels=..., ...)` | Band power vs time per channel, with SEM bands, for two shot groups. |
+| `show_example_shot(shot_map, ...)` | Single-shot STFT for eyeballing detector/band settings before a group run. |
 
-The plotter uses `colors.LogNorm`, which would error on zero/negative
-entries — `_floor_for_lognorm` is the reason there is no special-case in
-the plot loop itself.
+`colors.LogNorm` errors on zero/negative entries, so the plotters floor each
+matrix through `floor_for_lognorm` from `data_analysis.viz.plot_utils` — shared
+with the other campaigns rather than duplicated here.
 
 ## `movie_maker.py`
 
@@ -96,7 +98,10 @@ the camera trajectory fits.
 |----------|-------------|
 | `plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False, output_filename='animation.mp4', fps=10)` | Read `analysis_results.npy` and `tracking_result.npy` from `base_dir`, normalize each shot's counts by the number of valid trajectories crossing the same `(y, t)` bin (`data_analysis.tracking.generate_tracking.count_y_passes`), and animate the bar chart. Interactive (slider + Play/Pause) by default; saves an MP4 when `save_mp4=True`. |
 | `plot_trajectory_coverage(base_dir, frame_step_ms=1.0, y_min=-50, y_max=50, y_bin_width=0.5, t_min=0, t_max=45, save_mp4=False, ...)` | Coverage diagnostic — animates valid-trajectory crossings per `(y, t)` bin without using any X-ray data. Useful for spotting under-sampled regions before interpreting `plot_result`. |
-| `draw_frame`, `draw_coverage_frame`, `Player` | Internal helpers for the two animations. |
+| `draw_frame`, `draw_coverage_frame` | Internal per-frame drawing helpers for the two animations. |
+
+The slider/Play-Pause widget is `Player` from `data_analysis.viz.plot_utils`, not
+a local class.
 
 ### Inputs
 
@@ -169,6 +174,8 @@ Beyond the standard scientific stack (`numpy`, `scipy`, `matplotlib`,
 - `data_analysis.tracking.generate_tracking` — `count_y_passes` and the
   producer of `tracking_result.npy`.
 - `data_analysis.io.paths` — `output_path` for figure/output locations.
+- `data_analysis.viz.plot_utils` — `plot_stft`, `floor_for_lognorm`, and the
+  `Player` slider widget (all shared with the other campaigns).
 
 Install the package in editable mode (`pip install -e .` from the repo root)
 so these imports resolve. The same-dir helpers `lapd_io.py` and

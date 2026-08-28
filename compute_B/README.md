@@ -52,7 +52,7 @@ BR, Bz, Bmag = lapd.compute_B_cylindrical(0.1, 8.5)
 
 ### Supply Current Management
 
-The package now provides multiple ways to manage power supply currents:
+Several ways to set the 12 power supply currents:
 
 ```python
 # Set all 12 supply currents at once
@@ -74,8 +74,14 @@ all_currents = lapd.get_supply_currents()  # [I1, I2, ..., I12]
 
 # Direct attribute access (supply1 through supply12)
 print(f"Supply 1 current: {lapd.supply1} A")
-lapd.supply5 = 1500.0  # Direct assignment (use setter methods instead)
 ```
+
+> **Read the `supplyN` attributes; do not assign to them.** The field is computed
+> from `coil.current`, which the setter methods update alongside `supplyN`.
+> A bare `lapd.supply5 = 1500.0` changes only the reported number — the coils keep
+> their old currents, so `compute_B` returns the pre-assignment field while
+> `get_supply_current(5)` reports the new one, with nothing flagging the
+> disagreement.
 
 ### Low-Level Usage
 
@@ -165,9 +171,10 @@ Data structure for individual coil parameters.
 
 ## Examples
 
-See `example.py` for
-1. **`uniform_field_to_currents(B0)`**: Configure uniform field and extract supply currents
-2. **`plot_Bz_onAxis(supply_currents)`**: Use those currents to plot Bz field along machine axis
+`example.py` is runnable (`python compute_B/example.py`) and defines:
+
+1. **`uniform_field_to_currents(B0=0.1)`**: Configure a uniform field and extract the resulting supply currents
+2. **`plot_Bz_onAxis(supply_currents)`**: Use those currents to plot Bz along the machine axis
 
 
 ## Physics Background

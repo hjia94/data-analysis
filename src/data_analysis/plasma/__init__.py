@@ -7,5 +7,5 @@ diagnostic-agnostic in-plane flow-field geometry (polar resolution about a
 fitted rotation centre); ``photons`` holds
 the ``Photons``/``PhotonPulse`` pulse-detection classes; ``cts`` and
 ``sheffield_thomson`` hold collective Thomson-scattering spectral-density and
-form-factor calculations. See REORG_PLAN.md.
+form-factor calculations.
 """
