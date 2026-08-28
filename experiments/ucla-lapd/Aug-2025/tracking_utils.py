@@ -6,7 +6,7 @@ Single source of truth for:
   parsing a cine basename),
 - locating a tracking-dict cine path from (prefix, shot_num),
 - validating tracking entries against the sparse-fit schema written by
-  ``object_tracking/generate_tracking.py``,
+  ``data_analysis.tracking.generate_tracking``,
 - the scope-frame (ms) -> chamber-frame (s) time conversion,
 - evaluating the per-shot linear y-fit at scope times.
 
@@ -49,7 +49,7 @@ def is_valid_tracking_entry(entry, *, strict_schema=False):
 
     With ``strict_schema=True`` (movie_maker style), legacy cache entries —
     anything that is not a dict with a ``y_slope`` key — raise ``TypeError``
-    to force a re-run of ``object_tracking/generate_tracking.py``. With
+    to force a re-run of ``data_analysis.tracking.generate_tracking``. With
     ``strict_schema=False`` (export_xray_npz style), legacy/missing entries
     quietly return False.
     """
@@ -59,7 +59,7 @@ def is_valid_tracking_entry(entry, *, strict_schema=False):
         if strict_schema:
             raise TypeError(
                 "legacy cache entry; re-run "
-                "object_tracking/generate_tracking.py to rebuild "
+                "data_analysis.tracking.generate_tracking to rebuild "
                 "tracking_result.npy with the sparse-fit schema."
             )
         return False
@@ -89,7 +89,7 @@ def scope_ms_to_chamber_s(t_ms, uw_start_ms):
     """Convert scope-trigger-frame time (ms) to chamber-frame time (s).
 
     The chamber-frame time is what the tracking line fit is parameterized by
-    (see ``object_tracking/generate_tracking.py``), so any consumer that
+    (see ``data_analysis.tracking.generate_tracking``), so any consumer that
     evaluates the fit at scope times must go through this conversion.
     """
     return (np.asarray(t_ms, dtype=float) + uw_start_ms) * SCOPE_TO_CHAMBER_S

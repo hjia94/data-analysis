@@ -37,7 +37,8 @@ def export_shot_xray_npz(f_h5, shot_num, file_prefix, tracking_dict,
 						 uw_start_ms, out_dir,
 						 min_ts=0.8e-6, distance_mult=0.1,
 						 threshold=(10, 80), overwrite=False):
-	"""Build one shot's npz bundle and write it to ``out_dir``."""
+	"""Build one shot's npz bundle and write it to ``out_dir``. Skips existing
+	files unless ``overwrite``."""
 	out_path = os.path.join(out_dir, f"{file_prefix}_{shot_num:03d}.npz")
 	if os.path.exists(out_path) and not overwrite:
 		log('EXPORT', f"skip {os.path.basename(out_path)} (exists)")
@@ -77,17 +78,15 @@ def export_shot_xray_npz(f_h5, shot_num, file_prefix, tracking_dict,
 
 def batch_export_xray_npz(base_dir, tracking_path, uw_start_ms,
 						  out_dir=None, overwrite=False):
-	"""Export every shot in every HDF5 in ``base_dir`` to one npz per shot.
+	"""Export every shot in every HDF5 in ``base_dir`` to one npz per shot;
+	out_dir defaults to ``{base_dir}/xray_export``.
 
-	Args:
-		base_dir: Folder containing ``*.hdf5`` scope files.
-		tracking_path: Path to ``tracking_result.npy`` (cine-keyed dict).
-		uw_start_ms: Offset (ms) so that
-			``t_s = (tarr_ds_ms + uw_start_ms) * 1e-3`` is the
-			chamber-frame time used by the tracking fit. Required so this
-			never silently misaligns across campaigns.
-		out_dir: Defaults to ``{base_dir}/xray_export``.
-		overwrite: When True, re-export shots whose npz already exists.
+	uw_start_ms has no default on purpose: it is the per-campaign offset making
+	``(tarr_ds_ms + uw_start_ms) * 1e-3`` the chamber-frame time the tracking
+	fit is parameterized by, and a wrong value misaligns y_cm silently.
+
+	Per-shot failures are logged and skipped, so a completed run does not imply
+	every shot was exported.
 	"""
 	if out_dir is None:
 		out_dir = os.path.join(base_dir, "xray_export")

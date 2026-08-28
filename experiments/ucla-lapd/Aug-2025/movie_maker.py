@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-"""
-Interactive animation of X-ray counts vs position using bar charts.
-
-- X-axis: position r_arr (cm)
-- Y-axis: X-ray counts (bar height)
-- Frames: integer-ms time windows centered at t (ms), selecting all raw points with bin_center in [t-0.5, t+0.5)
-"""
+"""Interactive/mp4 animations of X-ray counts vs position, and of fitted-
+trajectory coverage, for the Aug-2025 LAPD campaign."""
 
 # Standard libs
 import os
@@ -226,22 +221,15 @@ def _show_xray_animation(points):
 
 def plot_result(base_dir, uw_start=30, frame_step_ms=1.0, save_mp4=False,
                 output_filename="animation.mp4", fps=10):
-    """
-    Interactive animation of counts vs position over time.
-    - X-axis: position r_arr (cm)  — distance below chamber centre, evaluated
-      from the per-shot line fit saved by
-      data_analysis.tracking.generate_tracking:track_shots (sparse tracker).
-    - Y-axis: X-ray counts
-    - Frames: time slices defined by bin_centers (ms)
-    - frame_step_ms: time step between frames (default: 1.0 ms)
-    - save_mp4: Whether to save the animation as an MP4 file (requires ffmpeg)
-    - output_filename: The filename for the saved animation (if save_mp4 is True)
-    - fps: Frames per second for the saved animation (if save_mp4 is True)
+    """Animate X-ray counts vs y over time; saves mp4 (needs ffmpeg) or shows
+    an interactive slider.
 
-    Inputs (npy files): analysis_results.npy and tracking_result.npy must
-    already exist in base_dir — produced by process_xray.py and
-    data_analysis.tracking.generate_tracking respectively. The tracking entries
-    carry their own cm_per_px so no calibration file is loaded here.
+    Requires analysis_results.npy and tracking_result.npy in base_dir, from
+    process_xray.py and data_analysis.tracking.generate_tracking. Tracking
+    entries carry their own cm_per_px, so no calibration file is loaded here.
+
+    Counts are normalized per y-bin by the number of trajectories crossing it,
+    so bins crossed by few shots are noisy rather than genuinely low.
     """
     points = _assemble_xray_points(base_dir, uw_start, frame_step_ms)
     if points is None:
@@ -344,12 +332,11 @@ def plot_trajectory_coverage(base_dir, frame_step_ms=1.0, y_min=-50, y_max=50,
                              save_mp4=False,
                              output_filename="trajectory_coverage_animation.mp4",
                              fps=10):
-    """
-    Plot or save a movie of valid fitted trajectory crossings per y-time bin.
+    """Coverage diagnostic: valid fitted trajectory crossings per y-time bin.
 
-    This is a coverage diagnostic for the ensemble reconstruction. It uses only
-    ``tracking_result.npy`` and applies the same per-bin crossing count used by
-    ``plot_result`` for x-ray-count normalization.
+    Uses only ``tracking_result.npy``, and applies the same per-bin crossing
+    count that ``plot_result`` divides by -- so this shows where that
+    normalization is well-sampled.
     """
     grid = _assemble_coverage_grid(base_dir, frame_step_ms, y_min, y_max,
                                    y_bin_width, t_min, t_max)

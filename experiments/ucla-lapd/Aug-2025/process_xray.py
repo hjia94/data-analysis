@@ -14,15 +14,16 @@ from tracking_utils import analysis_key
 
 
 def process_shot_xray(tarr_x, xray_data, min_ts, d, threshold, debug=False):
-	"""Process a single shot of xray data and return data for averaging."""
 	detector = Photons(tarr_x, xray_data, min_timescale=min_ts, distance_mult=d, tsh_mult=threshold, debug=debug)
 	detector.reduce_pulses()
 	return detector.pulse_times, detector.pulse_amplitudes
 
 
 def xray_wt_cam(base_dir, fn):
-	"""Run x-ray pulse detection for every shot in an HDF5 file and append
-	the per-shot ``(pulse_tarr, pulse_amp)`` to ``analysis_results.npy``.
+	"""Append per-shot ``(pulse_tarr, pulse_amp)`` to ``analysis_results.npy``.
+
+	Resumable: shots already keyed in the npy are skipped, so detector
+	parameter changes need the stale keys deleted to take effect.
 	"""
 	ifn = os.path.join(base_dir, fn)
 
@@ -64,8 +65,7 @@ def xray_wt_cam(base_dir, fn):
 
 
 def batch_process_xray(base_dir):
-	"""Batch process all HDF5 files in base_dir using xray_wt_cam,
-	skipping files whose prefix already exists in analysis_results.npy."""
+	"""Batch process all HDF5 files in base_dir using xray_wt_cam."""
 	hdf5_files = [f for f in os.listdir(base_dir) if f.endswith('.hdf5')]
 
 	for fn in hdf5_files:

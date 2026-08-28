@@ -234,9 +234,8 @@ def _band_power_vs_time(stft_mat, freq_arr, stft_tarr, bin_s=BAND_BIN_S,
 
 
 def compute_group_avg_stft(shot_map):
-	"""Compute per-channel averaged Bdot STFT across all shots in shot_map.
+	"""Per-channel averaged Bdot STFT over shot_map {hdf5_path: [(shot_num, _), ...]}.
 
-	shot_map: {hdf5_path: [(shot_num, _ignored), ...]}
 	Returns (avg_stft_matrices, descriptions, stft_tarr, freq_arr, band_power)
 	where band_power is {ch: (bin_centers_s, mean_dB, sem_dB, n_shots)}, averaged
 	in the log domain so one hot shot can't dominate the group mean. sem_dB is

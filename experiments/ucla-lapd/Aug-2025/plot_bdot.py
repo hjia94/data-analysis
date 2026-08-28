@@ -186,8 +186,8 @@ def plot_band_power_comparison(power_a, power_b, labels=("Group A", "Group B"),
 			ax.fill_between(t_ms, p_db - sem_db, p_db + sem_db,
 							color=color, alpha=0.2, lw=0)
 			ax.plot(t_ms, p_db, '-o', ms=5, lw=1.5,
-					color=color, label=f"{label} (n={n})")
-		ax.set_ylabel(f"{ch}\nPower (dB)")
+					color=color, label=f"{label}")
+		ax.set_ylabel(f"Whistler Wave Power (dB)")
 		ax.grid(True, alpha=0.3)
 		if i == 0:
 			ax.legend(fontsize=14)

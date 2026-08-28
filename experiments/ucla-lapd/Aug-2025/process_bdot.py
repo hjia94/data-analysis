@@ -12,20 +12,9 @@ from data_analysis.signal.core import calculate_stft
 
 
 def calculate_bdot_stft(tarr, bdot_data, freq_bins=1000, overlap_fraction=0.05, freq_min=200e6, freq_max=2000e6):
-	"""Calculates STFT for each Bdot signal in bdot_data.
+	"""STFT per Bdot channel: (stft_time, freq, {ch: (n_time, n_freq) or None}).
 
-	Parameters:
-	- tarr: Time array for Bdot signals from get_bdot_data
-	- bdot_data: Dictionary of Bdot data channels from get_bdot_data
-	- freq_bins: Number of frequency bins for STFT
-	- overlap_fraction: Fraction of overlap for STFT windows
-	- freq_min: Minimum frequency to include in STFT
-	- freq_max: Maximum frequency to include in STFT
-
-	Returns:
-	- stft_time: Time array for STFT
-	- freq: Frequency array for STFT
-	- stft_matrices: Dictionary of all STFT matrices by channel name
+	Channels whose data is None map to None rather than being dropped.
 	"""
 	stft_matrices = {}
 	stft_time = None
@@ -44,21 +33,8 @@ def calculate_bdot_stft(tarr, bdot_data, freq_bins=1000, overlap_fraction=0.05, 
 
 
 def process_bdot(ifn, freq_bins=1000, overlap_fraction=0.05, freq_min=50e6, freq_max=1000e6):
-	"""Process Bdot data from an HDF5 file by averaging STFT across all shots for each channel.
-
-	Parameters:
-	- ifn: Path to the HDF5 file
-	- freq_bins: Number of frequency bins for STFT
-	- overlap_fraction: Fraction of overlap for STFT windows
-	- freq_min: Minimum frequency to include in STFT (Hz)
-	- freq_max: Maximum frequency to include in STFT (Hz)
-
-	Returns:
-	- Dictionary of averaged STFT matrices by channel
-	- Dictionary of channel descriptions
-	- Time array for STFT
-	- Frequency array for STFT
-	"""
+	"""Shot-averaged Bdot STFT for one HDF5 file: (avg_stft_matrices,
+	descriptions, stft_tarr, freq_arr). Channels with no data are dropped."""
 	log('BDOT', f"Processing Bdot data from {os.path.basename(ifn)}")
 
 	with h5py.File(ifn, 'r') as f:

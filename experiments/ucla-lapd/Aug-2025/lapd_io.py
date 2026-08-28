@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-"""Shared HDF5 readers and logger for the Aug-2025 LAPD experiment scripts.
-
-Experiment-local glue (logger + scope-data helpers) reused across the Aug-2025
-analysis scripts. Scope reading is provided by the installed ``data_analysis``
-package (``data_analysis.io.scope_reader``).
-"""
+"""Experiment-local glue for the Aug-2025 LAPD scripts: logger + scope-data
+helpers. Scope reading itself lives in ``data_analysis.io.scope_reader``."""
 
 import re
 
@@ -14,12 +10,15 @@ from data_analysis.io.scope_reader import read_scope_channel_descriptions
 
 
 def log(tag, msg):
-	"""Prefixed terminal logger used across the Aug-2025 scripts."""
 	print(f"[{tag}] {msg}")
 
 
 def get_magnetron_power_data(f, result, scope_name='magscope'):
-	"""Calculate magnetron power from HDF5 file data."""
+	"""Returns (tarr, P) smoothed; P is None if current or voltage is missing.
+
+	Current scale (A/V) is scraped from the channel description text, so a
+	description that omits it silently yields power in raw volt-amps.
+	"""
 	if scope_name not in result:
 		log('POWER', f"Scope '{scope_name}' not found.")
 		return None, None
