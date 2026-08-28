@@ -517,13 +517,76 @@ def _eval_polyfit(coeffs, V):
     """Evaluate polynomial fit at given voltages."""
     return np.polyval(coeffs, V)
 
-def analyze_IV(voltage, current, plot=False, calibrated=True):
+def _plot_iv_diagnostics(V, I_raw, I_baseline, I_sub, isat_idx, V_fit, I_fit,
+                         lower_idx, upper_idx, popt, c_trans, d_esat,
+                         trans_voltage, trans_current, esat_volt, esat_curr,
+                         Vp, Te, label):
+    """``analyze_IV``'s three diagnostic panels in one shared-x figure; blocks on show.
+
+    Takes every intermediate it draws because none of them survive in
+    ``analyze_IV``'s return value -- that is the point of the panels.
+    """
+    fig, (ax_isat, ax_exp, ax_vp) = plt.subplots(3, 1, figsize=(11, 13), sharex=True)
+
+    ax_isat.plot(V, I_raw, label='Input (User Smoothed)', color='tab:blue', linewidth=2)
+    ax_isat.plot(V, I_baseline, '--', label='Isat Baseline (Linear)', color='tab:orange')
+    ax_isat.plot(V[:isat_idx], I_raw[:isat_idx], color='tab:orange',
+                 linewidth=4.5, alpha=0.5, zorder=4,
+                 label=f'Isat Fit Region (to {V[isat_idx]:.1f} V)')
+    ax_isat.set_title('1. Isat Baseline Fit')
+    ax_isat.set_ylabel('Current density (A/cm²)')
+    ax_isat.legend(fontsize=8)
+    ax_isat.grid(True, alpha=0.3)
+
+    ax_exp.plot(V, I_raw, label='Input (User Smoothed)', color='tab:blue', linewidth=2)
+    ax_exp.plot(V, I_baseline, '--', label='Isat Baseline (Linear)', color='tab:orange')
+    ax_exp.plot(V, I_sub, label='Isat Subtracted', color='tab:green', linewidth=2)
+    ax_exp.plot(V_fit, I_fit, color='red', label='Region Sent to Fitter', linewidth=4.5, zorder=5)
+
+    V_ext = V[max(0, lower_idx - BOUNDARY_PAD_POINTS) : min(len(V), upper_idx + BOUNDARY_PAD_POINTS)]
+    ax_exp.plot(V_ext, exponential_func(V_ext, *popt), '--', color='purple',
+                label=f'Exp Fit (Te={Te:.2f} eV)', linewidth=2.5, zorder=6)
+
+    ax_exp.set_ylim(np.min(I_raw)*1.1, np.max(I_raw)*1.1)
+    ax_exp.set_title('2. Exponential Fit -> Te')
+    ax_exp.set_ylabel('Current density (A/cm²)')
+    ax_exp.legend(fontsize=8)
+    ax_exp.grid(True, alpha=0.3)
+
+    ax_vp.plot(V, I_sub, label='Isat Subtracted Signal', color='tab:green', linewidth=2)
+    ax_vp.plot(V, _eval_polyfit(c_trans, V), '--', color='tab:red',
+               label='Transition Linear Fit', linewidth=2)
+    ax_vp.plot(V, _eval_polyfit(d_esat, V), '--', color='tab:purple',
+               label='Esat Linear Fit', linewidth=2)
+    ax_vp.plot(trans_voltage, trans_current, 'o', color='tab:red',
+               label='Transition Data Points', markersize=5)
+    ax_vp.plot(esat_volt, esat_curr, 'o', color='tab:purple',
+               label='Esat Data Points', markersize=5)
+
+    ax_vp.set_ylim(np.min(I_sub) - 0.1 * np.max(I_sub), np.max(I_sub) * 1.1)
+    ax_vp.set_xlabel('Voltage (V)')
+    ax_vp.set_ylabel('Current density (A/cm²)')
+    ax_vp.set_title('3. Transition/Esat Crossing -> Vp, I_esat')
+    ax_vp.legend(fontsize=8)
+    ax_vp.grid(True, alpha=0.3)
+
+    fig.suptitle(f'{label}\nVp = {Vp:.2f} V,  Te = {Te:.2f} eV' if label
+                 else f'Langmuir IV Analysis:  Vp = {Vp:.2f} V,  Te = {Te:.2f} eV')
+    fig.tight_layout()
+    plt.show()
+
+
+def analyze_IV(voltage, current, plot=False, calibrated=True, label=""):
     """Analyze one IV curve; returns ``(Vp, Te, ne)``.
 
     ``calibrated`` refers to against interferometer
 
     Both are the same current density up to the Te factor; the units differ, so
     callers that mix runs must not plot them on one axis.
+
+    ``plot=True`` draws the three diagnostic panels into one figure and calls
+    ``plt.show()``; ``label`` names the trace in its title (:func:`show_iv_fit`
+    passes run/position/sweep, which these two bare arrays cannot carry).
     """
     sort_idx = np.argsort(voltage)
     V = voltage[sort_idx]
@@ -596,31 +659,15 @@ def analyze_IV(voltage, current, plot=False, calibrated=True):
         
     Te = 1.0 / popt[1]
 
-    # === DIAGNOSTIC PLOT 1: EXPONENTIAL FIT ===
-    if plot:
-        plt.figure(figsize=(10, 7))
-        plt.plot(V, I_raw, label='Input (User Smoothed)', color='tab:blue', linewidth=2)
-        plt.plot(V, I_baseline, '--', label='Isat Baseline (Linear)', color='tab:orange')
-        plt.plot(V, I_sub, label='Isat Subtracted', color='tab:green', linewidth=2)
-        plt.plot(V_fit, I_fit, color='red', label='Region Sent to Fitter', linewidth=4.5, zorder=5)
-        
-        V_ext = V[max(0, lower_idx - BOUNDARY_PAD_POINTS) : min(len(V), upper_idx + BOUNDARY_PAD_POINTS)]
-        plt.plot(V_ext, exponential_func(V_ext, *popt), '--', color='purple', 
-                 label=f'Exp Fit (Te={Te:.2f} eV)', linewidth=2.5, zorder=6)
-        
-        plt.ylim(np.min(I_raw)*1.1, np.max(I_raw)*1.1)
-        plt.title('Langmuir Probe IV Analysis: Exponential Fit')
-        plt.xlabel('Voltage (V)')
-        plt.ylabel('Current density (A/cm²)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.show()
+    Te_unclamped = Te            # panel 2 labels the fitted Te, not 4b's NaN
 
     # ==========================================
     # 4b. Check for Unreasonable Te
     # ==========================================
     if Te > TE_MAX_EV or Te <= 0:  # Hard threshold
-        Te = np.nan  # Flag returned Te as NaN (ne below does not use Te)
+        # NaN propagates into ne on the uncalibrated path (ne_from_esat divides
+        # by vth(Te)); the calibrated path takes I_esat alone and is unaffected.
+        Te = np.nan
 
     # ==========================================
     # 5. Cross point of the transition and Esat linear fits -> I_esat, Vp
@@ -677,32 +724,13 @@ def analyze_IV(voltage, current, plot=False, calibrated=True):
 
     Vp = np.nan if abs(V_cross) >= VP_MAX_V else V_cross
 
-    # === DIAGNOSTIC PLOT 2: VP INTERSECTION ===
+    # Drawn in one place, after every fit exists: a raise in section 5 would
+    # otherwise leave a half-filled figure open that analyze_IV_safe swallows.
     if plot:
-        plt.figure(figsize=(10, 7))
-        plt.plot(V, I_sub, label='Isat Subtracted Signal', color='tab:green', linewidth=2)
-        
-        y_trans_full = _eval_polyfit(c_trans, V)
-        plt.plot(V, y_trans_full, '--', color='tab:red', label='Transition Linear Fit', linewidth=2)
-        
-        z_esat_full = _eval_polyfit(d_esat, V)
-        plt.plot(V, z_esat_full, '--', color='tab:purple', label='Esat Linear Fit', linewidth=2)
-        
-        plt.plot(trans_voltage, trans_current, 'o', color='tab:red', label='Transition Data Points', markersize=5)
-        plt.plot(esat_volt, esat_curr, 'o', color='tab:purple', label='Esat Data Points', markersize=5)
-        
-        if not np.isnan(V_cross):
-            plt.axvline(V_cross, color='k', linestyle=':', linewidth=2,
-                        label=f'Vp = {V_cross:.2f} V')
-            plt.plot(V_cross, I_esat, 'X', color='black', markersize=10)
-        
-        plt.ylim(np.min(I_sub) - 0.1 * np.max(I_sub), np.max(I_sub) * 1.1)
-        plt.xlabel('Voltage (V)')
-        plt.ylabel('Current density (A/cm²)')
-        plt.title('Plasma Potential (Vp) Determination')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.show()
+        _plot_iv_diagnostics(V, I_raw, I_baseline, I_sub, isat_idx, V_fit, I_fit,
+                             lower_idx, upper_idx, popt, c_trans, d_esat,
+                             trans_voltage, trans_current, esat_volt, esat_curr,
+                             Vp, Te_unclamped, label)
 
     # ==========================================
     # 6. Density
@@ -723,16 +751,39 @@ def analyze_IV_safe(voltage, current, file_name="", verbose=False, calibrated=Tr
     ``calibrated`` selects the ``ne`` convention -- see :func:`analyze_IV`.
     """
     try:
-        # Try to run the main analysis function
-        Vp, Te, ne = analyze_IV(voltage, current, calibrated=calibrated)
-        return Vp, Te, ne
-        
+        return analyze_IV(voltage, current, calibrated=calibrated)
+
     except Exception as e:
         if verbose:
             print(f"[{file_name}] Analysis failed: {e}")
 
         # Return NaNs so the main loop can store them and safely move on
         return np.nan, np.nan, np.nan
+
+
+def show_iv_fit(V_trace, I_trace, label="", calibrated=True):
+    """One trace -> ``analyze_IV``'s diagnostic panels in a GUI window.
+
+    Returns ``(Vp, Te, ne)``.  Takes arrays, not a path: the sweep-npz layout is
+    campaign-specific (see :func:`load_sweep_trace`), the panels are not.
+
+    Switches to an interactive matplotlib backend, so call it only from an
+    interactive session -- never on the batch path, which must stay headless.
+    """
+    import matplotlib
+    # Agg is both the headless default and a deliberate batch choice --
+    # indistinguishable from here -- so switch and say so rather than drawing a
+    # figure that silently goes nowhere.
+    if matplotlib.get_backend().lower() in ("agg", "pdf", "ps", "svg", "template"):
+        print(f"  (show_iv_fit: matplotlib backend "
+              f"{matplotlib.get_backend()} cannot display; switching to qtagg)")
+        matplotlib.use("qtagg")
+
+    Vp, Te, ne = analyze_IV(V_trace, I_trace, plot=True, calibrated=calibrated,
+                            label=label)
+    print(f"Vp = {Vp:.3f} V | Te = {Te:.3f} eV | ne = {ne:.4g}")
+    return Vp, Te, ne
+
 
 #=== batch pipeline: campaign-independent sweep processing + npz I/O =========
 # The raw read (which board/scope/channel, scaling) stays in each experiment
@@ -935,6 +986,44 @@ def load_plasma_data(data_dir, run_num, tip=None):
     with np.load(plasma_path) as ps_data:
         return (ps_data["Vp_arr"], ps_data["Te_arr"], ps_data["ne_arr"],
                 ps_data["Vp_err"], ps_data["Te_err"], ps_data["ne_err"], t_ls)
+
+
+def load_sweep_trace(data_dir, run_num, loc, sweep, shot=0, tip=None,
+                     current_key="Iswp_arr_rs"):
+    """One trace out of a saved sweep npz: ``(V_trace, I_trace, x_cm, t_mid_ms)``.
+
+    ``current_key`` names the npz's current array, defaulting to the
+    single-current-array layout :func:`load_sweep_data` documents.  A campaign
+    holding both tips in one npz passes its own key -- Mar-2026 writes
+    ``IswpL_arr_rs`` / ``IswpR_arr_rs``, where the tip lives in the *key* and its
+    files are untagged, so such a caller passes ``tip=None`` and supplies the tip
+    to ``label`` itself.
+
+    Reads the whole current array: ``np.load`` ignores ``mmap_mode`` for npz, and
+    a deflated zip member cannot be sliced without inflating it anyway.  Fine for
+    one interactive lookup, too slow to sit in a loop.
+    """
+    sweep_path, _ = sweep_npz_paths(data_dir, run_num, tip)
+    with np.load(sweep_path) as data:
+        _require_npz_key(data, current_key, sweep_path,
+                         f"this npz holds {sorted(k for k in data.files if 'swp' in k)}; "
+                         "pass current_key= for a per-tip layout")
+        V_all, I_all = data["Vswp_arr_rs"], data[current_key]
+        # numpy would raise on the index anyway; this names which axis and what
+        # the layout is, which the bare IndexError does not.
+        for axis, idx, n, shape_note in (
+                ("loc", loc, V_all.shape[0], f"Vswp_arr_rs {V_all.shape} (npos, n_sweeps, nt)"),
+                ("sweep", sweep, V_all.shape[1], f"Vswp_arr_rs {V_all.shape} (npos, n_sweeps, nt)"),
+                ("shot", shot, I_all.shape[-3], f"{current_key} {I_all.shape} (npos, nshot, n_sweeps, nt)")):
+            if not -n <= idx < n:
+                raise IndexError(f"{axis}={idx} outside 0..{n-1} in "
+                                 f"{sweep_path}: {shape_note}")
+        # Iswp has a shot axis and Vswp does not: every position/sweep shares one
+        # programmed voltage ramp, only the collected current differs per shot.
+        return (np.asarray(V_all[loc, sweep, :]),
+                np.asarray(I_all[loc, shot, sweep, :]),
+                float(np.asarray(data["xpos"])[loc]),
+                float(np.asarray(data["data_timestamp"])[sweep]) * 1e3)
 
 
 def load_ne_calibrated(data_dir, run_num, tip=None):
