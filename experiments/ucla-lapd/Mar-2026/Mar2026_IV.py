@@ -4,11 +4,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from data_analysis.io import open_lapd
-from data_analysis.plasma.langmuir import prepare_sweep_data, load_plasma_data
+from data_analysis.plasma.langmuir import (SweepRecord, channel_prefix,
+                                           process_sweep_run, load_plasma_data)
 from data_analysis.utils import run_num_of
 
 Aprobe = 2e-3 # 2X1mm probe, in cm^2
 cal_fac = [1, 1] # Ratio between L and R side of probe
+
+# The probe's LAPD port, used to pick its interferometer chord.  Not in the
+# bapsflib channel descriptions, unlike Jun-2026's pydaq files, so a run that
+# moved the probe must pass its own port to process_run.
+PORT = "32"
 #===============================================================================================================================================
 
 def get_IV_arr(sess, adc, npos, nshot):
@@ -38,32 +44,37 @@ def get_IV_arr(sess, adc, npos, nshot):
     #     plt.axvline(tarr[st], color='r', linestyle='--')
     #     plt.axvline(tarr[sp], color='r', linestyle='--')
 
-def save_IV_data(ifn, save_path):
+def process_run(ifn, t_offset=0.0, port=PORT, **driver_kwargs):
+    """Read both probe tips into records, then hand them to the shared driver.
 
+    The Mar-2026 adapter: bapsflib board-4 channels -> the units the driver
+    expects (volts, [A/cm^2]).  Everything after -- detection, analysis, the npz
+    layout, interferometer calibration -- is
+    :func:`data_analysis.plasma.langmuir.process_sweep_run`.
+
+    Both tips share one swept voltage channel (unlike Jun-2026, where each tip
+    has its own), which needs no schema support: two records carrying the same
+    ``Vswp_arr`` with different ``Iswp_arr``.  ``driver_kwargs`` forward to the
+    driver (``calibrate``, ``store_dtype``, ...).  Returns
+    ``(sweep_path, plasma_path)``.
+    """
     with open_lapd(ifn).session() as sess:
-
         adc, digi_dict = sess.digitizer_config()
-        # read probe motion into arrays
         pos_array, xpos, ypos, zpos, npos, nshot = sess.positions()
-
-        # read probe signal into arrays
         tarr, Vswp_arr, IswpL_arr, IswpR_arr = get_IV_arr(sess, adc, npos, nshot)
 
-        # Sweep detection -> reshape -> smoothing (shared batch pipeline), once
-        # per current array; the detected sweeps/timestamps are identical since
-        # both use the same voltage trace.
-        Vswp_arr_rs, IswpL_arr_rs, data_timestamp, *_ = prepare_sweep_data(
-            tarr, Vswp_arr, IswpL_arr, trim_percent=5)
-        _, IswpR_arr_rs, *_ = prepare_sweep_data(
-            tarr, Vswp_arr, IswpR_arr, trim_percent=5)
+    records = [
+        SweepRecord(prefix=channel_prefix(port, tip), tarr=tarr,
+                    Vswp_arr=Vswp_arr,
+                    Iswp_arr=I, xpos=xpos, ypos=ypos, npos=npos, nshot=nshot,
+                    port=port, meta={"I_chan": chan})
+        for tip, I, chan in (("L", IswpL_arr, "board4-ch4"),
+                             ("R", IswpR_arr, "board4-ch6"))]
 
-    # Save everything into a .npz file for later analysis
-    np.savez(save_path, Vswp_arr_rs=Vswp_arr_rs, IswpL_arr_rs=IswpL_arr_rs, IswpR_arr_rs=IswpR_arr_rs,
-             data_timestamp=data_timestamp, xpos=xpos, ypos=ypos, npos=npos, nshot=nshot)
-    print(f"Saved to: {save_path}")
-
-# Batch analysis (process_iv_and_save) + npz loading (load_plasma_data) live in
-# data_analysis.plasma.langmuir now -- call them from there.
+    # trim_percent=5 (not the shared default): this campaign's sweeps carry more
+    # switching noise at the ramp edges.
+    return process_sweep_run(ifn, records, t_offset=t_offset, trim_percent=5,
+                             **driver_kwargs)
 
 
 def plot_result(ne_arr, xpos, ypos, t_ls):
@@ -225,9 +236,11 @@ if __name__ == '__main__':
     # Extract directory and run number from ifn
     data_dir = os.path.dirname(ifn)
     run_num = run_num_of(ifn)
-    
-    # Load data
-    Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls = load_plasma_data(data_dir, run_num)
+
+    # process_run(ifn) first if the npz do not exist yet.  A bare tip label is
+    # enough: load_plasma_data resolves it against the run's channels.
+    Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls = load_plasma_data(
+        data_dir, run_num, tip="L")
     
     # Plot result
     with open_lapd(ifn).session() as sess:

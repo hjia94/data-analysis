@@ -591,7 +591,10 @@ if __name__ == '__main__':
     # =========================================================================
     print("Loading IV/Plasma data...")
     from data_analysis.plasma.langmuir import load_plasma_data
-    Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls = load_plasma_data(data_dir, '11')
+    # The run digitizes both probe tips; name which one this figure uses rather
+    # than letting the loader pick.
+    Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls = load_plasma_data(
+        data_dir, '11', tip="L")
     
     # =========================================================================
     # Plot combined: electron density with Mach probe contours

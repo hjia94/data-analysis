@@ -20,22 +20,19 @@ Figure functions (each reads the relevant run's saved ``.npz`` -- process first)
   (Smith-1974).
 """
 
-import glob
 import os
-import re
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 from data_analysis.io import open_lapd, parse_gas_puff
 from data_analysis.plasma.langmuir import (
-    load_plasma_data, load_ne, load_sweep_axes, tip_tag)
+    load_plasma_data, load_sweep_axes, discover_channels, ne_is_calibrated)
 from data_analysis.signal.core import downsample_blockmean
 from data_analysis.utils import run_num_of
 from data_analysis.viz import plot_utils
 from data_analysis.viz.plot_utils import finalize_figure, grid_by_position
 
-import Jun2026_IV as jiv
 import Jun2026_Isat as jis
 import Jun2026_xcorr as jxc
 
@@ -115,30 +112,6 @@ def run_title(ifn, run_num, run=None):
         return None
     puff = parse_gas_puff(desc.raw)
     return f"{run_num}-{_puff_label(puff)}" if puff else run_num
-
-
-def discover_tips(ifn):
-    """The tip labels :func:`Jun2026_IV.process_run` produced ``.npz`` for.
-
-    Read off the saved ``<run>-tip<T>-sweep-data.npz`` filenames rather than by
-    re-running channel discovery against the raw multi-GB HDF5 -- the saved
-    files *are* what can be plotted (a tip whose processing failed or was
-    skipped has no npz).  An un-tagged ``<run>-sweep-data.npz`` (the override /
-    legacy single-tip case) maps to ``["override"]``.
-    """
-    data_dir, run_num = os.path.dirname(ifn), run_num_of(ifn)
-    tip_re = re.compile(rf"{re.escape(run_num)}-tip(.+)-sweep-data\.npz$")
-    tips = sorted(m.group(1) for m in
-                  (tip_re.match(os.path.basename(p)) for p in
-                   glob.glob(os.path.join(data_dir, f"{run_num}-tip*-sweep-data.npz")))
-                  if m)
-    if not tips:
-        if os.path.isfile(os.path.join(data_dir, f"{run_num}-sweep-data.npz")):
-            return ["override"]
-        raise FileNotFoundError(
-            f"no saved sweep npz for run {run_num} in {data_dir}; run "
-            "Jun2026_IV.process_run(ifn) first")
-    return tips
 
 
 # =========================================================================== #
@@ -383,74 +356,64 @@ def _read_isat_fft(ifn, fft_npz=None):
         return None
 
 
-def _ne_unit(is_density):
-    """Mathtext unit for an ne array by its :func:`load_ne` unit flag."""
-    return "cm$^{-3}$" if is_density else "A/cm$^2$"
-
-
 def _plot_iv_line_tip(data_dir, run_num, tip, tndx_list=None, save_fig=True,
-                      show=False, title=None, isat=None, fft=None,
-                      calibrated=True):
-    """Load one tip's saved IV arrays and draw the line-scan plot (no reprocessing).
+                      show=False, title=None, isat=None, fft=None):
+    """Load one channel's saved IV arrays and draw the line-scan plot (no reprocessing).
 
-    ``tip`` is the discovered tip label, or ``"override"``/``None`` for the
-    un-tagged single-tip files.  ``title`` / ``isat`` / ``fft`` are the
-    tip-invariant pieces the run driver reads once (descriptive title, Isat
-    reference trace, saved FFT); each may be ``None`` for a generic title /
-    blank panel.  ``save_fig`` True routes the PNG through :func:`fig_path`;
-    pass a path to override, or False to skip saving.  ``calibrated`` True
-    (default) plots the interferometer-calibrated ne when it exists, falling
-    back to raw ne otherwise (see :func:`data_analysis.plasma.langmuir.load_ne`).
+    ``tip`` is a channel label from
+    :func:`data_analysis.plasma.langmuir.discover_channels`.  ``title`` /
+    ``isat`` / ``fft`` are the tip-invariant pieces the run driver reads once
+    (descriptive title, Isat reference trace, saved FFT); each may be ``None``
+    for a generic title / blank panel.  ``save_fig`` True routes the PNG through
+    :func:`fig_path`; pass a path to override, or False to skip saving.
+
+    ``ne`` is [cm^-3] whether or not the run was interferometer-calibrated; the
+    subtitle says which, since the two differ in how far the absolute scale can
+    be trusted, not in unit.
     """
-    load_tip = None if tip in (None, "override") else tip
-    Vp_arr, Te_arr, raw_ne, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=load_tip)
-    ne_arr, ne_cal = load_ne(data_dir, run_num, raw_ne, tip=load_tip,
-                             prefer_calibrated=calibrated)
-    xpos, *_ = load_sweep_axes(data_dir, run_num, tip=load_tip)
+    Vp_arr, Te_arr, ne_arr, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=tip)
+    xpos, *_ = load_sweep_axes(data_dir, run_num, tip=tip)
+    if not ne_is_calibrated(data_dir, run_num, tip=tip):
+        title = f"{title or ''} [ne uncalibrated]".strip()
 
     ndx = tndx_list if tndx_list is not None else list(
         range(0, Vp_arr.shape[1], max(1, Vp_arr.shape[1] // 4)))
 
-    name = f"{run_num}{tip_tag(load_tip)}-line"
     plot_iv_line(Vp_arr, Te_arr, ne_arr, xpos, t_ls, ndx,
-                 save_fig=_resolve_save(save_fig, name), show=show,
-                 title=title, isat=isat, fft=fft, ne_unit=_ne_unit(ne_cal))
+                 save_fig=_resolve_save(save_fig, f"{run_num}-{tip}-line"),
+                 show=show, title=title, isat=isat, fft=fft,
+                 ne_unit="cm$^{-3}$")
 
 
-def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=False,
-                     calibrated=True):
+def plot_iv_line_run(ifn, tndx_list=None, save_fig=True, show=False):
     """Draw the IV line-scan plot(s) for a run from already-saved ``.npz``.
 
-    Plots each tip :func:`Jun2026_IV.process_run` saved (see
-    :func:`discover_tips`) from its ``-tip<T>-*.npz`` files -- no reprocessing
-    (apart from the small Isat reference trace).  Run
+    Plots every channel the run's sweep npz holds (see
+    :func:`data_analysis.plasma.langmuir.discover_channels`) -- no reprocessing
+    apart from the small Isat reference trace.  Run
     :func:`Jun2026_IV.process_run` first to create the ``.npz``.  ``save_fig``
-    True writes the PNG via :func:`fig_path`; pass a path to override or False to
-    skip.  ``calibrated`` True (default) plots interferometer-calibrated ne when
-    available, falling back to raw ne with a note otherwise; pass False to force
-    the raw ne.
+    True writes the PNG via :func:`fig_path`; pass a path to override or False
+    to skip.
     """
     data_dir = os.path.dirname(ifn)
     run_num = run_num_of(ifn)
-    tips = discover_tips(ifn)
+    tips = discover_channels(ifn)
 
     # Everything tip-invariant is read ONCE here (the HDF5 is multi-GB): the
     # open run, the descriptive title ("<run_num>-<puff voltage ... ms>"), the
     # Isat reference trace (not in the saved .npz), and the saved all-shot FFT.
-    # Each tip's plot then only loads its own npz.
+    # Each tip's plot then only loads its own keys.
     run = open_lapd(ifn)
     title = run_title(ifn, run_num, run=run)
-    load_tip = None if tips == ["override"] else tips[0]
-    _, _, npos, nshot = load_sweep_axes(data_dir, run_num, tip=load_tip)
+    _, _, npos, nshot = load_sweep_axes(data_dir, run_num, tip=tips[0])
     isat = _read_isat_trace(run, npos, nshot)
     fft = _read_isat_fft(ifn)
 
     for tip in tips:
-        print(f"Plotting IV line-scan for tip {tip} from saved data...")
+        print(f"Plotting IV line-scan for {tip} from saved data...")
         _plot_iv_line_tip(data_dir, run_num, tip, tndx_list=tndx_list,
                           save_fig=save_fig, show=show,
-                          title=title, isat=isat, fft=fft,
-                          calibrated=calibrated)
+                          title=title, isat=isat, fft=fft)
 
 
 # =========================================================================== #
@@ -499,18 +462,17 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
                           isat_scope=jis.SCOPE_NAME, isat_chan=jis.CHAN,
                           isat_nshot=10, isat_tmax_ms=6.0,
                           fft_npz=None, fft_fmax_khz=80.0,
-                          save_fig=False, show=True, calibrated=True):
+                          save_fig=False, show=True):
     """Draw the combined 6-panel IV-line-scan + Isat figure (see section header).
 
     ``iv_ifn`` / ``isat_ifn`` are the run HDF5 paths for the IV line scan
     (panels 1-4, loaded from its saved .npz) and the Isat trace/FFT (panels 5-6).
-    ``iv_tip`` selects the tip whose .npz to load (e.g. ``"L"``).  ``fft_npz``
-    defaults to ``<isat dir>/Jun2026_Isat.OUT_NPZ``; the Isat run must be one of
-    the runs in that batch npz.  The figure title is the gas-puff
-    voltage/time from the IV run's description.  ``save_fig`` False -> don't save;
-    ``show`` True pops the interactive window (set False for headless saving).
-    ``calibrated`` True (default) uses interferometer-calibrated ne when
-    available, else raw ne with a note.
+    ``iv_tip`` selects the channel whose arrays to load (e.g. ``"P29-L"``);
+    ``None`` picks the only one.  ``fft_npz`` defaults to
+    ``<isat dir>/Jun2026_Isat.OUT_NPZ``; the Isat run must be one of the runs in
+    that batch npz.  The figure title is the gas-puff voltage/time from the IV
+    run's description.  ``save_fig`` False -> don't save; ``show`` True pops the
+    interactive window (set False for headless saving).
     """
     data_dir = os.path.dirname(iv_ifn)
     run_num = run_num_of(iv_ifn)
@@ -518,10 +480,11 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
     tndx_list = tndx_list if tndx_list is not None else [-7, -5, -3, -1]
 
     # Panels 1-3: IV arrays + axes from the IV run's saved .npz.
-    Vp_arr, Te_arr, raw_ne, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=iv_tip)
-    ne_arr, ne_cal = load_ne(data_dir, run_num, raw_ne, tip=iv_tip,
-                             prefer_calibrated=calibrated)
+    Vp_arr, Te_arr, ne_arr, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=iv_tip)
     xpos, *_ = load_sweep_axes(data_dir, run_num, tip=iv_tip)
+    puff = puff_title(iv_ifn)
+    if not ne_is_calibrated(data_dir, run_num, tip=iv_tip):
+        puff = f"{puff} [ne uncalibrated]"
 
     # Panels 4-5: raw Isat (shot-averaged) + the all-shot-averaged FFT loaded
     # from the batch npz (shared loader, same as the line-scan figure).
@@ -536,8 +499,7 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
     # description.  marked_times = the (colour, time) of each IV sweep instant,
     # scattered onto the Isat trace below.
     marked_times = _draw_iv_panels(axs[:4], Vp_arr, Te_arr, ne_arr, xpos, t_ls,
-                                   tndx_list, puff_title(iv_ifn),
-                                   ne_unit=_ne_unit(ne_cal))
+                                   tndx_list, puff, ne_unit="cm$^{-3}$")
 
     # Panel 5: Isat raw, shot-averaged, 0..isat_tmax_ms; y clipped to 0..1.  The
     # IV sweep instants are scattered on the line, coloured to match the IV panels.
@@ -550,7 +512,7 @@ def plot_iv_isat_combined(iv_ifn, isat_ifn, iv_tip=None, tndx_list=None,
                     f"scope '{isat_scope}' {isat_chan}",
                     chan_label=f"'{isat_scope}'/{isat_chan}")
 
-    name = f"{run_num}{tip_tag(iv_tip)}-{isat_run_num}-combined"
+    name = f"{run_num}-{iv_tip or 'all'}-{isat_run_num}-combined"
     finalize_figure(fig, save_fig=_resolve_save(save_fig, name), show=show,
                     compact_axes=axs[:4])
 
@@ -683,4 +645,4 @@ if __name__ == '__main__':
 
     iv_ifn = r"D:\data\LAPD\jun2026-jia\06-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
     # isat_ifn = r"D:\data\LAPD\jun2026-jia\07-He-800G-bias40V-Isat-p29-plane_2026-06-10.hdf5"
-    plot_iv_line_run(iv_ifn, save_fig=True, show=False, calibrated=True)
+    plot_iv_line_run(iv_ifn, save_fig=True, show=False)

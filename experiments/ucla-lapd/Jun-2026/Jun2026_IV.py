@@ -66,10 +66,9 @@ from data_analysis.io import (open_lapd, choose_from_list, position_shots,
                               motion_group_for_channel)
 from data_analysis.io.scope_reader import read_scope_channel_descriptions
 from data_analysis.plasma.langmuir import (
-    analyze_IV_safe, prepare_sweep_data, process_iv_and_save, sweep_npz_paths,
-    calibrate_plasma_npz,
+    analyze_IV_safe, prepare_sweep_data, process_sweep_run, SweepRecord,
+    channel_prefix, match_tip, OVERRIDE_PREFIX,
 )
-from data_analysis.utils import run_num_of
 
 # ========================================================================== #
 #  >>> USER OVERRIDE: set which scope / channels are the LP I and V <<<
@@ -90,6 +89,18 @@ V_CHAN = None        # e.g. "C4"; None -> auto-detect the voltage channel
 Aprobe = 2e-3        # probe collection area, cm^2
 RESISTOR = 25.0      # current shunt resistor, ohm (volts on I-channel -> current)
 I_SIGN = -1           # +1 / -1 to orient current (electron current positive at high V)
+
+# None = calibrate iff the run carries interferometer data (the usual case).
+# True forces it and RAISES on a run with none, rather than quietly storing an
+# uncalibrated density under a calibrated name; False stores the uncalibrated
+# density.  Either way ne is [cm^-3] -- the npz records which it is.
+CALIBRATE = None
+
+# Cast for the stored sweep arrays only; analysis always runs in the source
+# precision.  float32 halves the npz (these are smoothed ~12-14-bit digitizer
+# values, so its 24-bit mantissa holds everything physically real); None keeps
+# float64 and the files stay ~2.4x larger.
+SWEEP_STORE_DTYPE = np.float32
 
 LP_SCOPE_CANDIDATES = ("lpscope", "scope")  # scope-group names that may hold the LP IV
 #===============================================================================================================================================
@@ -118,25 +129,34 @@ def find_lp_scope(fn):
 
 
 def _parse_channel_desc(desc):
-    """Parse a channel description into ``(quantity, tip)``.
+    """Parse a channel description into ``(quantity, port, tip)``.
 
-    ``quantity`` is ``'I'`` or ``'V'`` (or ``None`` if not an LP IV channel);
+    ``quantity`` is ``'I'`` or ``'V'`` (``None`` if not an LP IV channel);
+    ``port`` is the ``@PNN`` port number as a string (``None`` if unstated);
     ``tip`` is an uppercased tip label such as ``'L'`` / ``'R'`` (or ``None``).
 
     Examples
     --------
-    ``'I, LP@P29-R'`` -> ``('I', 'R')``
-    ``'V, LP@P29-L'`` -> ``('V', 'L')``
-    ``'I@P33, R'``    -> ``('I', 'R')``
-    ``"Current on 2''"`` -> ``(None, None)`` (not an LP IV channel)
+    ``'I, LP@P29-R'`` -> ``('I', '29', 'R')``
+    ``'V, LP@P29-L'`` -> ``('V', '29', 'L')``
+    ``'I@P33, R'``    -> ``('I', '33', 'R')``
+    ``"Current on 2''"`` -> ``(None, None, None)`` (not an LP IV channel)
+
+    The port is what makes a tip unique: two probes each carrying an L and an R
+    give four channels but only two distinct tip labels, so keying by tip alone
+    silently pairs one probe's I with the other's V.
     """
     if not desc:
-        return None, None
+        return None, None, None
     text = str(desc).strip()
 
     # Quantity: a leading 'I' or 'V' token (handles 'I,' / 'I@' / 'I ').
     m = re.match(r"\s*([IV])\b", text)
     quantity = m.group(1) if m else None
+
+    # Port: the '@P<digits>' token, wherever it sits ('LP@P29-R', 'I@P33, R').
+    port_match = re.search(r"@\s*P(\d+)", text, re.IGNORECASE)
+    port = port_match.group(1) if port_match else None
 
     # Tip label: the last short alphanumeric token after a '-' or ',' (e.g. 'R',
     # 'L', 'X+', 'Y-').  We only need it to pair I with V for the same tip.
@@ -144,26 +164,33 @@ def _parse_channel_desc(desc):
     tip_match = re.search(r"[-,]\s*([A-Za-z][A-Za-z0-9+\-]{0,3})\s*$", text)
     if tip_match:
         tip = tip_match.group(1).upper()
-    return quantity, tip
+    return quantity, port, tip
+
+
 
 
 def discover_lp_channels(fn, scope_name):
     """Identify the I and V scope channels for each probe tip from descriptions.
 
-    Reads the scope group's channel descriptions and groups channels by tip,
-    splitting each into its current (``I``) and voltage (``V``) channel.
+    Reads the scope group's channel descriptions and groups channels by
+    ``(port, tip)``, splitting each into its current (``I``) and voltage (``V``)
+    channel.
 
     Returns
     -------
     pairs : dict[str, dict]
-        ``{tip: {'I': chan_name, 'V': chan_name}}`` for every tip that has a
-        **complete** I+V pair (these are the tips we can analyze).
+        ``{key: {'I': chan, 'V': chan, 'port': port, 'tip': tip}}`` for every
+        tip with a **complete** I+V pair, keyed by :func:`data_analysis.plasma.langmuir.channel_prefix`.
     incomplete : dict[str, dict]
         Same shape, for tips missing either I or V (flagged, not analyzed).
 
     The pairing is data-driven: nothing about which channel is I vs V (or which
     tip) is hardcoded.  A tip missing its current channel -- e.g. the LAPD_DAQ
     "dropped C1" runs -- simply lands in ``incomplete`` and is flagged.
+
+    Raises ``ValueError`` if two channels claim the same quantity for one
+    ``(port, tip)``: that is an ambiguity in the file, and picking either would
+    silently pair one probe tip's current with another's voltage.
     """
     with h5py.File(fn, "r") as f:
         desc = read_scope_channel_descriptions(f, scope_name)
@@ -172,29 +199,38 @@ def discover_lp_channels(fn, scope_name):
     print(f"\nLP scope '{scope_name}' channel descriptions:")
     for chan in sorted(desc):
         d = desc[chan]
-        quantity, tip = _parse_channel_desc(d)
+        quantity, port, tip = _parse_channel_desc(d)
         flag = "" if quantity in ("I", "V") else "   <- not an LP IV channel"
-        print(f"  {chan}: {d!r}  -> quantity={quantity}, tip={tip}{flag}")
-        if quantity in ("I", "V") and tip is not None:
-            tips.setdefault(tip, {})[quantity] = chan
+        print(f"  {chan}: {d!r}  -> quantity={quantity}, port={port}, "
+              f"tip={tip}{flag}")
+        if quantity not in ("I", "V") or tip is None:
+            continue
+        key = channel_prefix(port, tip)
+        entry = tips.setdefault(key, {"port": port, "tip": tip})
+        if quantity in entry:
+            raise ValueError(
+                f"Two channels both describe {quantity} for {key} in scope "
+                f"'{scope_name}': {entry[quantity]} "
+                f"({desc[entry[quantity]]!r}) and {chan} ({d!r}). Cannot tell "
+                "which probe tip each belongs to -- fix the channel "
+                "descriptions, or set the I_CHAN/V_CHAN override to analyze "
+                "one pair explicitly.")
+        entry[quantity] = chan
 
     pairs, incomplete = {}, {}
-    for tip, chans in tips.items():
-        if "I" in chans and "V" in chans:
-            pairs[tip] = chans
-        else:
-            incomplete[tip] = chans
+    for key, chans in tips.items():
+        (pairs if "I" in chans and "V" in chans else incomplete)[key] = chans
 
     if pairs:
         print("\nComplete I+V tips (will be analyzed):")
-        for tip, chans in pairs.items():
-            print(f"  tip {tip}: I={chans['I']}, V={chans['V']}")
+        for key, chans in pairs.items():
+            print(f"  {key}: I={chans['I']}, V={chans['V']}")
     if incomplete:
         print("\n*** FLAG: tips missing a channel (NOT analyzed) ***")
-        for tip, chans in incomplete.items():
-            have = ", ".join(f"{q}={c}" for q, c in chans.items())
+        for key, chans in incomplete.items():
+            have = ", ".join(f"{q}={chans[q]}" for q in ("I", "V") if q in chans)
             missing = "I" if "I" not in chans else "V"
-            print(f"  tip {tip}: have [{have}], MISSING {missing} "
+            print(f"  {key}: have [{have}], MISSING {missing} "
                   f"(e.g. LAPD_DAQ dropped-C1 bug)")
     if not pairs:
         raise ValueError(
@@ -383,26 +419,45 @@ def analyze_tip_at_position(run, scope_name, I_chan, V_chan, pos,
     return analyze_IV_safe(V_rs[0, sweep_idx], I_trace)
 
 
+class IVChannels(NamedTuple):
+    """One tip's scope channels plus the port that identifies which probe it is.
+
+    ``port`` is ``None`` when the descriptions name none (single-probe runs, and
+    the user override); the interferometer chord is derived from it, so a run
+    whose port is unknown must be given a chord explicitly.
+    """
+    scope_name: str
+    I_chan: str
+    V_chan: str
+    port: str | None
+
+
 def resolve_iv_channel_map(ifn):
-    """Every analyzable tip's channels: ``{tip: (scope_name, I_chan, V_chan)}``.
+    """Every analyzable tip's channels: ``{key: IVChannels}``.
+
+    Keys come from :func:`data_analysis.plasma.langmuir.channel_prefix`
+    (``'P29-R'``, or ``'R'`` when the
+    descriptions name no port), so two probes carrying the same tip label stay
+    distinct.
 
     Honors the top-of-file ``SCOPE_NAME`` / ``I_CHAN`` / ``V_CHAN`` override
-    first (which collapses the map to ``{None: ...}`` -- the untagged single-tip
-    case); otherwise auto-detects every complete I+V pair from the channel
-    descriptions.  The single owner of the override-vs-discover decision, shared
-    by :func:`resolve_iv_channels` and :func:`process_run`.
+    first (which collapses the map to ``{OVERRIDE_PREFIX: ...}`` -- one channel
+    naming neither tip nor port); otherwise auto-detects every complete I+V pair
+    from the channel descriptions.  The single owner of the override-vs-discover
+    decision, shared by :func:`resolve_iv_channels` and :func:`process_run`.
     """
     scope_name = SCOPE_NAME if SCOPE_NAME is not None else find_lp_scope(ifn)
 
     if I_CHAN is not None and V_CHAN is not None:
         print(f"\nUsing USER-OVERRIDE channels: I={I_CHAN}, V={V_CHAN} "
               f"(scope '{scope_name}')")
-        return {None: (scope_name, I_CHAN, V_CHAN)}
+        return {OVERRIDE_PREFIX: IVChannels(scope_name, I_CHAN, V_CHAN, None)}
     if (I_CHAN is None) != (V_CHAN is None):
         raise ValueError("Set BOTH I_CHAN and V_CHAN to override, or leave both None.")
 
     pairs, _ = discover_lp_channels(ifn, scope_name)
-    return {tip: (scope_name, chans["I"], chans["V"]) for tip, chans in pairs.items()}
+    return {key: IVChannels(scope_name, c["I"], c["V"], c["port"])
+            for key, c in pairs.items()}
 
 
 def resolve_iv_channels(ifn, tip=None):
@@ -410,81 +465,71 @@ def resolve_iv_channels(ifn, tip=None):
 
     Honors the top-of-file ``SCOPE_NAME`` / ``I_CHAN`` / ``V_CHAN`` override
     first; else picks ``tip`` (default: the first complete I+V pair) from
-    :func:`resolve_iv_channel_map`.  Returns ``(scope_name, I_chan, V_chan)``.
+    :func:`resolve_iv_channel_map`.  Returns an :class:`IVChannels`.
+
+    ``tip`` is a channel label (``'P29-R'``); a bare tip label (``'R'``)
+    is accepted when it matches exactly one channel, and raises when a run
+    carries that label on more than one probe.
     """
     channel_map = resolve_iv_channel_map(ifn)
-    if None in channel_map:                      # override always wins
-        return channel_map[None]
+    if OVERRIDE_PREFIX in channel_map:              # override always wins
+        return channel_map[OVERRIDE_PREFIX]
     if tip is None:
         tip = next(iter(channel_map))
-    if tip not in channel_map:
-        raise ValueError(f"Tip {tip!r} has no complete I+V pair; available: {list(channel_map)}")
-    scope_name, I_chan, V_chan = channel_map[tip]
-    print(f"\nAuto-selected tip {tip}: I={I_chan}, V={V_chan} (scope '{scope_name}')")
-    return scope_name, I_chan, V_chan
+    else:
+        tip = match_tip(channel_map, tip, ifn)
+    chans = channel_map[tip]
+    print(f"\nAuto-selected tip {tip}: I={chans.I_chan}, V={chans.V_chan} "
+          f"(scope '{chans.scope_name}')")
+    return chans
 
 
-def save_IV_data(ifn, save_path, tip=None, run=None, channels=None, positions=None,
-                 motion_group_name=None):
-    """Detect sweeps, reshape + smooth the IV traces, and save to ``.npz``.
+def read_iv_record(ifn, key, chans, run=None, positions=None,
+                   motion_group_name=None):
+    """Read one probe tip's raw sweep data into a :class:`SweepRecord`.
 
-    Same workflow as Mar-2026's ``save_IV_data`` but for the pydaq format and
-    for a single tip.  Channels come from :func:`resolve_iv_channels` (top-of-file
-    override, else auto-detected first complete I+V pair).
+    The Jun-2026 half of the adapter: pydaq scope channels -> the units the
+    shared driver expects (volts, [A/cm^2] with ``I_SIGN`` applied).  Everything
+    after -- detection, analysis, storage, calibration -- is
+    :func:`data_analysis.plasma.langmuir.process_sweep_run`.
 
-    ``run`` / ``channels`` / ``positions`` let a caller that already opened the
-    file, resolved ``(scope_name, I_chan, V_chan)``, and read a
-    :class:`ProbePositions` -- :func:`process_run` -- pass them in instead of
-    re-running discovery for every tip; each ``None`` is resolved here (the
-    standalone / notebook path).
-
-    Returns ``(Vswp_arr_rs, Iswp_arr_rs)`` -- the reshaped sweep arrays just
-    saved -- so the caller can feed :func:`data_analysis.plasma.langmuir.process_iv_and_save` directly instead of
-    re-loading the multi-GB npz it just wrote.
+    ``run`` / ``positions`` let :func:`process_run` reuse the open handle and
+    the per-tip :class:`ProbePositions` instead of re-reading them per tip.
     """
     if run is None:
         run = open_lapd(ifn)
         print(f"backend: {run.backend}")
 
-    scope_name, I_chan, V_chan = (channels if channels is not None
-                                  else resolve_iv_channels(ifn, tip=tip))
-
     pos = positions if positions is not None else read_lp_positions(
         ifn, motion_group_name)
 
-    tarr, Vswp_arr, Iswp_arr = get_IV_arr(run, scope_name, I_chan, V_chan, pos)
+    tarr, Vswp_arr, Iswp_arr = get_IV_arr(
+        run, chans.scope_name, chans.I_chan, chans.V_chan, pos)
 
-    # Sweep detection -> reshape -> smoothing (shared batch pipeline).
-    Vswp_arr_rs, Iswp_arr_rs, data_timestamp, sweep_t_start, sweep_t_stop = \
-        prepare_sweep_data(tarr, Vswp_arr, Iswp_arr)
-
-    # motion_group: which drive xpos/ypos describe. In a two-drive run the other
-    # tip's sweeps sit in a sibling npz with different coordinates, so a reader
-    # that only has the file cannot otherwise tell which probe it is holding.
-    np.savez(save_path, Vswp_arr_rs=Vswp_arr_rs, Iswp_arr_rs=Iswp_arr_rs,
-             data_timestamp=data_timestamp, sweep_t_start=sweep_t_start,
-             sweep_t_stop=sweep_t_stop, xpos=pos.xpos, ypos=pos.ypos,
-             npos=pos.npos, nshot=pos.nshot, I_chan=I_chan, V_chan=V_chan,
-             motion_group=np.str_(pos.motion_group or ""))
-    print(f"Saved to: {save_path}")
-    return Vswp_arr_rs, Iswp_arr_rs
+    # motion_group: which drive xpos/ypos describe.  In a two-drive run the
+    # other tip's coordinates differ, so a reader holding only the npz cannot
+    # otherwise tell which probe a profile belongs to.
+    return SweepRecord(
+        prefix=key, tarr=tarr, Vswp_arr=Vswp_arr, Iswp_arr=Iswp_arr,
+        xpos=pos.xpos, ypos=pos.ypos, npos=pos.npos, nshot=pos.nshot,
+        port=chans.port,
+        meta={"I_chan": chans.I_chan, "V_chan": chans.V_chan,
+              "motion_group": pos.motion_group or ""})
 
 
-# Batch analysis + the npz loaders (load_sweep_data / load_sweep_axes /
-# load_plasma_data) live in data_analysis.plasma.langmuir now; Jun2026_plot
-# imports them from there directly.
 
 
-def process_run(ifn, motion_group_name=None, calibrated=True):
-    """Run the full batch pipeline for **every complete-pair tip** in a run.
+def process_run(ifn, motion_group_name=None, t_offset=0.0, calibrate=CALIBRATE,
+                store_dtype=SWEEP_STORE_DTYPE):
+    """Read every complete-pair tip in a run, then hand them to the shared driver.
 
-    For each tip with a complete I+V pair (from :func:`discover_lp_channels`):
-    sweep-detect + reshape + smooth (:func:`save_IV_data`) -> batch
-    ``analyze_IV`` over all positions/shots (:func:`data_analysis.plasma.langmuir.process_iv_and_save`).  Outputs
-    are saved **per tip** (filenames carry ``-tip<T>``) so the two probes never
-    mix; an override (``I_CHAN``/``V_CHAN``) collapses to the single overridden
-    tip.  Tips missing a channel are flagged and skipped (their results stay
-    absent, never filled from the other probe).
+    This is the Jun-2026 adapter and nothing more: discover the tips
+    (:func:`discover_lp_channels`), read each into a ``SweepRecord``
+    (:func:`read_iv_record`), and call
+    :func:`data_analysis.plasma.langmuir.process_sweep_run`, which owns sweep
+    detection, batch ``analyze_IV``, the npz layout and interferometer
+    calibration.  Tips missing a channel are flagged and skipped by discovery --
+    their results stay absent, never filled from the other probe.
 
     Positions are resolved **per tip**, not once per run: in a two-drive run each
     tip can sit on a different probe, and one shared position array would stamp
@@ -493,48 +538,30 @@ def process_run(ifn, motion_group_name=None, calibrated=True):
     forces one group for every tip, for files whose channels name no port.
 
     No figures are drawn here -- plot from the saved ``.npz`` with
-    ``Jun2026_plot.plot_iv_line_run``.  Returns ``{tip: (sweep_path, plasma_path)}``.
+    ``Jun2026_plot.plot_iv_line_run``.  Returns ``(sweep_path, plasma_path)``.
 
     Current orientation comes from the module-level ``I_SIGN`` (``-1`` for this
     experiment); change it at the top of the file if a run needs the other sign.
-
-    ``calibrated`` True (default) saves the [A/cm^2] proxy for
-    :func:`calibrate_plasma_npz` to scale; False saves a Te-based density
-    (:func:`data_analysis.plasma.langmuir.ne_from_esat`) for runs with no
-    interferometer, which must NOT then be calibrated.
+    ``calibrate`` / ``store_dtype`` default to the module-level toggles.
     """
-    data_dir = os.path.dirname(ifn)
-    run_num = run_num_of(ifn)
-
-    # Tip-invariant work is done ONCE: the open handle and the scope/channel map
-    # (a None tip = the override, flowing through sweep_npz_paths/save_IV_data as
-    # the untagged single-tip case).  Positions are NOT tip-invariant -- see the
-    # docstring -- so they are read inside the loop.
+    # Tip-invariant work is done ONCE: the open handle and the scope/channel
+    # map.  Positions are NOT tip-invariant -- see the docstring -- so they are
+    # read inside the loop.
     run = open_lapd(ifn)
     print(f"backend: {run.backend}")
     channel_map = resolve_iv_channel_map(ifn)
 
-    results = {}
-    for tip, channels in channel_map.items():
-        print("\n" + "=" * 70)
-        print(f"PROCESSING tip {tip if tip is not None else 'override'}")
-        print("=" * 70)
+    records = []
+    for key, chans in channel_map.items():
+        print(f"\n--- reading {key}")
+        group = motion_group_name or motion_group_for_channel(
+            ifn, chans.scope_name, chans.I_chan)
+        records.append(read_iv_record(
+            ifn, key, chans, run=run,
+            positions=read_lp_positions(ifn, group)))
 
-        scope_name, I_chan, _ = channels
-        group = motion_group_name or motion_group_for_channel(ifn, scope_name, I_chan)
-
-        sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
-
-        Vswp_arr_rs, Iswp_arr_rs = save_IV_data(
-            ifn, sweep_path, tip=tip, run=run, channels=channels,
-            positions=read_lp_positions(ifn, group))
-        process_iv_and_save(Vswp_arr_rs, Iswp_arr_rs, plasma_path,
-                            calibrated=calibrated)
-
-        results[tip if tip is not None else "override"] = (sweep_path, plasma_path)
-
-    print(f"\nDone. Processed tips: {list(results)}")
-    return results
+    return process_sweep_run(ifn, records, t_offset=t_offset,
+                             calibrate=calibrate, store_dtype=store_dtype)
 #===========================================================================================================
 #<o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o> <o>
 #===========================================================================================================
@@ -543,23 +570,13 @@ if __name__ == '__main__':
 
     ifn = r"D:\data\LAPD\jun2026-jia\06-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5"
 
-    # False for a run with no merged interferometer data: ne comes from
-    # ne_from_esat(I_esat, Te) instead, and the calibration step is skipped.
-    CALIBRATED = True
-
-    # Batch-process every complete-pair tip and save the .npz results.  Draw the
-    # figures afterwards from the saved .npz with Jun2026_plot.plot_iv_line_run(ifn).
-    results = process_run(ifn, calibrated=CALIBRATED)
-
-    # Calibrate each processed tip's ne against the interferometer chord
-    INTERF_CHAN = "phase_p29"
+    # Scope-vs-interferometer trigger offset [s].  The one calibration input with
+    # no in-file representation -- the chord itself is derived from each probe's
+    # port, and whether to calibrate at all from the run's interferometer data.
     T_OFFSET = 0.012
-    if CALIBRATED:
-        for tip in results:
-            calibrate_plasma_npz(ifn, INTERF_CHAN,
-                                 tip=None if tip == "override" else tip,
-                                 t_offset=T_OFFSET)
-    else:
-        print("\nCALIBRATED=False: ne is a Te-based density [cm^-3]; "
-              "skipping interferometer calibration.")
+
+    # Batch-processes every complete-pair tip, saves one npz pair for the run,
+    # and calibrates in the same pass.  Draw figures afterwards from the saved
+    # npz with Jun2026_plot.plot_iv_line_run(ifn).
+    process_run(ifn, t_offset=T_OFFSET)
 
