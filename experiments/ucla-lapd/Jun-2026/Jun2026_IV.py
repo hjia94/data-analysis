@@ -520,7 +520,7 @@ def read_iv_record(ifn, key, chans, run=None, positions=None,
 
 
 def process_run(ifn, motion_group_name=None, t_offset=0.0, calibrate=CALIBRATE,
-                store_dtype=SWEEP_STORE_DTYPE):
+                store_dtype=SWEEP_STORE_DTYPE, port=None):
     """Read every complete-pair tip in a run, then hand them to the shared driver.
 
     This is the Jun-2026 adapter and nothing more: discover the tips
@@ -537,6 +537,13 @@ def process_run(ifn, motion_group_name=None, t_offset=0.0, calibrate=CALIBRATE,
     (:func:`data_analysis.io.motion_group_for_channel`).  ``motion_group_name``
     forces one group for every tip, for files whose channels name no port.
 
+    ``port`` overrides the port parsed from the channel descriptions, for runs
+    whose descriptions name a port the probe was not on.  It changes both the
+    channel prefix (``'P33-R'`` -> ``'P29-R'``) and the interferometer chord, so
+    it is a claim about which probe took the data -- pass it only with evidence
+    outside the channel description (the motion group, the run description),
+    and record that evidence at the call site.
+
     No figures are drawn here -- plot from the saved ``.npz`` with
     ``Jun2026_plot.plot_iv_line_run``.  Returns ``(sweep_path, plasma_path)``.
 
@@ -550,6 +557,15 @@ def process_run(ifn, motion_group_name=None, t_offset=0.0, calibrate=CALIBRATE,
     run = open_lapd(ifn)
     print(f"backend: {run.backend}")
     channel_map = resolve_iv_channel_map(ifn)
+
+    if port is not None:
+        # The tip label is the part of the prefix the port does not own, so it
+        # survives the re-key: 'P33-R' -> 'P29-R', bare 'R' -> 'P29-R'.
+        channel_map = {channel_prefix(port, key.rpartition("-")[2] or key):
+                       chans._replace(port=port)
+                       for key, chans in channel_map.items()}
+        print(f"\n*** PORT OVERRIDE: channels re-keyed to port {port} "
+              f"-> {list(channel_map)} ***")
 
     records = []
     for key, chans in channel_map.items():

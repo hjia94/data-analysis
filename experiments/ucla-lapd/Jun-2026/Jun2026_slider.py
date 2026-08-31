@@ -834,27 +834,51 @@ def _channel_details(ifn, chans):
 
 
 def _tip_details(ifn):
-    """``{'tip L': 'I lpscope/C1 "Isat, LP@P29-L" + V lpscope/C2 ...'}``.
+    """``{'tip P29-L': 'I lpscope/C1 \u2014 "I, LP@P29-L"; V lpscope/C2 \u2014 ...'}``.
 
     The IV page's counterpart to :func:`_channel_details`. A tip is a *fitted*
     quantity, not a channel: Vp/Te/ne come from an I+V sweep pair, so what
     identifies it is both channels and what the run says each of them was.
-    Returns ``{}`` when the map or the descriptions cannot be read, which is
-    what the caller ships when a run predates description-tagged channels.
+    Returns ``{}`` when the run has no sweep npz, which is what the caller ships
+    for a run that was never processed.
+
+    Keyed off the **sweep npz**, not a fresh discovery pass over the raw file:
+    the npz records the channels analysis actually ran on, so a run processed
+    under a ``port=`` override (:func:`Jun2026_IV.process_run`) is named here by
+    the port it was analyzed as. Re-deriving from the descriptions would label
+    the page with the port they claim while every trace on it carries the other
+    -- a caption that looks authoritative and disagrees with the data.
+
+    The description text still comes from the raw file, since that is the only
+    record of what each scope channel was; it is shown next to the channel it
+    describes, so a description naming a different port stays visible rather
+    than being silently corrected.
     """
-    try:
-        chan_map = jiv.resolve_iv_channel_map(ifn)
-        desc = open_lapd(ifn).channel_descriptions()
-    except (NotImplementedError, OSError, ValueError, FileNotFoundError):
+    from data_analysis.plasma.langmuir import sweep_npz_paths
+
+    sweep_path, _ = sweep_npz_paths(os.path.dirname(ifn), run_num_of(ifn))
+    if not os.path.isfile(sweep_path):
         return {}
+    try:
+        desc = open_lapd(ifn).channel_descriptions()
+    except (NotImplementedError, OSError):
+        desc = {}
+
+    scope = jiv.SCOPE_NAME or jiv.find_lp_scope(ifn)
     out = {}
-    for tip, (scope, i_chan, v_chan) in chan_map.items():
-        parts = []
-        for role, chan in (("I", i_chan), ("V", v_chan)):
-            text = desc.get(scope, {}).get(chan)
-            parts.append(f"{role} {scope}/{chan}"
-                         + (f" \u2014 {text}" if text else ""))
-        out[f"tip {tip}" if tip else "tip"] = "; ".join(parts)
+    with np.load(sweep_path) as d:
+        for tip in (str(c) for c in d["channels"]):
+            parts = []
+            for role in ("I", "V"):
+                key = f"{tip}/{role}_chan"
+                if key not in d.files:
+                    continue
+                chan = str(d[key])
+                text = desc.get(scope, {}).get(chan)
+                parts.append(f"{role} {scope}/{chan}"
+                             + (f" \u2014 {text}" if text else ""))
+            if parts:
+                out[f"tip {tip}"] = "; ".join(parts)
     return out
 
 
