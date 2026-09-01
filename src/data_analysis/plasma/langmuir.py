@@ -44,8 +44,7 @@ from tqdm import tqdm
 
 from data_analysis.signal import line_average
 
-# np.trapz was renamed np.trapezoid in numpy 2.0 (np.trapz deprecated).
-# Prefer the new name, fall back for numpy < 2.0.
+# np.trapz was renamed np.trapezoid in numpy 2.0; fall back for numpy < 2.0.
 trapezoid = getattr(np, "trapezoid", None) or np.trapz
 
 # physical constants (from former lp_analysis.py)
@@ -104,11 +103,11 @@ def EEDF(dIdV, phi, area):
 	f = me/(qe**2*area) * dIdV
 
 	# Integrate to find density
-	ne = math.sqrt(2/me) * integrate.simps(f/np.sqrt(qe*phi), qe*phi)
+	ne = math.sqrt(2/me) * integrate.simpson(f/np.sqrt(qe*phi), x=qe*phi)
 
 	g = f*phi
 
-	Te = integrate.trapz(g, phi) / integrate.trapz(f, phi)
+	Te = integrate.trapezoid(g, phi) / integrate.trapezoid(f, phi)
 
 	return f, ne, Te
 #----------------------------------------------------------------------------------------------------
@@ -674,8 +673,8 @@ def analyze_IV(voltage, current, plot=False, label=""):
     # 4b. Check for Unreasonable Te
     # ==========================================
     if Te > TE_MAX_EV or Te <= 0:  # Hard threshold
-        # NaN propagates into ne on the uncalibrated path (ne_from_esat divides
-        # by vth(Te)); the calibrated path takes I_esat alone and is unaffected.
+        # Costs ne too, deliberately: ne is I_esat/vth(Te), so an implausible
+        # Te makes the density meaningless rather than merely uncertain.
         Te = np.nan
 
     # ==========================================
@@ -718,8 +717,8 @@ def analyze_IV(voltage, current, plot=False, label=""):
     d_esat = _apply_linear_fit(esat_volt, esat_curr)
 
     # c[0]*V + c[1] = d[0]*V + d[1]  =>  V = (d[1] - c[1]) / (c[0] - d[0]).
-    # polyfit returns [slope, intercept], so the slope difference is c[0]-d[0];
-    # the reverse order negates every crossing (a prior abs() hid this).
+    # polyfit returns [slope, intercept]; the reverse operand order negates
+    # every crossing, and an abs() on the result would hide that.
     denom = c_trans[0] - d_esat[0]
     if abs(denom) < DENOM_THRESHOLD:
         V_cross = np.nan
@@ -744,10 +743,9 @@ def analyze_IV(voltage, current, plot=False, label=""):
     # ==========================================
     # 6. Density
     # ==========================================
-    # Dividing Esat by vth(Te) injects the Te fit's scatter into ne, but a
-    # density is what every caller wants and what interferometer calibration
-    # scales; storing bare I_esat here is what used to make ne_arr's unit
-    # depend on whether calibration had run yet.
+    # Dividing Esat by vth(Te) injects the Te fit's scatter into ne, but always
+    # returning a density keeps ne_arr's unit independent of whether
+    # calibration has run -- calibration only rescales it.
     ne = float(ne_from_esat(I_esat, Te))
 
     return (Vp, Te, ne)
