@@ -381,14 +381,11 @@ def find_sweep_indices(V, padding=10):
 
 def reshape_IV(Vsweep_arr, Isweep_arr, start_t_ls, stop_t_ls, trim_percent=1.0):
     """
-    Slices the raw arrays into individual sweeps and trims a percentage off each
-    edge to remove switching noise.
+    Slices the raw arrays into individual sweeps and trims a percentage off each edge to remove switching noise.
 
-    One output sweep per input window: ``find_sweep_indices`` already merged
-    duplicates and dropped partial edge sweeps, so nothing is dropped here --
-    the sweep axis stays aligned with the windows (and any timestamps derived
-    from them).  Windows are sliced to the common minimum length so they stack
-    into one array.
+    One output sweep per input window. The sweep axis stays aligned with the windows.
+    
+    Windows are sliced to the common minimum length so they stack into one array.
     """
     lengths = np.array([stop - start for start, stop in zip(start_t_ls, stop_t_ls)])
     sweep_len = int(lengths.min())
@@ -411,7 +408,7 @@ def reshape_IV(Vsweep_arr, Isweep_arr, start_t_ls, stop_t_ls, trim_percent=1.0):
     Isweep_reshaped = np.stack(I_chunks, axis=2)
     Vsweep_reshaped = np.stack(V_chunks, axis=1)
 
-    return Vsweep_reshaped, -Isweep_reshaped
+    return Vsweep_reshaped, Isweep_reshaped
 
 #=== from lp_iv_analysis.py: canonical IV-curve analyzer =====================
 # --- Configuration constants ---
@@ -1349,9 +1346,18 @@ class SweepRecord(NamedTuple):
     """One probe tip's raw sweep data, in the units the shared pipeline expects.
 
     ``Vswp_arr`` [V] is ``(npos, nsamples)``, shot-averaged; ``Iswp_arr``
-    [A/cm^2] is ``(npos, nshot, nsamples)``.  The current must already carry the
-    campaign's resistor and probe-area division and its sign convention: that
-    is the one place a campaign's electronics are allowed to matter.
+    [A/cm^2] is ``(npos, nshot, nsamples)``.
+
+    **Iswp_arr must be electron-positive: more positive at high V than at low
+    V.**  The campaign owns this completely -- it applies its own
+    ``I_POLARITY`` along with the resistor and probe-area division, and nothing
+    downstream touches the sign again.  ``analyze_IV`` does not flip it either,
+    but it assumes it everywhere (``np.min`` is its ion-saturation floor,
+    ``np.max`` its electron-branch amplitude): given the wrong polarity it does
+    not fail, it fits the two branches in each other's roles and returns a
+    plausible but meaningless Vp/Te/ne.  Campaigns differ -- Jun-2026 digitizes
+    electron-positive (``I_POLARITY=+1``), Mar-2026 electron-negative (``-1``)
+    -- so this is read off the campaign's own hardware, never inherited.
 
     ``prefix`` is the npz key namespace and the channel's identity
     (``'P29-R'``).  ``port`` is the LAPD port the probe sat on, used to derive

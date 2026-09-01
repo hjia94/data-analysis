@@ -11,6 +11,8 @@ from data_analysis.utils import run_num_of
 Aprobe = 2e-3 # 2X1mm probe, in cm^2
 cal_fac = [1, 1] # Ratio between L and R side of probe
 
+I_POLARITY = -1 # if probe current is negative for positive plasma current, set to -1; otherwise 1
+
 # The probe's LAPD port, used to pick its interferometer chord.  Not in the
 # bapsflib channel descriptions, unlike Jun-2026's pydaq files, so a run that
 # moved the probe must pass its own port to process_run.
@@ -31,9 +33,9 @@ def get_IV_arr(sess, adc, npos, nshot):
     Vsweep = np.mean(Vsweep, axis=1)
 
     data, tarr = sess.read_data(4, 4, index_arr=slice(npos*nshot), adc=adc)
-    IsweepL_arr = data['signal'].reshape((npos, nshot, -1)) / (7.2 * Aprobe) # number is resistor value
+    IsweepL_arr = data['signal'].reshape((npos, nshot, -1)) * (I_POLARITY / (7.2 * Aprobe)) # number is resistor value
     data, tarr = sess.read_data(4, 6, index_arr=slice(npos*nshot), adc=adc)
-    IsweepR_arr = data['signal'].reshape((npos, nshot, -1)) / (25 * Aprobe) # number is resistor value
+    IsweepR_arr = data['signal'].reshape((npos, nshot, -1)) * (I_POLARITY / (25 * Aprobe)) # number is resistor value
 
     return tarr, Vsweep, IsweepL_arr, IsweepR_arr
 

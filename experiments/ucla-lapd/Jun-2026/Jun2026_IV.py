@@ -1,10 +1,5 @@
 """Jun-2026 LAPD Langmuir-probe sweep analysis -- batch processing.
 
-Same analysis workflow as ``Mar-2026/Mar2026_IV.py`` (sweep detection ->
-reshape -> smoothing -> per-trace ``analyze_IV`` -> shot-averaged Vp/Te/ne),
-but the data is read from the **new LAPD_DAQ (pydaq) HDF5 format** instead of
-the bapsflib/C-translator format.
-
 This module is the **processing** half: read raw HDF5 -> reshape/smooth the
 sweeps -> batch ``analyze_IV`` -> save the reshaped sweeps and the shot-averaged
 Vp/Te/ne to ``.npz``.  It draws no figures.  Plotting lives in
@@ -12,47 +7,21 @@ Vp/Te/ne to ``.npz``.  It draws no figures.  Plotting lives in
 ``.npz`` back; keeping the two apart means the interactive ``plt.show`` path
 never runs inside the batch loop.
 
-Reading differences vs Mar-2026
--------------------------------
-* Mar-2026 used ``open_lapd(ifn).session()`` and read by ``(board, channel)``
-  from a SIS crate.  Jun-2026 files are LAPD_DAQ pydaq files: channels live in
-  named *scope groups* and are read by scope-channel name (``'C2'`` ...) via
-  ``run.channel(name, scope_name=...)``.
-* Probe positions: the unified ``run.positions()`` expects a ``motion_list``
-  dataset that these files do not have, so it returns ``None``.  We read the
-  positions directly from ``Control/Positions/<group>/positions_setup_array``
-  (the planned unique positions) plus ``positions_array`` (every shot) instead
-  -- see :func:`read_lp_positions`.
-* These runs are a 1-D *line* scan (y == 0, x swept), not the xy-plane of
-  Mar-2026, so the 2-D ``imshow`` map is not meaningful; the center-line plot
-  (``Jun2026_plot.plot_iv_line``) is the primary output.
 
 Which channel is I and which is V
 ---------------------------------
-By default the I and V channels are identified from each channel's own HDF5
-``description`` attribute only (e.g. ``'I, LP@P29-R'`` / ``'V, LP@P29-R'``);
-the experiment / run description prose is never parsed for this.  We pick the
-first probe tip that has a *complete* I+V pair and flag any tip missing a
-channel.  **You can override the selection** in the clearly marked block at the
-top of the file (``SCOPE_NAME`` / ``I_CHAN`` / ``V_CHAN``) -- that always wins.
+By default the I and V channels are identified from HDF5 channel descriptions.
+If description is wrong or missing, override will be needed.
 
-Voltage scaling: on the LAPD_DAQ system the scope auto-detects the probe
-attenuation (HV divider) and folds it into the LeCroy ``vertical_gain`` in the
-header, so the volts returned by ``run.channel`` are already the true probe
-voltage -- there is no separate divider factor to apply here (unlike Mar-2026's
-hand-applied ``x100`` for the SIS digitizer, which did not capture it).
+Voltage scaling: from LeCroy ``vertical_gain`` .
 
 Two probe wiring types appear in these runs: a swept Langmuir tip (a complete
 I+V pair) and a fixed-bias saturation-current tip (an ``I`` channel only).  The
 ``I``-only tips are not Langmuir sweeps and are simply not paired here.  Note
 also some early runs lost scope channel 1 to a LAPD_DAQ bug, so a tip's current
-channel may be absent; such tips are flagged and skipped, but this pattern is
-never assumed -- only complete pairs that are actually present are analyzed.
+channel may be absent; such tips are flagged and skipped.
 
-Calibration: only ``RESISTOR`` and ``Aprobe`` matter for the current scaling
-(plus ``I_SIGN`` to orient the trace).  Absolute density is calibrated against
-the interferometer downstream, so these set only the first-order trend, not a
-final ne.
+Calibration: Absolute density is calibrated against interferometer data when available.
 """
 
 import os
@@ -88,7 +57,13 @@ V_CHAN = None        # e.g. "C4"; None -> auto-detect the voltage channel
 # --------------------------------------------------------------------------- #
 Aprobe = 2e-3        # probe collection area, cm^2
 RESISTOR = 25.0      # current shunt resistor, ohm (volts on I-channel -> current)
-I_SIGN = -1           # +1 / -1 to orient current (electron current positive at high V)
+#: How THIS campaign's digitizer wires the current shunt, not a knob to tune:
+#: +1 = electron current already reads positive at high V (verified against
+#: 03-sweep-data.npz), -1 = it reads negative and must be flipped.  The pipeline
+#: applies no sign of its own, so this alone must leave the trace
+#: electron-positive (see langmuir.SweepRecord).  Mar-2026 wires it the other
+#: way and sets -1; do not copy a value between campaigns.
+I_POLARITY = +1
 
 # None = calibrate iff the run carries interferometer data (the usual case).
 # True forces it and RAISES on a run with none, rather than quietly storing an
@@ -364,7 +339,7 @@ def _read_reshaped(run, scope_name, I_chan, V_chan, pos, pos_index=None):
     Istack, _ = run.channel(I_chan, scope_name=scope_name, shots=shots)
 
     V3d = Vstack.reshape((out_npos, nshot, -1))
-    I3d = Istack.reshape((out_npos, nshot, -1)) * (I_SIGN / (RESISTOR * Aprobe))
+    I3d = Istack.reshape((out_npos, nshot, -1)) * (I_POLARITY / (RESISTOR * Aprobe))
     return tarr, V3d, I3d
 
 
@@ -489,7 +464,7 @@ def read_iv_record(ifn, key, chans, run=None, positions=None,
     """Read one probe tip's raw sweep data into a :class:`SweepRecord`.
 
     The Jun-2026 half of the adapter: pydaq scope channels -> the units the
-    shared driver expects (volts, [A/cm^2] with ``I_SIGN`` applied).  Everything
+    shared driver expects (volts, [A/cm^2] with ``I_POLARITY`` applied).  Everything
     after -- detection, analysis, storage, calibration -- is
     :func:`data_analysis.plasma.langmuir.process_sweep_run`.
 
@@ -523,37 +498,18 @@ def process_run(ifn, motion_group_name=None, t_offset=0.0, calibrate=CALIBRATE,
                 store_dtype=SWEEP_STORE_DTYPE, port=None):
     """Read every complete-pair tip in a run, then hand them to the shared driver.
 
-    This is the Jun-2026 adapter and nothing more: discover the tips
-    (:func:`discover_lp_channels`), read each into a ``SweepRecord``
-    (:func:`read_iv_record`), and call
-    :func:`data_analysis.plasma.langmuir.process_sweep_run`, which owns sweep
-    detection, batch ``analyze_IV``, the npz layout and interferometer
-    calibration.  Tips missing a channel are flagged and skipped by discovery --
-    their results stay absent, never filled from the other probe.
+    workflow: discover the tips (:func:`discover_lp_channels`),
+    read each into a ``SweepRecord`` (:func:`read_iv_record`),
+    call :func:`data_analysis.plasma.langmuir.process_sweep_run`
+    batch ``analyze_IV`` which write npz output.
+    
+    Tips missing a channel are flagged and skipped and results stay absent.
 
-    Positions are resolved **per tip**, not once per run: in a two-drive run each
-    tip can sit on a different probe, and one shared position array would stamp
-    one drive's coordinates onto the other's sweeps
-    (:func:`data_analysis.io.motion_group_for_channel`).  ``motion_group_name``
-    forces one group for every tip, for files whose channels name no port.
+    Positions are resolved **per tip**.
 
-    ``port`` overrides the port parsed from the channel descriptions, for runs
-    whose descriptions name a port the probe was not on.  It changes both the
-    channel prefix (``'P33-R'`` -> ``'P29-R'``) and the interferometer chord, so
-    it is a claim about which probe took the data -- pass it only with evidence
-    outside the channel description (the motion group, the run description),
-    and record that evidence at the call site.
-
-    No figures are drawn here -- plot from the saved ``.npz`` with
-    ``Jun2026_plot.plot_iv_line_run``.  Returns ``(sweep_path, plasma_path)``.
-
-    Current orientation comes from the module-level ``I_SIGN`` (``-1`` for this
-    experiment); change it at the top of the file if a run needs the other sign.
-    ``calibrate`` / ``store_dtype`` default to the module-level toggles.
+    ``port`` overrides the port parsed from the channel descriptions, for runs with wrong or missing information.
     """
-    # Tip-invariant work is done ONCE: the open handle and the scope/channel
-    # map.  Positions are NOT tip-invariant -- see the docstring -- so they are
-    # read inside the loop.
+
     run = open_lapd(ifn)
     print(f"backend: {run.backend}")
     channel_map = resolve_iv_channel_map(ifn)
