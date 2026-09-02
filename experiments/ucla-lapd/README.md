@@ -64,7 +64,7 @@
 | Second derivative `d²I/dV²` | [langmuir.py:301](../../src/data_analysis/plasma/langmuir.py#L301) | plasma potential / EEDF |
 | Smoothed differentiation (Gaussian-then-gradient) | [`derivative`](../../src/data_analysis/plasma/langmuir.py#L116) | noise-suppressed `dI/dV` |
 | Trapezoidal integration | `np.trapezoid` — [langmuir.py:317](../../src/data_analysis/plasma/langmuir.py#L317), [photons.py:230](../../src/data_analysis/plasma/photons.py#L230) | density as area under EEPF; photon pulse area |
-| Chord (line) average of a spatial profile, NaN-tolerant | [`line_average`](../../src/data_analysis/signal/core.py#L450) | interferometer cross-calibration |
+| Chord integral / average of a spatial profile, NaN-tolerant | [`line_integral`](../../src/data_analysis/signal/core.py#L450), [`line_average`](../../src/data_analysis/signal/core.py#L468) | interferometer cross-calibration (integral: an average carries the length it was divided by) |
 
 ## 6. Curve fitting / regression
 
@@ -114,7 +114,7 @@
 
 | Technique | Implementation | Where used |
 |---|---|---|
-| Interferometer-to-Langmuir absolute density calibration (chord-average matching over a time window) | [`interferometer_calibration`](../../src/data_analysis/plasma/langmuir.py#L1188), [`calibrate_plasma_npz`](../../src/data_analysis/plasma/langmuir.py#L1264) | Jun-2026 — scales probe `n_e` to the line-integrated measurement |
+| Interferometer-to-Langmuir absolute density calibration (chord-integral matching over a time window) | [`interferometer_calibration`](../../src/data_analysis/plasma/langmuir.py#L1180), [`calibrate_plasma_npz`](../../src/data_analysis/plasma/langmuir.py#L1264) | Jun-2026 — scales probe `n_e` to the line-integrated measurement |
 | Mach-probe area-ratio (κ) calibration from rotation runs | [`fit_calibration`](../../src/data_analysis/plasma/mach.py#L227) | Jun-2026 P33 6-tip; κ binds to the **probe**, so it carries across ports and campaigns |
 | Trigger-time alignment between instruments | [`compare_trigger_times`](../../src/data_analysis/io/scope_reader.py#L167) | Nov-2024 scope/camera sync |
 | Scope-time ↔ chamber-time mapping | [`scope_ms_to_chamber_s`](Aug-2025/tracking_utils.py#L88) | Aug-2025 x-ray/camera correlation |

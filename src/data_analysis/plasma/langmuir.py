@@ -42,7 +42,7 @@ from scipy import integrate, constants
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 
-from data_analysis.signal import line_average
+from data_analysis.signal import line_integral
 
 # np.trapz was renamed np.trapezoid in numpy 2.0; fall back for numpy < 2.0.
 trapezoid = getattr(np, "trapezoid", None) or np.trapz
@@ -1177,70 +1177,70 @@ def load_sweep_trace(data_dir, run_num, loc, sweep, shot=0, tip=None):
                 float(np.asarray(data[f"{p}/data_timestamp"])[sweep]) * 1e3)
 
 
-def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
-                               interf_ne_line, t_offset=0.0):
-    """Per-sweep calibration of a probe profile against interferometer density.
+#: Edge/peak fraction above which a scan is too truncated to trust the chord
+#: integral without qualification.  Every Jun-2026 channel-run has a sweep at
+#: 27-50%, so this warns on all of them by design -- a real systematic, not a
+#: tripwire.
+_EDGE_FRAC_WARN = 0.10
 
-    Programmatic version of the legacy recipe (LP_analysis Langmuir_Iisat.ipynb):
-    line-average the probe profile along the interferometer chord and ratio it
-    against the interferometer line-averaged ne.  Works for any probe quantity
-    proportional to ne -- the IV-derived ne proxy from :func:`analyze_IV` or
-    raw Isat (both [A/cm^2]; the factor converts to cm^-3).
+
+def _edge_fraction(profile):
+    """Larger scan-endpoint value as a fraction of the profile peak; ``nan`` if empty."""
+    v = np.asarray(profile, dtype=float)
+    v = v[np.isfinite(v)]
+    peak = np.nanmax(v) if v.size else np.nan
+    if v.size < 2 or not np.isfinite(peak) or peak <= 0:
+        return np.nan
+    return max(v[0], v[-1]) / peak
+
+
+def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
+                               interf_ne_integral, t_offset=0.0):
+    """Per-sweep scale factor matching a probe profile's chord integral to the
+    interferometer's.  Works for any probe quantity proportional to ne.
 
     profile_arr : (n_locs, n_sweeps) probe quantity proportional to ne
     x           : (n_locs,) positions [cm] along the interferometer chord
-    t_start, t_stop : (n_sweeps,) sweep time windows [s]
-    interf_t    : (nt,) interferometer time [s] (file stores ms -- caller converts)
-    interf_ne_line : (nt,) line-averaged ne [cm^-3], already shot-averaged
-    t_offset    : scope trigger time relative to the interferometer's t=0
-                  (plasma breakdown), [s].  Added to ``t_start``/``t_stop``
-                  here to express the sweep windows on the interferometer time
-                  base; the caller's scope-timed arrays stay untouched.
+    t_start, t_stop : (n_sweeps,) sweep windows [s], scope time base
+    interf_t    : (nt,) interferometer time [s] (file stores ms)
+    interf_ne_integral : (nt,) shot-averaged int(ne dl) [cm^-2], from
+                  :attr:`~data_analysis.io.interferometer.InterferometerChannel.ne_line_integral_avg_cm2`
+    t_offset    : scope trigger relative to interferometer t=0 (breakdown) [s];
+                  shifts the windows onto that base, not the caller's arrays.
 
-    For each sweep ``k``::
+    Integrals, not averages: an average carries the length it was divided by,
+    and the two diagnostics' lengths differ (nominal ``CAL_PLASMA_LENGTH_M`` vs
+    the scan span), so ratioing averages leaves that ratio in every density.
 
-        factor[k] = mean(interf_ne_line over the window
-                         [t_start[k], t_stop[k]] + t_offset)
-                    / line_average(profile_arr[:, k], x)
+    Returns ``(factor, profile_arr * factor, chord_integral)``, the latter two
+    per-sweep ``(n_sweeps,)``.  A sweep with an empty window or a non-positive
+    chord integral gets ``nan``; no window overlapping at all raises, since that
+    means a wrong ``t_offset`` rather than bad data.
 
-    A sweep with an empty window, or whose line average is not finite and
-    positive, gets a ``nan`` factor (no exception), and the count of calibrated
-    sweeps is printed.  Failed-fit ``nan`` positions are excluded from the line
-    average, not treated as zeros.  But
-    if *no* sweep window overlaps the interferometer trace at all -- the usual
-    symptom of a wrong ``t_offset`` -- this raises ``ValueError`` rather than
-    silently returning an all-``nan`` calibration.  Returns
-    ``(factor, profile_arr * factor, chord_avg)`` -- per-sweep factors
-    ``(n_sweeps,)`` broadcast across locations, plus the probe chord averages
-    ``(n_sweeps,)`` used in the ratio (for plotting against the interferometer
-    trace).
-
-    Caveats: the probe chord average only spans the measured ``x`` range while
-    the interferometer averages its full beam path (through the 40 cm plasma
-    length baked into the phase->ne factor); any trigger-time difference
-    between the two diagnostics must be supplied via ``t_offset``; and the
-    merged interferometer traces come from only the first/last shots of the
-    run, so plasma conditions are assumed stationary across it.
+    Caveats: the probe integral takes ne as zero outside the scan while the
+    interferometer covers its whole beam path, so a scan stopping short of the
+    plasma edge biases every calibrated density **high** -- printed as an edge/peak
+    fraction, since no Jun-2026 scan reaches the edge; and the merged traces are
+    only the run's first/last shots, assuming stationary conditions.
     """
     profile_arr = np.asarray(profile_arr, dtype=float)
     interf_t = np.asarray(interf_t, dtype=float)
-    interf_ne_line = np.asarray(interf_ne_line, dtype=float)
+    interf_ne_integral = np.asarray(interf_ne_integral, dtype=float)
     t_start = np.asarray(t_start, dtype=float) + t_offset
     t_stop = np.asarray(t_stop, dtype=float) + t_offset
 
     n_sweeps = profile_arr.shape[1]
     factor = np.full(n_sweeps, np.nan)
-    # NaN positions are failed fits; line_average integrates the finite subset,
-    # so they are excluded rather than pulling the chord average toward 0.
-    chord_avg = np.array([line_average(profile_arr[:, k], x) for k in range(n_sweeps)])
+    chord_integral = np.array([line_integral(profile_arr[:, k], x)
+                               for k in range(n_sweeps)])
+    edge_frac = np.array([_edge_fraction(profile_arr[:, k]) for k in range(n_sweeps)])
     n_hit = 0
     for k in range(n_sweeps):
         in_win = (interf_t >= t_start[k]) & (interf_t <= t_stop[k])
-        # > 0, not != 0: a non-positive chord average is unphysical for a
-        # density-proportional quantity, and a negative one would flip the sign
-        # of the whole calibrated profile.
-        if in_win.any() and np.isfinite(chord_avg[k]) and chord_avg[k] > 0:
-            factor[k] = np.nanmean(interf_ne_line[in_win]) / chord_avg[k]
+        # > 0, not != 0: line_integral is unsigned, so a non-positive value means
+        # the profile is not density-proportional here; calibrating would flip it.
+        if in_win.any() and np.isfinite(chord_integral[k]) and chord_integral[k] > 0:
+            factor[k] = np.nanmean(interf_ne_integral[in_win]) / chord_integral[k]
             n_hit += 1
     if n_hit == 0:
         raise ValueError(
@@ -1249,43 +1249,31 @@ def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
             f"interferometer spans {interf_t.min():.4g}..{interf_t.max():.4g} s. "
             "Check t_offset (interferometer t=0 is plasma breakdown).")
     print(f"Calibrated {n_hit}/{n_sweeps} sweeps ({n_sweeps - n_hit} had no "
-          "interferometer overlap or a non-finite chord average).")
-    return factor, profile_arr * factor, chord_avg
+          "interferometer overlap or a non-finite chord integral).")
+    worst_edge = np.nanmax(edge_frac) if np.any(np.isfinite(edge_frac)) else np.nan
+    if np.isfinite(worst_edge) and worst_edge > _EDGE_FRAC_WARN:
+        print(f"  Scan truncated: profile still at {worst_edge*100:.0f}% of peak at "
+              "its edge, so the chord integral undercounts and ne is biased HIGH.")
+    return factor, profile_arr * factor, chord_integral
 
 
 def calibrate_plasma_npz(ifn, interf_chan, tip=None, t_offset=0.0):
-    """Calibrate a run's batch IV density against the interferometer, in place.
-
-    Wires the three pieces together for one run + tip: loads the batch
-    ``ne_arr`` and probe positions (from the co-located sweep/plasma npz written
-    by :func:`process_iv_and_save`), reads the merged interferometer chord
-    ``interf_chan`` (:func:`data_analysis.io.read_interferometer`), runs
-    :func:`interferometer_calibration` over each sweep's true time window, and
-    **writes the calibrated density back into the plasma npz** so downstream
-    line-data analysis loads an absolutely-scaled ``ne`` without recomputing.
+    """Calibrate one run+tip's batch IV density against the interferometer, in place.
 
     ``ifn``          : raw datarun HDF5 (its directory + run number locate the npz).
-    ``interf_chan``  : interferometer channel to calibrate against, e.g. ``"phase_p29"``.
+    ``interf_chan``  : chord to calibrate against, e.g. ``"phase_p29"``.
     ``tip``          : probe tip whose channel to calibrate (see :func:`resolve_prefix`).
     ``t_offset``     : scope-vs-interferometer trigger offset [s], forwarded to
-                       :func:`interferometer_calibration` (interferometer t=0 is
-                       plasma breakdown; the scope's sweep windows are shifted
-                       onto that base, the stored arrays are not).
+                       :func:`interferometer_calibration`.
 
-    Writes ``<prefix>/ne_arr`` and ``<prefix>/ne_err`` (both scaled by the same
-    per-sweep factor), ``<prefix>/cal_factor`` (``(n_sweeps,)``; ``nan`` where a
-    sweep window caught no interferometer samples or the probe chord average was
-    non-finite), ``<prefix>/cal_chord`` and ``<prefix>/calibrated = True``;
-    every other channel's keys are carried through unchanged.  Raises
-    ``ValueError`` if ``interf_chan`` has no usable shots, or (via
-    :func:`interferometer_calibration`) if *no* sweep window overlaps the
-    interferometer trace -- the usual sign of a wrong ``t_offset``.  Returns
-    ``(cal_factor, ne_cal_arr, chord_avg)``.
+    Writes ``ne_arr``, ``ne_err``, ``cal_factor``, ``cal_chord`` and
+    ``calibrated`` under ``<prefix>/``, carrying every other channel through
+    unchanged, so downstream loads an absolutely-scaled ``ne`` without
+    recomputing.  Returns ``(cal_factor, ne_cal_arr, chord_integral)``.
 
-    Idempotent: the scale is always applied to ``ne_uncal_arr`` /
-    ``ne_uncal_err``, never to whatever ``ne_arr`` currently holds, so
-    re-running with a different chord or ``t_offset`` replaces the calibration
-    instead of compounding it.
+    Idempotent: the scale is applied to ``ne_uncal_arr`` / ``ne_uncal_err``,
+    never to whatever ``ne_arr`` holds, so re-running with a different chord or
+    ``t_offset`` replaces the calibration instead of compounding it.
     """
     from data_analysis.io import read_interferometer
     from data_analysis.utils import run_num_of
@@ -1319,9 +1307,9 @@ def calibrate_plasma_npz(ifn, interf_chan, tip=None, t_offset=0.0):
         print(f"  interferometer first/last-shot line-ne differ by up to "
               f"{spread:.3g} cm^-3 (two-shot stationarity assumption).")
 
-    factor, ne_cal_arr, chord_avg = interferometer_calibration(
+    factor, ne_cal_arr, chord_integral = interferometer_calibration(
         ne_uncal, xpos, t_start, t_stop,
-        ch.t_ms * 1e-3, ch.ne_line_avg_cm3(), t_offset=t_offset)
+        ch.t_ms * 1e-3, ch.ne_line_integral_avg_cm2, t_offset=t_offset)
 
     keep.update({f"{prefix}/ne_arr": ne_cal_arr,
                  # The same per-sweep factor scales the error: ne_err annotates
@@ -1333,7 +1321,7 @@ def calibrate_plasma_npz(ifn, interf_chan, tip=None, t_offset=0.0):
                  f"{prefix}/calibrated": True})
     np.savez(plasma_path, schema=SCHEMA_VERSION, **keep)
     print(f"Calibrated {prefix} ne against {interf_chan} -> {plasma_path}")
-    return factor, ne_cal_arr, chord_avg
+    return factor, ne_cal_arr, chord_integral
 
 
 #=== the campaign-agnostic driver ============================================
