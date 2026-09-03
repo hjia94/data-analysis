@@ -8,10 +8,10 @@ and the one nearest its LAST shot -- under::
     diagnostics/interferometer/time_array                  time [ms] (LeCroy channels)
     diagnostics/interferometer/time_array_p40              time [ms] (phase_p40 / Rigol)
 
-Each ``phase_*`` group carries the attrs ``calibration factor (m^-3/rad)`` (line-
-averaged density = factor x phase, assuming a 40 cm plasma length) and
-``Microwave frequency (Hz)``.  ``phase_p40`` shots may be zero-filled placeholders
-flagged with a ``rigol_missing`` attr; those are skipped here.
+Each ``phase_*`` group carries the attrs ``calibration factor (m^-3/rad)`` (length-
+contaminated -- see :data:`CAL_PLASMA_LENGTH_M`) and ``Microwave frequency (Hz)``.
+``phase_p40`` shots may be zero-filled placeholders flagged with a
+``rigol_missing`` attr; those are skipped here.
 """
 
 from dataclasses import dataclass, field
@@ -20,6 +20,12 @@ import h5py
 import numpy as np
 
 _INTERF_GROUP = "diagnostics/interferometer"
+
+#: Plasma length [m] divided into the stored ``calibration factor (m^-3/rad)``
+#: by bapsf_interferometer's ``get_calibration_factor``.  Nominal, not the
+#: column the probe sees: the phase measures a length-free line integral, and
+#: multiplying this back out recovers it.
+CAL_PLASMA_LENGTH_M = 0.4
 
 
 @dataclass
@@ -37,12 +43,30 @@ class InterferometerChannel:
 
     @property
     def ne_line_cm3(self):
-        """(nshots_kept, nt) line-averaged density [cm^-3] (40 cm plasma length)."""
+        """(nshots_kept, nt) line-averaged density [cm^-3] over :data:`CAL_PLASMA_LENGTH_M`.
+
+        Only comparable against a chord of that same assumed length.
+        """
         return self.phase * (self.cal / 1e6)
 
+    @property
+    def ne_line_integral_cm2(self):
+        """(nshots_kept, nt) line-integrated density int(ne dl) [cm^-2].
+
+        What the phase measures, free of any plasma-extent assumption: the
+        length cancels against the one divided into ``cal``.
+        """
+        return self.ne_line_cm3 * (CAL_PLASMA_LENGTH_M * 1e2)
+
+    @property
     def ne_line_avg_cm3(self):
         """(nt,) line-averaged density [cm^-3], averaged over the kept shots."""
         return self.ne_line_cm3.mean(axis=0)
+
+    @property
+    def ne_line_integral_avg_cm2(self):
+        """(nt,) line-integrated density [cm^-2], averaged over the kept shots."""
+        return self.ne_line_integral_cm2.mean(axis=0)
 
 
 def read_interferometer(fn, channels=None):

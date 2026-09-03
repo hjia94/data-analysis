@@ -447,18 +447,38 @@ def finite_row_mask(*stacks):
     return good
 
 
-def line_average(profile, x):
-    """Chord (line) average of ``profile(x)``: ``trapezoid(profile, x) / span``.
-
-    NaN-tolerant: integrates over the finite subset of points (a probe scan
-    routinely has failed-fit NaNs); fewer than two finite points -> ``nan``.
-    """
+def _finite_chord(profile, x):
+    """``(profile, x)`` at the points finite in both, or ``(None, None)`` if < 2."""
     profile = np.asarray(profile, dtype=float)
     x = np.asarray(x, dtype=float)
     ok = np.isfinite(profile) & np.isfinite(x)
-    if ok.sum() < 2:
+    return (profile[ok], x[ok]) if ok.sum() >= 2 else (None, None)
+
+
+def line_integral(profile, x):
+    """Chord integral over the finite points; < 2 of them -> ``nan``.
+
+    Unsigned, and zero outside the scanned span: a scan stopping short of the
+    plasma edge undercounts, biasing a calibration ratio built on it high.
+    """
+    profile, x = _finite_chord(profile, x)
+    if profile is None:
         return np.nan
-    return trapezoid(profile[ok], x[ok]) / (x[ok][-1] - x[ok][0])
+    # abs: trapezoid is signed, and a descending x (motion list with delta<0,
+    # via the linspace in bapsflib_daq.positions) would negate the integral.
+    return abs(trapezoid(profile, x))
+
+
+def line_average(profile, x):
+    """Chord average: :func:`line_integral` over the span of the finite points.
+
+    Not comparable across diagnostics -- an average carries the length it was
+    divided by, so ratio :func:`line_integral` instead.
+    """
+    profile, x = _finite_chord(profile, x)
+    if profile is None:
+        return np.nan
+    return line_integral(profile, x) / abs(x[-1] - x[0])
 
 
 def amplitude_spectrum(x, dt, detrend=True, drop_dc=True):

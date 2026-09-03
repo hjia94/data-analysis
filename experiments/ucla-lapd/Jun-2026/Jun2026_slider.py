@@ -48,8 +48,8 @@ from collections import namedtuple
 import numpy as np
 
 from data_analysis.io import open_lapd, parse_gas_puff
-from data_analysis.plasma.langmuir import (load_ne, load_plasma_data,
-                                           load_sweep_axes)
+from data_analysis.plasma.langmuir import (discover_channels, load_plasma_data,
+                                           load_sweep_axes, ne_is_calibrated)
 from data_analysis.utils import run_num_of
 from data_analysis.viz.plot_utils import fig_path, grid_frames
 from data_analysis.viz.slider_html import SCHEMA_VERSION, write_slider_html
@@ -338,7 +338,7 @@ IV_TIP_JITTER_MS = 0.02
 IV_X_LIMIT_CM = 25.0
 
 
-def _iv_run_group(data_dir, run_num, tips, calibrated=True):
+def _iv_run_group(data_dir, run_num, tips):
     """One run as a slider *group*: per-tip traces of each field, vs position.
 
     Returns ``(group, xpos, ne_calibrated)``, or ``None`` when no tip of the run
@@ -348,31 +348,27 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
     timestamp. Runs need not agree on their tips: the page's groups carry their
     own trace names.
 
-    ``ne_calibrated`` is the *unit* of the ne actually loaded, not what was
-    asked for -- True only if every tip returned a density [cm^-3]
-    (:func:`data_analysis.plasma.langmuir.load_ne`).  A tip falling back to the
-    [A/cm^2] proxy clears it; a run processed with ``calibrated=False`` (already
-    a Te-based density) does not.  A banner repeating the *request* would label
-    proxy values as densities.
+    ``ne`` is [cm^-3] either way; ``ne_calibrated`` is True only when *every*
+    tip of the run was interferometer-scaled, since a frame overlays the tips on
+    one axis and an uncalibrated tip's absolute scale rests on ``Aprobe`` and
+    the vth convention instead of a measured line density.
     """
     traces_by_field = {name: [] for name, _ in IV_FIELDS}
-    ne_calibrated = calibrated
+    ne_calibrated = True
     axis_values, xpos = None, None
 
     for tip in tips:
         try:
             Vp, Te, ne, *_errs, t_ls = load_plasma_data(data_dir, run_num, tip=tip)
             xs, *_ = load_sweep_axes(data_dir, run_num, tip=tip)
-        except (FileNotFoundError, OSError, KeyError) as exc:
+            ne_calibrated &= ne_is_calibrated(data_dir, run_num, tip=tip)
+        except (FileNotFoundError, OSError, KeyError, ValueError) as exc:
             # One tip short is a smaller page, not a lost run: the other tips
             # are complete measurements and the schema lets this group carry
             # fewer traces than its neighbours.
             print(f"  (IV: run {run_num} tip {tip} unreadable: {exc}; "
                   "skipping the tip)")
             continue
-        ne, ok = load_ne(data_dir, run_num, ne, tip=tip,
-                         prefer_calibrated=calibrated)
-        ne_calibrated = ne_calibrated and ok
 
         # Crop data in xarray space, where no plasma exists
         keep = np.abs(np.asarray(xs, float)) <= IV_X_LIMIT_CM
@@ -425,50 +421,38 @@ def _iv_run_group(data_dir, run_num, tips, calibrated=True):
     return group, xpos, ne_calibrated
 
 
-def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
+def emit_iv_line_slider_all(ifns, out=None, name=None):
     """Every IV run on **one** page: runs in the dropdown, tips overlaid.
 
     Args:
         ifns: The run ``.hdf5`` paths, in dropdown order. Each needs its saved
-            ``-tip*-plasma-data.npz`` beside it (:func:`Jun2026_IV.process_run`).
+            ``-plasma-data.npz`` beside it (:func:`Jun2026_IV.process_run`).
         out: Destination ``.html``; defaults under :func:`slider_path`.
-        calibrated (bool): Prefer interferometer-calibrated ne -- the rule
-            :func:`data_analysis.plasma.langmuir.load_ne` applies. One page
-            carries one ne unit, so a run that cannot be calibrated is dropped
-            (and named) rather than forcing every run's label down to the raw
-            proxy; pass False to render every run's raw ne instead.
         name (str): Output stem, when the default is not wanted.
+
+    Every run's ne is [cm^-3], so calibrated and uncalibrated runs share a page
+    and an axis; the provenance line names any run whose absolute scale is not
+    interferometer-backed rather than dropping it.
 
     Runs keep their own time axes: they differ in both sweep count and span, so
     the slider holds the frame *index* across a switch and the readout shows the
     real time for the run now selected.
     """
     groups, xpos, shared_label = [], None, None
-    # False as soon as ANY rendered run fell back to raw ne: one banner covers
-    # the whole page, so it must state the weakest guarantee on it.
-    ne_calibrated = calibrated
-    group_calibrated = []          # per-group, parallel to `groups`
+    uncalibrated = []              # run labels whose ne is not interferometer-scaled
     for ifn in ifns:
         data_dir = os.path.dirname(ifn)
         run_num = run_num_of(ifn)
         try:
-            found = jpl.discover_tips(ifn)
+            tips = discover_channels(ifn)
         except FileNotFoundError:
             print(f"  (IV: run {run_num} has no saved sweep data; skipping)")
             continue
-        # "override" marks the untagged single-tip npz -- a real tip whose files
-        # carry no tip suffix, so it is kept and load_plasma_data is asked for
-        # tip=None. Dropping it lost the whole run.
-        tips = [None if t == "override" else t for t in found]
-        if not tips:
-            print(f"  (IV: run {run_num} has no saved tip data; skipping)")
-            continue
 
-        prepared = _iv_run_group(data_dir, run_num, tips, calibrated)
+        prepared = _iv_run_group(data_dir, run_num, tips)
         if prepared is None:
             continue
         group, xs, run_ne_calibrated = prepared
-        ne_calibrated = ne_calibrated and run_ne_calibrated
 
         # Runs keep their acquisition order here, unlike the Isat page: an IV
         # group's frames are timestamps, and the sort key is discarded.
@@ -484,31 +468,19 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
                 f"{group['name']} was measured on a different probe line than "
                 f"{shared_label}; they cannot share one page's x-axis.")
         groups.append(group)
-        group_calibrated.append(run_ne_calibrated)
+        if not run_ne_calibrated:
+            uncalibrated.append(group["name"])
 
     if not groups:
         print("  (IV: no run could be read; nothing to render)")
         return None
 
-    # A group is either a density [cm^-3] or analyze_IV's [A/cm^2] proxy.
-    if calibrated and not ne_calibrated:
-        kept = [g for g, ok in zip(groups, group_calibrated) if ok]
-        dropped = [g["name"] for g, ok in zip(groups, group_calibrated) if not ok]
-        if kept:
-            print(f"  (IV: dropping uncalibrated run(s) {', '.join(dropped)} -- "
-                  "a page carries one ne unit; run calibrate_plasma_npz to include them)")
-            groups = kept
-            ne_calibrated = True
-        else:
-            print("  (IV: no run is calibrated; rendering the raw ne proxy)")
-
-    if not ne_calibrated:                      # every remaining group is the proxy
-        for group in groups:
-            for field in group["fields"]:
-                if field["name"] == "ne":
-                    field["unit"] = "A/cm^2"
-                elif field["name"] == "Te*ne":
-                    field["unit"] = "eV A/cm^2"
+    # Every run is [cm^-3], so none is dropped -- but an uncalibrated run's
+    # absolute scale rests on Aprobe and the vth convention, which a reader
+    # comparing runs on one axis must be told.
+    if uncalibrated:
+        print(f"  (IV: ne not interferometer-calibrated for "
+              f"{', '.join(uncalibrated)}; absolute scale is probe-geometry based)")
 
     bundle = {
         "schema": SCHEMA_VERSION,
@@ -521,7 +493,7 @@ def emit_iv_line_slider_all(ifns, out=None, calibrated=True, name=None):
         "group_label": "Gas puff",
         "provenance": {
             "source": f"{len(groups)} runs, {os.path.basename(os.path.dirname(ifns[0]))}",
-            "params": {"ne": _ne_provenance(calibrated, ne_calibrated),
+            "params": {"ne": _ne_provenance(uncalibrated),
                        "tips": "overlaid per frame",
                        "positions": xpos.size},
             # Every run on this page uses the same probe, so one run's tip
@@ -862,27 +834,51 @@ def _channel_details(ifn, chans):
 
 
 def _tip_details(ifn):
-    """``{'tip L': 'I lpscope/C1 "Isat, LP@P29-L" + V lpscope/C2 ...'}``.
+    """``{'tip P29-L': 'I lpscope/C1 \u2014 "I, LP@P29-L"; V lpscope/C2 \u2014 ...'}``.
 
     The IV page's counterpart to :func:`_channel_details`. A tip is a *fitted*
     quantity, not a channel: Vp/Te/ne come from an I+V sweep pair, so what
     identifies it is both channels and what the run says each of them was.
-    Returns ``{}`` when the map or the descriptions cannot be read, which is
-    what the caller ships when a run predates description-tagged channels.
+    Returns ``{}`` when the run has no sweep npz, which is what the caller ships
+    for a run that was never processed.
+
+    Keyed off the **sweep npz**, not a fresh discovery pass over the raw file:
+    the npz records the channels analysis actually ran on, so a run processed
+    under a ``port=`` override (:func:`Jun2026_IV.process_run`) is named here by
+    the port it was analyzed as. Re-deriving from the descriptions would label
+    the page with the port they claim while every trace on it carries the other
+    -- a caption that looks authoritative and disagrees with the data.
+
+    The description text still comes from the raw file, since that is the only
+    record of what each scope channel was; it is shown next to the channel it
+    describes, so a description naming a different port stays visible rather
+    than being silently corrected.
     """
-    try:
-        chan_map = jiv.resolve_iv_channel_map(ifn)
-        desc = open_lapd(ifn).channel_descriptions()
-    except (NotImplementedError, OSError, ValueError, FileNotFoundError):
+    from data_analysis.plasma.langmuir import sweep_npz_paths
+
+    sweep_path, _ = sweep_npz_paths(os.path.dirname(ifn), run_num_of(ifn))
+    if not os.path.isfile(sweep_path):
         return {}
+    try:
+        desc = open_lapd(ifn).channel_descriptions()
+    except (NotImplementedError, OSError):
+        desc = {}
+
+    scope = jiv.SCOPE_NAME or jiv.find_lp_scope(ifn)
     out = {}
-    for tip, (scope, i_chan, v_chan) in chan_map.items():
-        parts = []
-        for role, chan in (("I", i_chan), ("V", v_chan)):
-            text = desc.get(scope, {}).get(chan)
-            parts.append(f"{role} {scope}/{chan}"
-                         + (f" \u2014 {text}" if text else ""))
-        out[f"tip {tip}" if tip else "tip"] = "; ".join(parts)
+    with np.load(sweep_path) as d:
+        for tip in (str(c) for c in d["channels"]):
+            parts = []
+            for role in ("I", "V"):
+                key = f"{tip}/{role}_chan"
+                if key not in d.files:
+                    continue
+                chan = str(d[key])
+                text = desc.get(scope, {}).get(chan)
+                parts.append(f"{role} {scope}/{chan}"
+                             + (f" \u2014 {text}" if text else ""))
+            if parts:
+                out[f"tip {tip}"] = "; ".join(parts)
     return out
 
 
@@ -944,17 +940,16 @@ def emit_isat_fft_sliders(ifns, **kwargs):
     return [p for p in (emit_isat_fft_slider(f, **kwargs) for f in ifns) if p]
 
 
-def _ne_provenance(requested, is_density):
-    """Banner text for the ne density: what was used, not what was asked for.
+def _ne_provenance(uncalibrated):
+    """Banner text for the ne on this page: [cm^-3] either way, but scaled how.
 
-    ``is_density`` distinguishes the two non-interferometer cases, which the
-    request alone cannot: a Te-based density (npz written with
-    ``calibrated=False``) versus analyze_IV's uncalibrated [A/cm^2] proxy.
+    Names the runs whose absolute scale is probe-geometry based rather than
+    interferometer-backed -- the one thing the [cm^-3] label cannot say.
     """
-    if not requested:
-        return "Te-based (ne_from_esat)" if is_density else "raw proxy [A/cm^2]"
-    return ("interferometer-calibrated" if is_density
-            else "raw proxy (calibration missing; run calibrate_plasma_npz)")
+    if not uncalibrated:
+        return "interferometer-calibrated [cm^-3]"
+    return (f"[cm^-3]; probe-geometry scale (no interferometer) for "
+            f"{', '.join(uncalibrated)}")
 
 
 def _puff_run_entry(ifn, run_num):

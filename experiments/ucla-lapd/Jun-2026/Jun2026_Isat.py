@@ -17,13 +17,6 @@ via ``run.channel(name, scope_name=...)``.  Positions come from
 ``Jun2026_IV.read_lp_positions``.  Isat is a single fixed-bias current trace per
 shot, so there is no sweep detection / reshape -- we read the raw per-shot
 signal at one position and FFT it.
-
-Current scaling (the ``RESISTOR`` / ``Aprobe`` knobs from ``Jun2026_IV``) is
-currently left OFF -- the signal is kept raw (volts).  For fluctuation work the
-*shape* of the spectrum is what matters, not the absolute scaling; the scaling
-lines are commented in place (search ``RESISTOR``) to re-enable later.  The IV
-pipeline's ``I_SIGN`` is likewise irrelevant to Isat (a sign flip doesn't change
-the fluctuation spectrum), so it is not applied here.
 """
 
 import glob

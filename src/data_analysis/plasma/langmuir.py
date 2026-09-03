@@ -12,10 +12,16 @@ batch callers use ``analyze_IV_safe``. ``derivative``, ``find_sweep_indices`` an
 are alternative/legacy analysis methods kept available pending robustness work
 (the routine is subject to change).
 
-The batch-pipeline section at the bottom (``prepare_sweep_data``,
-``process_iv_and_save``, ``sweep_npz_paths`` and the ``load_*`` npz loaders) is
-the campaign-independent half of the Mar-2026 / Jun-2026 sweep workflow: each
-experiment script keeps only its raw-read step and hands the arrays here.
+``process_sweep_run`` at the bottom is the campaign-agnostic driver: a campaign
+script parses its own file format into ``SweepRecord``s -- which board/scope
+channel, which resistor and probe area -- and everything after (sweep detection,
+batch ``analyze_IV``, the npz layout, interferometer calibration) happens here,
+so it cannot drift between campaigns.
+
+One npz pair per run holds every channel, each under a ``<prefix>/`` key
+namespace listed in ``channels`` and versioned by ``schema``.  ``ne`` is always
+a density [cm^-3]; the ``calibrated`` flag says whether an interferometer scale
+was applied, and nothing else changes meaning.
 
 Authors: Jia Han (orig. 2018), Google Gemini (IV analyzer, 2026)
 """
@@ -25,6 +31,8 @@ import math
 import os
 import time
 import warnings
+from contextlib import contextmanager
+from typing import NamedTuple
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -34,10 +42,9 @@ from scipy import integrate, constants
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 
-from data_analysis.signal import line_average
+from data_analysis.signal import line_integral
 
-# np.trapz was renamed np.trapezoid in numpy 2.0 (np.trapz deprecated).
-# Prefer the new name, fall back for numpy < 2.0.
+# np.trapz was renamed np.trapezoid in numpy 2.0; fall back for numpy < 2.0.
 trapezoid = getattr(np, "trapezoid", None) or np.trapz
 
 # physical constants (from former lp_analysis.py)
@@ -96,11 +103,11 @@ def EEDF(dIdV, phi, area):
 	f = me/(qe**2*area) * dIdV
 
 	# Integrate to find density
-	ne = math.sqrt(2/me) * integrate.simps(f/np.sqrt(qe*phi), qe*phi)
+	ne = math.sqrt(2/me) * integrate.simpson(f/np.sqrt(qe*phi), x=qe*phi)
 
 	g = f*phi
 
-	Te = integrate.trapz(g, phi) / integrate.trapz(f, phi)
+	Te = integrate.trapezoid(g, phi) / integrate.trapezoid(f, phi)
 
 	return f, ne, Te
 #----------------------------------------------------------------------------------------------------
@@ -374,14 +381,11 @@ def find_sweep_indices(V, padding=10):
 
 def reshape_IV(Vsweep_arr, Isweep_arr, start_t_ls, stop_t_ls, trim_percent=1.0):
     """
-    Slices the raw arrays into individual sweeps and trims a percentage off each
-    edge to remove switching noise.
+    Slices the raw arrays into individual sweeps and trims a percentage off each edge to remove switching noise.
 
-    One output sweep per input window: ``find_sweep_indices`` already merged
-    duplicates and dropped partial edge sweeps, so nothing is dropped here --
-    the sweep axis stays aligned with the windows (and any timestamps derived
-    from them).  Windows are sliced to the common minimum length so they stack
-    into one array.
+    One output sweep per input window. The sweep axis stays aligned with the windows.
+    
+    Windows are sliced to the common minimum length so they stack into one array.
     """
     lengths = np.array([stop - start for start, stop in zip(start_t_ls, stop_t_ls)])
     sweep_len = int(lengths.min())
@@ -404,7 +408,7 @@ def reshape_IV(Vsweep_arr, Isweep_arr, start_t_ls, stop_t_ls, trim_percent=1.0):
     Isweep_reshaped = np.stack(I_chunks, axis=2)
     Vsweep_reshaped = np.stack(V_chunks, axis=1)
 
-    return Vsweep_reshaped, -Isweep_reshaped
+    return Vsweep_reshaped, Isweep_reshaped
 
 #=== from lp_iv_analysis.py: canonical IV-curve analyzer =====================
 # --- Configuration constants ---
@@ -576,13 +580,14 @@ def _plot_iv_diagnostics(V, I_raw, I_baseline, I_sub, isat_idx, V_fit, I_fit,
     plt.show()
 
 
-def analyze_IV(voltage, current, plot=False, calibrated=True, label=""):
-    """Analyze one IV curve; returns ``(Vp, Te, ne)``.
+def analyze_IV(voltage, current, plot=False, label=""):
+    """Analyze one IV curve; returns ``(Vp [V], Te [eV], ne [cm^-3])``.
 
-    ``calibrated`` refers to against interferometer
-
-    Both are the same current density up to the Te factor; the units differ, so
-    callers that mix runs must not plot them on one axis.
+    ``ne`` is always a density (:func:`ne_from_esat`), never the raw Esat
+    current density -- interferometer calibration scales this by a dimensionless
+    per-sweep factor, so both calibrated and uncalibrated runs carry the same
+    unit and can share an axis.  Uncalibrated, the absolute scale is only as
+    good as ``Aprobe`` and the vth convention: see :func:`ne_from_esat`.
 
     ``plot=True`` draws the three diagnostic panels into one figure and calls
     ``plt.show()``; ``label`` names the trace in its title (:func:`show_iv_fit`
@@ -665,8 +670,8 @@ def analyze_IV(voltage, current, plot=False, calibrated=True, label=""):
     # 4b. Check for Unreasonable Te
     # ==========================================
     if Te > TE_MAX_EV or Te <= 0:  # Hard threshold
-        # NaN propagates into ne on the uncalibrated path (ne_from_esat divides
-        # by vth(Te)); the calibrated path takes I_esat alone and is unaffected.
+        # Costs ne too, deliberately: ne is I_esat/vth(Te), so an implausible
+        # Te makes the density meaningless rather than merely uncertain.
         Te = np.nan
 
     # ==========================================
@@ -709,8 +714,8 @@ def analyze_IV(voltage, current, plot=False, calibrated=True, label=""):
     d_esat = _apply_linear_fit(esat_volt, esat_curr)
 
     # c[0]*V + c[1] = d[0]*V + d[1]  =>  V = (d[1] - c[1]) / (c[0] - d[0]).
-    # polyfit returns [slope, intercept], so the slope difference is c[0]-d[0];
-    # the reverse order negates every crossing (a prior abs() hid this).
+    # polyfit returns [slope, intercept]; the reverse operand order negates
+    # every crossing, and an abs() on the result would hide that.
     denom = c_trans[0] - d_esat[0]
     if abs(denom) < DENOM_THRESHOLD:
         V_cross = np.nan
@@ -735,23 +740,21 @@ def analyze_IV(voltage, current, plot=False, calibrated=True, label=""):
     # ==========================================
     # 6. Density
     # ==========================================
-    # Calibrated path keeps Te out: the absolute scale comes from the
-    # interferometer, and dividing by a per-shot vth(Te) would only inject the
-    # Te fit's scatter into the profile.
-    ne = I_esat if calibrated else float(ne_from_esat(I_esat, Te))
+    # Dividing Esat by vth(Te) injects the Te fit's scatter into ne, but always
+    # returning a density keeps ne_arr's unit independent of whether
+    # calibration has run -- calibration only rescales it.
+    ne = float(ne_from_esat(I_esat, Te))
 
     return (Vp, Te, ne)
 
-def analyze_IV_safe(voltage, current, file_name="", verbose=False, calibrated=True):
+def analyze_IV_safe(voltage, current, file_name="", verbose=False):
     """
     Wrapper function to safely execute analyze_IV.
     Catches any fitting errors or data quality exceptions, logs them,
     and returns NaNs to prevent the batch loop from crashing.
-
-    ``calibrated`` selects the ``ne`` convention -- see :func:`analyze_IV`.
     """
     try:
-        return analyze_IV(voltage, current, calibrated=calibrated)
+        return analyze_IV(voltage, current)
 
     except Exception as e:
         if verbose:
@@ -761,7 +764,7 @@ def analyze_IV_safe(voltage, current, file_name="", verbose=False, calibrated=Tr
         return np.nan, np.nan, np.nan
 
 
-def show_iv_fit(V_trace, I_trace, label="", calibrated=True):
+def show_iv_fit(V_trace, I_trace, label=""):
     """One trace -> ``analyze_IV``'s diagnostic panels in a GUI window.
 
     Returns ``(Vp, Te, ne)``.  Takes arrays, not a path: the sweep-npz layout is
@@ -779,9 +782,8 @@ def show_iv_fit(V_trace, I_trace, label="", calibrated=True):
               f"{matplotlib.get_backend()} cannot display; switching to qtagg)")
         matplotlib.use("qtagg")
 
-    Vp, Te, ne = analyze_IV(V_trace, I_trace, plot=True, calibrated=calibrated,
-                            label=label)
-    print(f"Vp = {Vp:.3f} V | Te = {Te:.3f} eV | ne = {ne:.4g}")
+    Vp, Te, ne = analyze_IV(V_trace, I_trace, plot=True, label=label)
+    print(f"Vp = {Vp:.3f} V | Te = {Te:.3f} eV | ne = {ne:.4g} cm^-3")
     return Vp, Te, ne
 
 
@@ -833,7 +835,7 @@ def mean_sem(vals):
     return np.mean(vals), sem
 
 
-def process_iv_and_save(voltage_data, current_data, save_path, calibrated=True):
+def process_iv_and_save(voltage_data, current_data, save_path, prefix):
     """
     Loops through the multi-dimensional Langmuir probe dataset, extracting
     plasma parameters. Averages the valid shots for each location/sweep combination,
@@ -845,9 +847,11 @@ def process_iv_and_save(voltage_data, current_data, save_path, calibrated=True):
     :func:`prepare_sweep_data`.  Returns
     ``(Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err)``.
 
-    ``calibrated`` selects the ``ne`` convention (:func:`analyze_IV`) and is
-    saved into the npz as ``ne_is_proxy``, so loaders know the units of
-    ``ne_arr`` without being told.
+    ``prefix`` is the channel's npz key namespace; every array is written under
+    ``<prefix>/``, so one file holds every channel of a run.  ``ne_arr`` is a
+    density [cm^-3], saved again as ``<prefix>/ne_uncal_arr`` (with
+    ``ne_uncal_err``) so :func:`calibrate_plasma_npz` always scales from the
+    unscaled pair and stays idempotent.
     """
     n_locs, n_shots, n_sweeps, _ = current_data.shape
 
@@ -880,8 +884,7 @@ def process_iv_and_save(voltage_data, current_data, save_path, calibrated=True):
                 trace_id = f"Loc:{loc}|Shot:{sht}|Swp:{swp}"
 
                 # Analyze trace
-                Vp, Te, ne = analyze_IV_safe(V_trace, I_trace, file_name=trace_id,
-                                             calibrated=calibrated)
+                Vp, Te, ne = analyze_IV_safe(V_trace, I_trace, file_name=trace_id)
                 if np.isnan(ne):
                     fail_count += 1
                 temp["Vp"].append(Vp)
@@ -892,11 +895,20 @@ def process_iv_and_save(voltage_data, current_data, save_path, calibrated=True):
             for key, (arr, err) in arrs.items():
                 arr[loc, swp], err[loc, swp] = mean_sem(temp[key])
 
-        # Incremental save of all 6 arrays after every location.
-        np.savez(save_path,
-                 **{f"{k}_arr": arr for k, (arr, _) in arrs.items()},
-                 **{f"{k}_err": err for k, (_, err) in arrs.items()},
-                 ne_is_proxy=calibrated)
+        # Incremental save after every location.  Every channel of a run shares
+        # this file, so the other channels' keys must be carried through: a bare
+        # savez here would delete them once per location.  Cheap -- plasma npz
+        # hold six small arrays per channel.
+        # .copy(): these are the arrays the loop keeps filling, so storing them
+        # by reference would leave ne_uncal_* tracking ne_* -- and an
+        # interrupted run would later calibrate a half-filled profile.
+        np.savez(save_path, schema=SCHEMA_VERSION,
+                 **_other_channel_keys(save_path, prefix),
+                 **{f"{prefix}/{k}_arr": arr for k, (arr, _) in arrs.items()},
+                 **{f"{prefix}/{k}_err": err for k, (_, err) in arrs.items()},
+                 **{f"{prefix}/ne_uncal_arr": arrs["ne"][0].copy(),
+                    f"{prefix}/ne_uncal_err": arrs["ne"][1].copy(),
+                    f"{prefix}/calibrated": False})
 
         # Live running fail rate alongside the progress bar
         traces_done = (loc + 1) * n_sweeps * n_shots
@@ -921,100 +933,239 @@ def process_iv_and_save(voltage_data, current_data, save_path, calibrated=True):
     return Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err
 
 
-def tip_tag(tip):
-    """Filename fragment for a probe tip (``"-tipR"``); empty for the untagged
-    single-tip case.  Used in the npz names (:func:`sweep_npz_paths`) and in
-    figure names built from them."""
-    return f"-tip{tip}" if tip else ""
+#: npz layout version.  Bumped when the key layout changes in a way older
+#: readers would misinterpret rather than fail on; loaders refuse anything else.
+SCHEMA_VERSION = 3
+
+#: Run-level npz keys, owned by the writer rather than by any one channel.
+#: Excluded from the carry-through so a re-save cannot resurrect a stale value
+#: (and cannot collide with the keyword the writer passes).
+_RUN_LEVEL_KEYS = ("schema", "channels")
+
+#: Channel label when neither probe port nor tip is known (the campaign's
+#: I_CHAN/V_CHAN override).  A real tip label never collides with it.
+OVERRIDE_PREFIX = "override"
 
 
-def _require_npz_key(npz, key, path, hint):
-    """Membership check for an expected npz key, with a uniform 'regenerate it'
-    error.  ``npz`` is an open ``NpzFile`` (``in`` reads the zip directory, not
-    the array); raises ``KeyError`` naming ``path`` and how to produce ``key``.
+def channel_prefix(port, tip):
+    """One channel's identity, and its npz key namespace: ``'P29-R'``.
+
+    The single owner of the prefix format, because :func:`resolve_prefix`
+    depends on the ``-<tip>`` suffix to resolve a bare tip label -- a campaign
+    spelling it out itself would drift from the matcher.  Falls back to the bare
+    tip when the file names no port, and to :data:`OVERRIDE_PREFIX` when it
+    names neither: a prefix is never empty, since every npz key is
+    ``<prefix>/<name>``.
     """
-    if key not in npz:
-        raise KeyError(f"{path} has no {key!r} -- {hint}")
+    if not tip:
+        return OVERRIDE_PREFIX
+    return f"P{port}-{tip}" if port else tip
 
 
-def sweep_npz_paths(data_dir, run_num, tip=None):
-    """The saved-npz pair for one run/tip: ``(sweep_path, plasma_path)``.
+def match_tip(candidates, tip, where):
+    """Resolve ``tip`` against ``candidates``: ``'R'`` -> ``'P29-R'``.
 
-    The one home of the ``<run>[-tip<T>]-sweep-data.npz`` /
-    ``<run>[-tip<T>]-plasma-data.npz`` co-located filename convention (the npz
-    sit beside the raw HDF5).  ``tip=None`` gives the untagged names used by
-    single-probe campaigns.
+    ``candidates`` is channel labels, or any container keyed by them (callers
+    pass both a list and a channel-name -> channels dict).
+
+    An exact label wins; otherwise a bare tip resolves when exactly one probe
+    carries it.  Raises when several do -- two probes each with an R make
+    ``tip='R'`` genuinely ambiguous, and picking either would pair a profile
+    with the wrong probe.  ``where`` names the file or run in that error.
     """
-    tag = tip_tag(tip)
-    return (os.path.join(data_dir, f"{run_num}{tag}-sweep-data.npz"),
-            os.path.join(data_dir, f"{run_num}{tag}-plasma-data.npz"))
+    if tip in candidates:
+        return tip
+    matches = [c for c in candidates if c.endswith(f"-{tip}")]
+    if len(matches) == 1:
+        return matches[0]
+    raise ValueError(
+        f"tip {tip!r} " + (f"matches {matches} in" if matches else "is not in")
+        + f" {where}; channels are {sorted(candidates)}.")
+
+
+def _other_channel_keys(path, prefix):
+    """Every *channel* array in ``path`` that does NOT belong to ``prefix``.
+
+    The read half of the read-modify-write that lets several channels share one
+    npz: ``np.savez`` replaces a file wholesale, so a writer must carry the
+    other channels' keys through or destroy them.  Empty when the file does not
+    exist yet (the first channel of a run).
+    """
+    if not os.path.exists(path):
+        return {}
+    with np.load(path, allow_pickle=False) as prev:
+        return {k: prev[k] for k in prev.files
+                if not k.startswith(f"{prefix}/") and k not in _RUN_LEVEL_KEYS}
+
+
+def sweep_npz_paths(data_dir, run_num):
+    """The saved-npz pair for one run: ``(sweep_path, plasma_path)``.
+
+    The one home of the ``<run>-sweep-data.npz`` / ``<run>-plasma-data.npz``
+    co-located filename convention (the npz sit beside the raw HDF5).  One pair
+    per run regardless of how many probe tips it recorded: the tip lives in the
+    npz keys, not the filename.
+    """
+    return (os.path.join(data_dir, f"{run_num}-sweep-data.npz"),
+            os.path.join(data_dir, f"{run_num}-plasma-data.npz"))
+
+
+def discover_channels(ifn):
+    """The channel labels a run has saved sweep data for: ``['P29-L', 'P29-R']``.
+
+    Read from the sweep npz's ``channels`` index, not from filenames or by
+    re-running channel discovery against the raw multi-GB HDF5: the saved file
+    *is* what can be plotted, so a tip whose processing failed or was skipped is
+    simply absent.
+
+    Raises ``FileNotFoundError`` when the run has no sweep npz at all, so a
+    batch caller can skip that run and *name* it rather than failing opaquely.
+    """
+    from data_analysis.utils import run_num_of
+
+    data_dir, run_num = os.path.dirname(ifn), run_num_of(ifn)
+    sweep_path, _ = sweep_npz_paths(data_dir, run_num)
+    if not os.path.isfile(sweep_path):
+        raise FileNotFoundError(
+            f"no saved sweep npz for run {run_num} in {data_dir}; run the "
+            "campaign's process_run(ifn) first")
+    with np.load(sweep_path) as d:
+        _check_schema(d, sweep_path)
+        return [str(c) for c in d["channels"]]
+
+
+def _check_schema(npz, path):
+    """Refuse an npz written before :data:`SCHEMA_VERSION`.
+
+    Pre-v3 files store one channel's arrays at the top level, so a reader would
+    find ``Vswp_arr_rs`` and return one tip's data as if it were the run's --
+    wrong rather than absent.  Fail by name instead.
+    """
+    found = int(npz["schema"]) if "schema" in npz else None
+    if found != SCHEMA_VERSION:
+        raise ValueError(
+            f"{path} is npz schema {found if found else '<3 (untagged)'}, not "
+            f"{SCHEMA_VERSION}: regenerate it with the campaign's process_run "
+            "-- older files hold one tip per file and would be misread as the "
+            "whole run.")
+
+
+def resolve_only(channels, path):
+    """The sole channel in ``channels``; raises when a run has several.
+
+    ``tip=None`` has no sensible default on a multi-channel run: picking one
+    would silently return a different probe's profile than the caller meant.
+    """
+    if len(channels) != 1:
+        raise ValueError(f"{path} holds {channels}; pass tip= to choose one.")
+    return channels[0]
+
+
+def resolve_prefix(npz, tip, path):
+    """The key prefix for ``tip`` in an open sweep npz: ``'P29-R'``.
+
+    Reads the run-level ``channels`` index, so it sees every channel the run
+    recorded -- including one whose analysis has not been written yet.
+    """
+    channels = [str(c) for c in npz["channels"]]
+    return (resolve_only(channels, path) if tip is None
+            else match_tip(channels, tip, path))
+
+
+@contextmanager
+def open_channel(path, tip):
+    """Open an npz and resolve ``tip``: yields ``(npz, prefix)``.
+
+    The one place open + schema check + prefix resolution happen together, so no
+    loader can skip a step -- ``np.load`` reads entries lazily, so this is cheap
+    even on the multi-hundred-MB sweep npz.
+    """
+    with np.load(path) as d:
+        _check_schema(d, path)
+        yield d, resolve_prefix(d, tip, path)
 
 
 def load_sweep_data(data_dir, run_num, tip=None):
-    """Load the reshaped sweep arrays + axes saved by the campaign's save step.
+    """Load one channel's reshaped sweep arrays + axes from the run's sweep npz.
 
-    Expects the single-current-array key layout (``Vswp_arr_rs`` /
-    ``Iswp_arr_rs``); campaigns that store several current arrays per npz keep
-    their own loader.
+    Returns ``(Vswp_arr_rs, Iswp_arr_rs, data_timestamp, xpos, ypos, npos,
+    nshot)`` for ``tip`` (see :func:`resolve_prefix`).
     """
-    sweep_path, _ = sweep_npz_paths(data_dir, run_num, tip)
-    with np.load(sweep_path) as data:
-        return (data["Vswp_arr_rs"], data["Iswp_arr_rs"], data["data_timestamp"],
-                data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"]))
+    sweep_path, _ = sweep_npz_paths(data_dir, run_num)
+    with open_channel(sweep_path, tip) as (d, p):
+        return (d[f"{p}/Vswp_arr_rs"], d[f"{p}/Iswp_arr_rs"],
+                d[f"{p}/data_timestamp"], d[f"{p}/xpos"], d[f"{p}/ypos"],
+                int(d[f"{p}/npos"]), int(d[f"{p}/nshot"]))
 
 
 def load_sweep_axes(data_dir, run_num, tip=None):
-    """Just the position axes + shot layout from a saved sweep npz.
+    """Just one channel's position axes + shot layout from the run's sweep npz.
 
     ``np.load`` reads npz entries lazily, so this skips the multi-hundred-MB
     sweep arrays -- for plot drivers that only need ``(xpos, ypos, npos, nshot)``.
     """
-    sweep_path, _ = sweep_npz_paths(data_dir, run_num, tip)
-    with np.load(sweep_path) as data:
-        return data["xpos"], data["ypos"], int(data["npos"]), int(data["nshot"])
+    sweep_path, _ = sweep_npz_paths(data_dir, run_num)
+    with open_channel(sweep_path, tip) as (d, p):
+        return (d[f"{p}/xpos"], d[f"{p}/ypos"],
+                int(d[f"{p}/npos"]), int(d[f"{p}/nshot"]))
 
 
 def load_plasma_data(data_dir, run_num, tip=None):
-    """Load saved plasma parameters + sweep timestamps for plotting.
+    """Load one channel's plasma parameters + sweep timestamps for plotting.
 
     Returns ``(Vp_arr, Te_arr, ne_arr, Vp_err, Te_err, ne_err, t_ls)``.
+    ``ne_arr`` is a density [cm^-3] whether or not the run was calibrated
+    against the interferometer; read ``<prefix>/calibrated`` from the plasma npz
+    to tell which (:func:`ne_is_calibrated`).
     """
-    sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
-    with np.load(sweep_path) as data:
-        t_ls = data["data_timestamp"]
+    sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num)
+    with open_channel(sweep_path, tip) as (d, p):
+        t_ls = d[f"{p}/data_timestamp"]
 
-    with np.load(plasma_path) as ps_data:
-        return (ps_data["Vp_arr"], ps_data["Te_arr"], ps_data["ne_arr"],
-                ps_data["Vp_err"], ps_data["Te_err"], ps_data["ne_err"], t_ls)
+    with np.load(plasma_path) as ps:
+        _check_schema(ps, plasma_path)
+        return (ps[f"{p}/Vp_arr"], ps[f"{p}/Te_arr"], ps[f"{p}/ne_arr"],
+                ps[f"{p}/Vp_err"], ps[f"{p}/Te_err"], ps[f"{p}/ne_err"], t_ls)
 
 
-def load_sweep_trace(data_dir, run_num, loc, sweep, shot=0, tip=None,
-                     current_key="Iswp_arr_rs"):
+def ne_is_calibrated(data_dir, run_num, tip=None):
+    """Was this channel's ``ne_arr`` scaled against the interferometer?
+
+    Both cases are a density [cm^-3]; uncalibrated means the absolute scale
+    rests on ``Aprobe`` and the vth convention (:func:`ne_from_esat`) rather
+    than on a measured line density.
+
+    Reads the plasma npz alone: the flag is written beside the ne it describes
+    (``process_iv_and_save``, flipped by :func:`calibrate_plasma_npz`), so this
+    must not fail on a run whose large sweep npz was pruned.
+    """
+    _, plasma_path = sweep_npz_paths(data_dir, run_num)
+    with np.load(plasma_path) as ps:
+        _check_schema(ps, plasma_path)
+        channels = sorted({k.split("/")[0] for k in ps.files if "/" in k})
+        p = match_tip(channels, tip, plasma_path) if tip is not None \
+            else resolve_only(channels, plasma_path)
+        return bool(ps[f"{p}/calibrated"])
+
+
+def load_sweep_trace(data_dir, run_num, loc, sweep, shot=0, tip=None):
     """One trace out of a saved sweep npz: ``(V_trace, I_trace, x_cm, t_mid_ms)``.
-
-    ``current_key`` names the npz's current array, defaulting to the
-    single-current-array layout :func:`load_sweep_data` documents.  A campaign
-    holding both tips in one npz passes its own key -- Mar-2026 writes
-    ``IswpL_arr_rs`` / ``IswpR_arr_rs``, where the tip lives in the *key* and its
-    files are untagged, so such a caller passes ``tip=None`` and supplies the tip
-    to ``label`` itself.
 
     Reads the whole current array: ``np.load`` ignores ``mmap_mode`` for npz, and
     a deflated zip member cannot be sliced without inflating it anyway.  Fine for
     one interactive lookup, too slow to sit in a loop.
     """
-    sweep_path, _ = sweep_npz_paths(data_dir, run_num, tip)
-    with np.load(sweep_path) as data:
-        _require_npz_key(data, current_key, sweep_path,
-                         f"this npz holds {sorted(k for k in data.files if 'swp' in k)}; "
-                         "pass current_key= for a per-tip layout")
-        V_all, I_all = data["Vswp_arr_rs"], data[current_key]
+    sweep_path, _ = sweep_npz_paths(data_dir, run_num)
+    with open_channel(sweep_path, tip) as (data, p):
+        V_all, I_all = data[f"{p}/Vswp_arr_rs"], data[f"{p}/Iswp_arr_rs"]
         # numpy would raise on the index anyway; this names which axis and what
         # the layout is, which the bare IndexError does not.
+        v_note = f"{p}/Vswp_arr_rs {V_all.shape} (npos, n_sweeps, nt)"
         for axis, idx, n, shape_note in (
-                ("loc", loc, V_all.shape[0], f"Vswp_arr_rs {V_all.shape} (npos, n_sweeps, nt)"),
-                ("sweep", sweep, V_all.shape[1], f"Vswp_arr_rs {V_all.shape} (npos, n_sweeps, nt)"),
-                ("shot", shot, I_all.shape[-3], f"{current_key} {I_all.shape} (npos, nshot, n_sweeps, nt)")):
+                ("loc", loc, V_all.shape[0], v_note),
+                ("sweep", sweep, V_all.shape[1], v_note),
+                ("shot", shot, I_all.shape[-3],
+                 f"{p}/Iswp_arr_rs {I_all.shape} (npos, nshot, n_sweeps, nt)")):
             if not -n <= idx < n:
                 raise IndexError(f"{axis}={idx} outside 0..{n-1} in "
                                  f"{sweep_path}: {shape_note}")
@@ -1022,122 +1173,74 @@ def load_sweep_trace(data_dir, run_num, loc, sweep, shot=0, tip=None,
         # programmed voltage ramp, only the collected current differs per shot.
         return (np.asarray(V_all[loc, sweep, :]),
                 np.asarray(I_all[loc, shot, sweep, :]),
-                float(np.asarray(data["xpos"])[loc]),
-                float(np.asarray(data["data_timestamp"])[sweep]) * 1e3)
+                float(np.asarray(data[f"{p}/xpos"])[loc]),
+                float(np.asarray(data[f"{p}/data_timestamp"])[sweep]) * 1e3)
 
 
-def load_ne_calibrated(data_dir, run_num, tip=None):
-    """The interferometer-calibrated density written by :func:`calibrate_plasma_npz`.
-
-    Returns ``(ne_cal_arr (n_locs, n_sweeps) [cm^-3], cal_factor (n_sweeps,))``.
-    Raises ``KeyError`` if the plasma npz has not been calibrated yet -- run
-    :func:`calibrate_plasma_npz` first.
-    """
-    _, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
-    with np.load(plasma_path) as ps_data:
-        _require_npz_key(ps_data, "ne_cal_arr", plasma_path,
-                         "run calibrate_plasma_npz(ifn, interf_chan) first.")
-        return ps_data["ne_cal_arr"], ps_data["cal_factor"]
+#: Edge/peak fraction above which a scan is too truncated to trust the chord
+#: integral without qualification.  Every Jun-2026 channel-run has a sweep at
+#: 27-50%, so this warns on all of them by design -- a real systematic, not a
+#: tripwire.
+_EDGE_FRAC_WARN = 0.10
 
 
-def load_ne(data_dir, run_num, raw_ne, tip=None, prefer_calibrated=True):
-    """The ne to use for one run/tip, with its unit: ``(ne, is_density)``.
-
-    ``prefer_calibrated`` True swaps in the interferometer-calibrated
-    ``ne_cal_arr`` when :func:`calibrate_plasma_npz` has written it, falling
-    back to ``raw_ne`` with a printed note otherwise.
-
-    ``is_density`` reports the unit of what is *returned*, not what was asked
-    for -- True means [cm^-3], False means :func:`analyze_IV`'s proxy [A/cm^2].
-    So an uncalibrated run whose npz was written with ``calibrated=False``
-    (``ne_arr`` already a density via :func:`ne_from_esat`) still reports True:
-    the fallback is a real density, just not interferometer-scaled.
-    """
-    if prefer_calibrated:
-        try:
-            return load_ne_calibrated(data_dir, run_num, tip=tip)[0], True
-        except KeyError:
-            print(f"  (ne: run {run_num}{tip_tag(tip)} not calibrated yet -- "
-                  "using raw ne; run calibrate_plasma_npz to calibrate)")
-    return raw_ne, not ne_arr_is_proxy(data_dir, run_num, tip=tip)
-
-
-def ne_arr_is_proxy(data_dir, run_num, tip=None):
-    """Is this run's saved ``ne_arr`` the [A/cm^2] proxy rather than a density?
-
-    Reads the ``ne_is_proxy`` flag :func:`process_iv_and_save` writes.  npz from
-    before that flag existed are proxies (it was the only convention then), so a
-    missing key reads as True.
-    """
-    _, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
-    with np.load(plasma_path) as ps:
-        return bool(ps["ne_is_proxy"]) if "ne_is_proxy" in ps else True
+def _edge_fraction(profile):
+    """Larger scan-endpoint value as a fraction of the profile peak; ``nan`` if empty."""
+    v = np.asarray(profile, dtype=float)
+    v = v[np.isfinite(v)]
+    peak = np.nanmax(v) if v.size else np.nan
+    if v.size < 2 or not np.isfinite(peak) or peak <= 0:
+        return np.nan
+    return max(v[0], v[-1]) / peak
 
 
 def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
-                               interf_ne_line, t_offset=0.0):
-    """Per-sweep calibration of a probe profile against interferometer density.
-
-    Programmatic version of the legacy recipe (LP_analysis Langmuir_Iisat.ipynb):
-    line-average the probe profile along the interferometer chord and ratio it
-    against the interferometer line-averaged ne.  Works for any probe quantity
-    proportional to ne -- the IV-derived ne proxy from :func:`analyze_IV` or
-    raw Isat (both [A/cm^2]; the factor converts to cm^-3).
+                               interf_ne_integral, t_offset=0.0):
+    """Per-sweep scale factor matching a probe profile's chord integral to the
+    interferometer's.  Works for any probe quantity proportional to ne.
 
     profile_arr : (n_locs, n_sweeps) probe quantity proportional to ne
     x           : (n_locs,) positions [cm] along the interferometer chord
-    t_start, t_stop : (n_sweeps,) sweep time windows [s]
-    interf_t    : (nt,) interferometer time [s] (file stores ms -- caller converts)
-    interf_ne_line : (nt,) line-averaged ne [cm^-3], already shot-averaged
-    t_offset    : scope trigger time relative to the interferometer's t=0
-                  (plasma breakdown), [s].  Added to ``t_start``/``t_stop``
-                  here to express the sweep windows on the interferometer time
-                  base; the caller's scope-timed arrays stay untouched.
+    t_start, t_stop : (n_sweeps,) sweep windows [s], scope time base
+    interf_t    : (nt,) interferometer time [s] (file stores ms)
+    interf_ne_integral : (nt,) shot-averaged int(ne dl) [cm^-2], from
+                  :attr:`~data_analysis.io.interferometer.InterferometerChannel.ne_line_integral_avg_cm2`
+    t_offset    : scope trigger relative to interferometer t=0 (breakdown) [s];
+                  shifts the windows onto that base, not the caller's arrays.
 
-    For each sweep ``k``::
+    Integrals, not averages: an average carries the length it was divided by,
+    and the two diagnostics' lengths differ (nominal ``CAL_PLASMA_LENGTH_M`` vs
+    the scan span), so ratioing averages leaves that ratio in every density.
 
-        factor[k] = mean(interf_ne_line over the window
-                         [t_start[k], t_stop[k]] + t_offset)
-                    / line_average(profile_arr[:, k], x)
+    Returns ``(factor, profile_arr * factor, chord_integral)``, the latter two
+    per-sweep ``(n_sweeps,)``.  A sweep with an empty window or a non-positive
+    chord integral gets ``nan``; no window overlapping at all raises, since that
+    means a wrong ``t_offset`` rather than bad data.
 
-    A sweep with an empty window, or whose line average is not finite and
-    positive, gets a ``nan`` factor (no exception), and the count of calibrated
-    sweeps is printed.  Failed-fit ``nan`` positions are excluded from the line
-    average, not treated as zeros.  But
-    if *no* sweep window overlaps the interferometer trace at all -- the usual
-    symptom of a wrong ``t_offset`` -- this raises ``ValueError`` rather than
-    silently returning an all-``nan`` calibration.  Returns
-    ``(factor, profile_arr * factor, chord_avg)`` -- per-sweep factors
-    ``(n_sweeps,)`` broadcast across locations, plus the probe chord averages
-    ``(n_sweeps,)`` used in the ratio (for plotting against the interferometer
-    trace).
-
-    Caveats: the probe chord average only spans the measured ``x`` range while
-    the interferometer averages its full beam path (through the 40 cm plasma
-    length baked into the phase->ne factor); any trigger-time difference
-    between the two diagnostics must be supplied via ``t_offset``; and the
-    merged interferometer traces come from only the first/last shots of the
-    run, so plasma conditions are assumed stationary across it.
+    Caveats: the probe integral takes ne as zero outside the scan while the
+    interferometer covers its whole beam path, so a scan stopping short of the
+    plasma edge biases every calibrated density **high** -- printed as an edge/peak
+    fraction, since no Jun-2026 scan reaches the edge; and the merged traces are
+    only the run's first/last shots, assuming stationary conditions.
     """
     profile_arr = np.asarray(profile_arr, dtype=float)
     interf_t = np.asarray(interf_t, dtype=float)
-    interf_ne_line = np.asarray(interf_ne_line, dtype=float)
+    interf_ne_integral = np.asarray(interf_ne_integral, dtype=float)
     t_start = np.asarray(t_start, dtype=float) + t_offset
     t_stop = np.asarray(t_stop, dtype=float) + t_offset
 
     n_sweeps = profile_arr.shape[1]
     factor = np.full(n_sweeps, np.nan)
-    # NaN positions are failed fits; line_average integrates the finite subset,
-    # so they are excluded rather than pulling the chord average toward 0.
-    chord_avg = np.array([line_average(profile_arr[:, k], x) for k in range(n_sweeps)])
+    chord_integral = np.array([line_integral(profile_arr[:, k], x)
+                               for k in range(n_sweeps)])
+    edge_frac = np.array([_edge_fraction(profile_arr[:, k]) for k in range(n_sweeps)])
     n_hit = 0
     for k in range(n_sweeps):
         in_win = (interf_t >= t_start[k]) & (interf_t <= t_stop[k])
-        # > 0, not != 0: a non-positive chord average is unphysical for a
-        # density-proportional quantity, and a negative one would flip the sign
-        # of the whole calibrated profile.
-        if in_win.any() and np.isfinite(chord_avg[k]) and chord_avg[k] > 0:
-            factor[k] = np.nanmean(interf_ne_line[in_win]) / chord_avg[k]
+        # > 0, not != 0: line_integral is unsigned, so a non-positive value means
+        # the profile is not density-proportional here; calibrating would flip it.
+        if in_win.any() and np.isfinite(chord_integral[k]) and chord_integral[k] > 0:
+            factor[k] = np.nanmean(interf_ne_integral[in_win]) / chord_integral[k]
             n_hit += 1
     if n_hit == 0:
         raise ValueError(
@@ -1146,66 +1249,51 @@ def interferometer_calibration(profile_arr, x, t_start, t_stop, interf_t,
             f"interferometer spans {interf_t.min():.4g}..{interf_t.max():.4g} s. "
             "Check t_offset (interferometer t=0 is plasma breakdown).")
     print(f"Calibrated {n_hit}/{n_sweeps} sweeps ({n_sweeps - n_hit} had no "
-          "interferometer overlap or a non-finite chord average).")
-    return factor, profile_arr * factor, chord_avg
+          "interferometer overlap or a non-finite chord integral).")
+    worst_edge = np.nanmax(edge_frac) if np.any(np.isfinite(edge_frac)) else np.nan
+    if np.isfinite(worst_edge) and worst_edge > _EDGE_FRAC_WARN:
+        print(f"  Scan truncated: profile still at {worst_edge*100:.0f}% of peak at "
+              "its edge, so the chord integral undercounts and ne is biased HIGH.")
+    return factor, profile_arr * factor, chord_integral
 
 
 def calibrate_plasma_npz(ifn, interf_chan, tip=None, t_offset=0.0):
-    """Calibrate a run's batch IV density against the interferometer, in place.
-
-    Wires the three pieces together for one run + tip: loads the batch
-    ``ne_arr`` and probe positions (from the co-located sweep/plasma npz written
-    by :func:`process_iv_and_save`), reads the merged interferometer chord
-    ``interf_chan`` (:func:`data_analysis.io.read_interferometer`), runs
-    :func:`interferometer_calibration` over each sweep's true time window, and
-    **writes the calibrated density back into the plasma npz** so downstream
-    line-data analysis loads an absolutely-scaled ``ne`` without recomputing.
+    """Calibrate one run+tip's batch IV density against the interferometer, in place.
 
     ``ifn``          : raw datarun HDF5 (its directory + run number locate the npz).
-    ``interf_chan``  : interferometer channel to calibrate against, e.g. ``"phase_p29"``.
-    ``tip``          : probe tip whose npz pair to calibrate (``None`` = untagged).
+    ``interf_chan``  : chord to calibrate against, e.g. ``"phase_p29"``.
+    ``tip``          : probe tip whose channel to calibrate (see :func:`resolve_prefix`).
     ``t_offset``     : scope-vs-interferometer trigger offset [s], forwarded to
-                       :func:`interferometer_calibration` (interferometer t=0 is
-                       plasma breakdown; the scope's sweep windows are shifted
-                       onto that base, the stored arrays are not).
+                       :func:`interferometer_calibration`.
 
-    The plasma npz gains two keys alongside the existing ``*_arr``/``*_err``:
-    ``ne_cal_arr`` (``(n_locs, n_sweeps)`` calibrated density [cm^-3]) and
-    ``cal_factor`` (``(n_sweeps,)`` per-sweep factor; ``nan`` where a sweep
-    window caught no interferometer samples or the probe chord average was
-    non-finite).  Raises ``ValueError`` if ``interf_chan`` has no usable shots,
-    or (via :func:`interferometer_calibration`) if *no* sweep window overlaps
-    the interferometer trace -- the usual sign of a wrong ``t_offset``.  The 6
-    original arrays are re-saved unchanged.  Returns
-    ``(cal_factor, ne_cal_arr, chord_avg)``.
+    Writes ``ne_arr``, ``ne_err``, ``cal_factor``, ``cal_chord`` and
+    ``calibrated`` under ``<prefix>/``, carrying every other channel through
+    unchanged, so downstream loads an absolutely-scaled ``ne`` without
+    recomputing.  Returns ``(cal_factor, ne_cal_arr, chord_integral)``.
 
-    Requires the sweep npz to carry ``sweep_t_start``/``sweep_t_stop`` (added by
-    :func:`prepare_sweep_data`); npz written before that must be regenerated
-    with :func:`process_iv_and_save`'s driver.
+    Idempotent: the scale is applied to ``ne_uncal_arr`` / ``ne_uncal_err``,
+    never to whatever ``ne_arr`` holds, so re-running with a different chord or
+    ``t_offset`` replaces the calibration instead of compounding it.
     """
     from data_analysis.io import read_interferometer
     from data_analysis.utils import run_num_of
 
     data_dir = os.path.dirname(ifn)
     run_num = run_num_of(ifn)
-    sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num, tip)
+    sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num)
 
-    with np.load(sweep_path) as sw:
-        xpos = sw["xpos"]
-        _require_npz_key(sw, "sweep_t_start", sweep_path,
-                         "regenerate it (prepare_sweep_data now saves the "
-                         "per-sweep windows sweep_t_start/sweep_t_stop).")
-        t_start, t_stop = sw["sweep_t_start"], sw["sweep_t_stop"]
+    with open_channel(sweep_path, tip) as (sw, prefix):
+        xpos = sw[f"{prefix}/xpos"]
+        t_start = sw[f"{prefix}/sweep_t_start"]
+        t_stop = sw[f"{prefix}/sweep_t_stop"]
 
+    # One read of the plasma npz: this channel's keys are rewritten below, every
+    # other channel's are carried through untouched.
     with np.load(plasma_path) as ps:
-        saved = dict(ps)             # keep the 6 arrays to re-save alongside
-    ne_arr = saved["ne_arr"]
-    if not bool(saved.get("ne_is_proxy", True)):
-        raise ValueError(
-            f"{plasma_path} was written with calibrated=False -- ne_arr is "
-            "already a density [cm^-3] from ne_from_esat, so scaling it against "
-            "the interferometer would double-apply a density scale. Regenerate "
-            "with process_iv_and_save(..., calibrated=True) to calibrate.")
+        _check_schema(ps, plasma_path)
+        keep = {k: ps[k] for k in ps.files if k not in _RUN_LEVEL_KEYS}
+    ne_uncal = keep[f"{prefix}/ne_uncal_arr"]
+    ne_uncal_err = keep[f"{prefix}/ne_uncal_err"]
 
     ch = read_interferometer(ifn, channels=[interf_chan])[interf_chan]
     if ch.phase.shape[0] == 0:
@@ -1219,10 +1307,213 @@ def calibrate_plasma_npz(ifn, interf_chan, tip=None, t_offset=0.0):
         print(f"  interferometer first/last-shot line-ne differ by up to "
               f"{spread:.3g} cm^-3 (two-shot stationarity assumption).")
 
-    factor, ne_cal_arr, chord_avg = interferometer_calibration(
-        ne_arr, xpos, t_start, t_stop,
-        ch.t_ms * 1e-3, ch.ne_line_avg_cm3(), t_offset=t_offset)
+    factor, ne_cal_arr, chord_integral = interferometer_calibration(
+        ne_uncal, xpos, t_start, t_stop,
+        ch.t_ms * 1e-3, ch.ne_line_integral_avg_cm2, t_offset=t_offset)
 
-    np.savez(plasma_path, **saved, ne_cal_arr=ne_cal_arr, cal_factor=factor)
-    print(f"Calibrated ne against {interf_chan} -> {plasma_path}")
-    return factor, ne_cal_arr, chord_avg
+    keep.update({f"{prefix}/ne_arr": ne_cal_arr,
+                 # The same per-sweep factor scales the error: ne_err annotates
+                 # ne_arr, and leaving it at the uncalibrated scale would make
+                 # it the error bar of a quantity ~1e12 times smaller.
+                 f"{prefix}/ne_err": ne_uncal_err * factor,
+                 f"{prefix}/cal_factor": factor,
+                 f"{prefix}/cal_chord": np.str_(interf_chan),
+                 f"{prefix}/calibrated": True})
+    np.savez(plasma_path, schema=SCHEMA_VERSION, **keep)
+    print(f"Calibrated {prefix} ne against {interf_chan} -> {plasma_path}")
+    return factor, ne_cal_arr, chord_integral
+
+
+#=== the campaign-agnostic driver ============================================
+# One entry point every campaign calls.  A campaign script's job is to parse
+# its own file format into SweepRecords -- which board/scope/channel, which
+# resistor and probe area -- and nothing else; detection, analysis, storage and
+# calibration all live here so they cannot drift between campaigns.
+
+class SweepRecord(NamedTuple):
+    """One probe tip's raw sweep data, in the units the shared pipeline expects.
+
+    ``Vswp_arr`` [V] is ``(npos, nsamples)``, shot-averaged; ``Iswp_arr``
+    [A/cm^2] is ``(npos, nshot, nsamples)``.
+
+    **Iswp_arr must be electron-positive: more positive at high V than at low
+    V.**  The campaign owns this completely -- it applies its own
+    ``I_POLARITY`` along with the resistor and probe-area division, and nothing
+    downstream touches the sign again.  ``analyze_IV`` does not flip it either,
+    but it assumes it everywhere (``np.min`` is its ion-saturation floor,
+    ``np.max`` its electron-branch amplitude): given the wrong polarity it does
+    not fail, it fits the two branches in each other's roles and returns a
+    plausible but meaningless Vp/Te/ne.  Campaigns differ -- Jun-2026 digitizes
+    electron-positive (``I_POLARITY=+1``), Mar-2026 electron-negative (``-1``)
+    -- so this is read off the campaign's own hardware, never inherited.
+
+    ``prefix`` is the npz key namespace and the channel's identity
+    (``'P29-R'``).  ``port`` is the LAPD port the probe sat on, used to derive
+    the interferometer chord; ``None`` when the file does not say, which forces
+    an explicit chord at calibration time.
+    """
+    prefix: str
+    tarr: np.ndarray
+    Vswp_arr: np.ndarray
+    Iswp_arr: np.ndarray
+    xpos: np.ndarray
+    ypos: np.ndarray
+    npos: int
+    nshot: int
+    port: str | None = None
+    #: Extra string metadata (I_chan / V_chan / motion_group), saved verbatim.
+    meta: dict | None = None
+
+
+
+def interferometer_chords(ifn):
+    """The ``phase_*`` chords a run carries, or ``[]`` when it has none.
+
+    Presence of merged interferometer data is what decides whether a run's ne
+    can be calibrated, and it varies run to run *within* a campaign -- so this
+    asks the file rather than the campaign.  Backend-independent: pydaq and
+    bapsflib runs both carry the merged group.
+    """
+    import h5py
+    with h5py.File(ifn, "r") as f:
+        g = f.get("diagnostics/interferometer")
+        return sorted(k for k in g if k.startswith("phase_")) if g else []
+
+
+#: How far along the machine an interferometer chord may sit from the probe and
+#: still measure the same plasma, in LAPD ports.  Ports are on a fixed axial
+#: pitch, so a port-number difference is proportional to distance.  4 admits the
+#: p29 chord for a probe at p33; beyond that the chord is sampling a different
+#: axial region and calibrating against it would scale the profile by a density
+#: the probe never saw.
+MAX_CHORD_PORT_DISTANCE = 4
+
+
+def chord_for_port(chords, port, ifn):
+    """Nearest interferometer chord to ``port``: ``(chord_name, ports_away)``.
+
+    Exact match wins; otherwise the closest chord within
+    :data:`MAX_CHORD_PORT_DISTANCE`.  Raises naming the available chords when
+    nothing is near enough -- an out-of-range chord measures a different part of
+    the column, so scaling by it would be a fabricated absolute density rather
+    than a slightly worse one.  Ties (a probe exactly between two chords) take
+    the lower port, deterministically.
+    """
+    if port is None:
+        raise ValueError(
+            f"{ifn} names no port for this channel, so its interferometer chord "
+            f"cannot be derived; available chords are {chords}. Pass interf_chan= "
+            "explicitly, or set calibrate=False to store an uncalibrated density.")
+
+    # Tie-break on the port *number*, not the chord name: 'phase_p9' sorts after
+    # 'phase_p21' as a string, so a name sort would silently prefer the higher
+    # port for a single-digit chord.
+    by_distance = sorted((abs(int(p) - int(port)), int(p), c) for c in chords
+                         if (p := c.removeprefix("phase_p")).isdigit())
+    if not by_distance or by_distance[0][0] > MAX_CHORD_PORT_DISTANCE:
+        raise ValueError(
+            f"probe is on port {port} but {ifn} has no interferometer chord "
+            f"within {MAX_CHORD_PORT_DISTANCE} ports; available chords are "
+            f"{chords}. Pass interf_chan= to choose one explicitly, or set "
+            "calibrate=False to store an uncalibrated density.")
+    distance, _, chord = by_distance[0]
+    return chord, distance
+
+
+def process_sweep_run(ifn, records, t_offset=0.0, calibrate=None,
+                      interf_chan=None, store_dtype=None, **prep_kwargs):
+    """Detect, analyze, save and calibrate every channel of one run.
+
+    ``records`` are :class:`SweepRecord` -- see there for the units contract.
+    ``prep_kwargs`` (``padding`` / ``trim_percent`` / ``smooth_sigma``) forward
+    to :func:`prepare_sweep_data`, which owns the defaults.
+
+    ``calibrate`` ``None`` decides per run from the presence of interferometer
+    data in ``ifn``; ``True`` forces it and **raises** where impossible rather
+    than silently storing an uncalibrated density under a calibrated name;
+    ``False`` skips it.  ``interf_chan`` overrides the per-channel chord that is
+    otherwise derived from each probe's own port.
+
+    ``store_dtype`` (e.g. ``np.float32``) casts the stored sweep arrays; ``None``
+    keeps the source dtype.  Analysis always runs in the source precision --
+    this affects what is written, not what is computed.
+
+    Returns ``(sweep_path, plasma_path)``.
+
+    Two phases, because they differ in cost by orders of magnitude: sweep
+    preparation is seconds per channel and its arrays are 70 MB-1 GB, so every
+    channel is prepared and the sweep npz written **once**; the per-trace
+    analysis is the hours, so it loops per channel and checkpoints into the
+    plasma npz after every position.
+    """
+    from data_analysis.utils import run_num_of
+
+    data_dir = os.path.dirname(ifn)
+    sweep_path, plasma_path = sweep_npz_paths(data_dir, run_num_of(ifn))
+
+    chords = interferometer_chords(ifn)
+    if calibrate is None:
+        calibrate = bool(chords)
+    elif calibrate and not chords:
+        raise ValueError(
+            f"CALIBRATE=True but {ifn} carries no diagnostics/interferometer "
+            "group, so there is nothing to calibrate against. Merge the "
+            "interferometer traces first, or set CALIBRATE=None/False.")
+
+    # --- phase 1: prepare every channel, write the sweep npz once ------------
+    # One savez for the whole run: these arrays are the large ones, and a
+    # per-channel write would have to re-read and re-compress the file each time
+    # to avoid deleting the channels already in it.
+    cast = (lambda a: a.astype(store_dtype)) if store_dtype else (lambda a: a)
+    prepared, store = {}, {"schema": SCHEMA_VERSION,
+                           "channels": np.array([r.prefix for r in records])}
+    for rec in records:
+        print(f"\n--- preparing {rec.prefix}")
+        V_rs, I_rs, t_mid, t_start, t_stop = prepare_sweep_data(
+            rec.tarr, rec.Vswp_arr, rec.Iswp_arr, **prep_kwargs)
+        prepared[rec.prefix] = (V_rs, I_rs)
+        store.update({
+            f"{rec.prefix}/Vswp_arr_rs": cast(V_rs),
+            f"{rec.prefix}/Iswp_arr_rs": cast(I_rs),
+            f"{rec.prefix}/data_timestamp": t_mid,
+            f"{rec.prefix}/sweep_t_start": t_start,
+            f"{rec.prefix}/sweep_t_stop": t_stop,
+            f"{rec.prefix}/xpos": rec.xpos, f"{rec.prefix}/ypos": rec.ypos,
+            f"{rec.prefix}/npos": rec.npos, f"{rec.prefix}/nshot": rec.nshot,
+            f"{rec.prefix}/port": np.str_(rec.port or ""),
+            **{f"{rec.prefix}/{k}": np.str_(v) for k, v in (rec.meta or {}).items()},
+        })
+    np.savez(sweep_path, **store)
+    print(f"\nSaved sweep arrays for {len(records)} channel(s) -> {sweep_path}")
+    # These are the run's largest arrays and phase 2 never reads them again: a
+    # float32 store copy is ~0.5 GB per channel, and `records` still holds the
+    # untrimmed originals.  Freeing here keeps peak RAM at roughly one channel
+    # rather than 1.5x the channel count.
+    store.clear()
+    records = [rec._replace(tarr=None, Vswp_arr=None, Iswp_arr=None)
+               for rec in records]
+
+    # --- phase 2: analyze and calibrate each channel -------------------------
+    for rec in records:
+        print("\n" + "=" * 70)
+        print(f"ANALYZING {rec.prefix}")
+        print("=" * 70)
+        # pop, not index: this channel's reshaped arrays are the largest thing
+        # in memory and nothing reads them after its own analysis.
+        V_rs, I_rs = prepared.pop(rec.prefix)
+        process_iv_and_save(V_rs, I_rs, plasma_path, rec.prefix)
+        del V_rs, I_rs
+
+        if calibrate:
+            if interf_chan:
+                chan = interf_chan
+            else:
+                chan, away = chord_for_port(chords, rec.port, ifn)
+                # A chord on a different port than the probe is legitimate but
+                # worth seeing: it is the difference between "measured here" and
+                # "measured a metre down the machine".
+                print(f"  {rec.prefix}: probe on port {rec.port} -> {chan}"
+                      + (f" ({away} ports away)" if away else " (same port)"))
+            calibrate_plasma_npz(ifn, chan, tip=rec.prefix, t_offset=t_offset)
+
+    return sweep_path, plasma_path

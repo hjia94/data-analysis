@@ -6,7 +6,7 @@
 |---|---|---|
 | Gaussian kernel smoothing (1-D) | `gaussian_filter1d`| IV curve smoothing before differentiation; sweep prep (Jun-2026, Mar-2026, Jan-2024) |
 | Gaussian smoothing via FFT convolution | [`fast_gaussian_filter`](../../src/data_analysis/signal/core.py#L81) | long multi-million-sample traces |
-| Savitzky–Golay (polynomial) smoothing | [`Photons`](../../src/data_analysis/plasma/photons.py#L97) (`savgol_window=31`, `savgol_order=3`) | x-ray pulse traces before peak detection (Aug-2025, Nov-2024); also Jan-2024 Isat sweeps |
+| Savitzky–Golay (polynomial) smoothing | [`Photons`](../../src/data_analysis/plasma/photons.py#L47) (`savgol_window=31`, `savgol_order=3`) | x-ray pulse traces before peak detection (Aug-2025, Nov-2024); also Jan-2024 Isat sweeps |
 | Median filtering | [`ndimage.median_filter`](Mar-2026/Mar2026_mach.py#L232) | Mach probe baseline estimate, on the decimated trace |
 | Rolling-quantile (percentile) smoothing | [`rolling_baseline`](../../src/data_analysis/signal/core.py#L127) | slow-baseline estimation |
 
@@ -17,7 +17,7 @@
 | Butterworth low-pass, zero-phase (`filtfilt`) | [`low_pass_filter`](../../src/data_analysis/signal/core.py#L101) | generic trace conditioning |
 | Butterworth band-pass, SOS + `sosfiltfilt` | [`butter_bandpass`](../../src/data_analysis/signal/core.py#L114) | Mach probe fluctuation band 0.5–12 kHz ([Mar2026_mach.py](Mar-2026/Mar2026_mach.py#L202)) |
 | Detrending / mean subtraction | `cross_correlation` | every spectral estimate |
-| Baseline subtraction (linear fit to the ion-sat branch) | [langmuir](../../src/data_analysis/plasma/langmuir.py#L608) | ion-saturation baseline removed from IV |
+| Baseline subtraction (linear fit to the ion-sat branch) | [langmuir](../../src/data_analysis/plasma/langmuir.py#L619) | ion-saturation baseline removed from IV |
 | Baseline subtraction (envelope interpolation) | [photons](../../src/data_analysis/plasma/photons.py#L150) | x-ray photon traces |
 | Baseline subtraction (decimate → median → interpolate) | [Mar2026_mach](Mar-2026/Mar2026_mach.py#L232-L233) | Mach probe |
 | Envelope detection (upper/lower extrema) | [`hl_envelopes_idx`](../../src/data_analysis/signal/core.py#L143) | photon baseline, Nov-2024 x-ray |
@@ -38,8 +38,8 @@
 ### 4a. Single-signal spectra
 | Technique | Implementation | Where used |
 |---|---|---|
-| FFT single-sided amplitude spectrum | [`amplitude_spectrum`](../../src/data_analysis/signal/core.py#L464) | Jun-2026 Isat fluctuation spectra |
-| Incoherent ensemble-averaged FFT (amplitude average over shots) | [`avg_amplitude_spectrum`](../../src/data_analysis/signal/core.py#L484) | Jun-2026 `batch_fft`; preserves broadband power that coherent averaging would cancel |
+| FFT single-sided amplitude spectrum | [`amplitude_spectrum`](../../src/data_analysis/signal/core.py#L484) | Jun-2026 Isat fluctuation spectra |
+| Incoherent ensemble-averaged FFT (amplitude average over shots) | [`avg_amplitude_spectrum`](../../src/data_analysis/signal/core.py#L504) | Jun-2026 `batch_fft`; preserves broadband power that coherent averaging would cancel |
 | STFT / spectrogram (windowed, overlapping, Hanning/Blackman) | [`calculate_stft`](../../src/data_analysis/signal/core.py#L291) | Aug-2025 & Nov-2024 B-dot microwave-band spectrograms (50 MHz–2 GHz) |
 | Group-averaged STFT (running sum over shots, divided at the end — one STFT is ~0.5 GB, so slabs are never all held) | [`compute_group_avg_stft`](Aug-2025/compare_bdot_groups.py#L236) | pass/fail shot-group comparison |
 | Band power vs time (STFT collapsed into a frequency band, binned in time) | [`_band_power_vs_time`](Aug-2025/compare_bdot_groups.py#L216) | per-channel pass/fail comparison |
@@ -47,34 +47,34 @@
 ### 4b. Two-signal (cross) analysis
 | Technique | Implementation | Where used |
 |---|---|---|
-| Time-lag cross-correlation (FFT-based, Pearson-normalized) | [`cross_correlation`](../../src/data_analysis/signal/core.py#L530) | Jun-2026 `xcorr`; peak lag = propagation delay between probes |
-| Magnitude-squared coherence (Welch) | [`coherence_spectrum`](../../src/data_analysis/signal/core.py#L571) | per-shot coherence |
-| Cross-phase spectrum | [`cross_phase_spectrum`](../../src/data_analysis/signal/core.py#L590) | per-shot phase |
-| Welch cross-spectral density `Pxy`/`Pxx`/`Pyy` | [`_avg_welch_spectra`](../../src/data_analysis/signal/core.py#L608) | shared core |
-| **Ensemble-averaged coherence + cross-phase (Smith 1974)** — complex spectra averaged *before* the ratio | [`avg_cross_spectrum`](../../src/data_analysis/signal/core.py#L646) | Jun-2026 `xcorr_averaged`; the single retained estimator on this branch |
-| Narrow-band collapse to scalar coherence/phase | [`band_cross_spectrum`](../../src/data_analysis/signal/core.py#L676) | single-frequency plane maps |
-| Peak-tracking band collapse (follows a drifting mode) | [`peak_cross_spectrum`](../../src/data_analysis/signal/core.py#L731) | mode frequency varying across a probe plane |
+| Time-lag cross-correlation (FFT-based, Pearson-normalized) | [`cross_correlation`](../../src/data_analysis/signal/core.py#L550) | Jun-2026 `xcorr`; peak lag = propagation delay between probes |
+| Magnitude-squared coherence (Welch) | [`coherence_spectrum`](../../src/data_analysis/signal/core.py#L591) | per-shot coherence |
+| Cross-phase spectrum | [`cross_phase_spectrum`](../../src/data_analysis/signal/core.py#L610) | per-shot phase |
+| Welch cross-spectral density `Pxy`/`Pxx`/`Pyy` | [`_avg_welch_spectra`](../../src/data_analysis/signal/core.py#L628) | shared core |
+| **Ensemble-averaged coherence + cross-phase (Smith 1974)** — complex spectra averaged *before* the ratio | [`avg_cross_spectrum`](../../src/data_analysis/signal/core.py#L666) | Jun-2026 `xcorr_averaged`; the single retained estimator on this branch |
+| Narrow-band collapse to scalar coherence/phase | [`band_cross_spectrum`](../../src/data_analysis/signal/core.py#L696) | single-frequency plane maps |
+| Peak-tracking band collapse (follows a drifting mode) | [`peak_cross_spectrum`](../../src/data_analysis/signal/core.py#L751) | mode frequency varying across a probe plane |
 | Ensemble-mean-trace cross-correlation | [`_ensemble_xcorr`](Jun-2026/Jun2026_xcorr.py#L144) | lag from shot-averaged traces |
 
 ## 5. Differentiation and integration
 
 | Technique | Implementation | Where used |
 |---|---|---|
-| Numerical first derivative `dI/dV` | `np.gradient` — [langmuir.py:112](../../src/data_analysis/plasma/langmuir.py#L112), [:280](../../src/data_analysis/plasma/langmuir.py#L280) | Langmuir probe characteristic |
-| Second derivative `d²I/dV²` | [langmuir.py:292](../../src/data_analysis/plasma/langmuir.py#L292) | plasma potential / EEDF |
-| Smoothed differentiation (Gaussian-then-gradient) | [`derivative`](../../src/data_analysis/plasma/langmuir.py#L107) | noise-suppressed `dI/dV` |
-| Trapezoidal integration | `np.trapezoid` — [langmuir.py:308](../../src/data_analysis/plasma/langmuir.py#L308), [photons.py:230](../../src/data_analysis/plasma/photons.py#L230) | density as area under EEPF; photon pulse area |
-| Chord (line) average of a spatial profile, NaN-tolerant | [`line_average`](../../src/data_analysis/signal/core.py#L450) | interferometer cross-calibration |
+| Numerical first derivative `dI/dV` | `np.gradient` — [langmuir.py:121](../../src/data_analysis/plasma/langmuir.py#L121), [:289](../../src/data_analysis/plasma/langmuir.py#L289) | Langmuir probe characteristic |
+| Second derivative `d²I/dV²` | [langmuir.py:301](../../src/data_analysis/plasma/langmuir.py#L301) | plasma potential / EEDF |
+| Smoothed differentiation (Gaussian-then-gradient) | [`derivative`](../../src/data_analysis/plasma/langmuir.py#L114) | noise-suppressed `dI/dV` |
+| Trapezoidal integration | `np.trapezoid` — [langmuir.py:317](../../src/data_analysis/plasma/langmuir.py#L317), [photons.py:230](../../src/data_analysis/plasma/photons.py#L230) | density as area under EEPF; photon pulse area |
+| Chord integral / average of a spatial profile, NaN-tolerant | [`line_integral`](../../src/data_analysis/signal/core.py#L458), [`line_average`](../../src/data_analysis/signal/core.py#L472) | interferometer cross-calibration (integral: an average carries the length it was divided by) |
 
 ## 6. Curve fitting / regression
 
 | Technique | Implementation | Where used |
 |---|---|---|
-| Linear least squares (`polyfit`, order 1) | [`_apply_linear_fit`](../../src/data_analysis/plasma/langmuir.py#L496) | ion-sat and e-sat branch fits |
+| Linear least squares (`polyfit`, order 1) | [`_apply_linear_fit`](../../src/data_analysis/plasma/langmuir.py#L500) | ion-sat and e-sat branch fits |
 | Quadratic polynomial fit | [langmuir.py:74](../../src/data_analysis/plasma/langmuir.py#L74), [track_object.py:169](../../src/data_analysis/tracking/track_object.py#L169) | `V_p` location; parabolic free-fall trajectory |
 | Nonlinear exponential fit (`curve_fit`) | [langmuir.py:654](../../src/data_analysis/plasma/langmuir.py#L654) | electron-retarding region → `T_e` |
-| Semi-log linear fit | [`temperature`](../../src/data_analysis/plasma/langmuir.py#L217) | `T_e` from log-I slope |
-| Piecewise fit + intersection | [`analyze_IV`](../../src/data_analysis/plasma/langmuir.py#L579) | `V_p` from transition/e-sat line crossing. The crossing is `(d₁-c₁)/(c₀-d₀)`; reversing the operand order negates every `V_p` ([:712](../../src/data_analysis/plasma/langmuir.py#L712)). |
+| Semi-log linear fit | [`temperature`](../../src/data_analysis/plasma/langmuir.py#L224) | `T_e` from log-I slope |
+| Piecewise fit + intersection | [`analyze_IV`](../../src/data_analysis/plasma/langmuir.py#L583) | `V_p` from transition/e-sat line crossing. The crossing is `(d₁-c₁)/(c₀-d₀)`; reversing the operand order negates every `V_p` ([:726](../../src/data_analysis/plasma/langmuir.py#L726)). |
 | Weighted least squares on `ln R` | [`fit_calibration`](../../src/data_analysis/plasma/mach.py#L227) | Mach-probe area-ratio (κ) calibration |
 
 ## 7. Peak / event / threshold detection
@@ -84,14 +84,14 @@
 | Threshold peak finding (`find_peaks`) with noise-σ thresholds | [`Photons._detect_pulses`](../../src/data_analysis/plasma/photons.py#L47) | x-ray photon counting |
 | Noise statistics (mean, σ) → detection threshold | [`_compute_thresholds`](../../src/data_analysis/plasma/photons.py#L162) | `lower/upper_threshold = mean + k·σ`. The "quiet window" is assumed to be the **first 0.1%** of the trace — a pulse landing there inflates σ and silently raises both thresholds. |
 | Zero-crossing detection | [`first_and_last_zerocrossings`](../../src/data_analysis/signal/core.py#L19), [`find_all_zerocrossing`](../../src/data_analysis/signal/core.py#L60) | sweep boundaries |
-| Sweep-segment detection from ramp voltage | [`find_sweep_indices`](../../src/data_analysis/plasma/langmuir.py#L315) | splitting a swept trace into individual IV sweeps |
-| Level-crossing index search | [`_find_crossing_index`](../../src/data_analysis/plasma/langmuir.py#L467) | IV branch boundaries |
+| Sweep-segment detection from ramp voltage | [`find_sweep_indices`](../../src/data_analysis/plasma/langmuir.py#L322) | splitting a swept trace into individual IV sweeps |
+| Level-crossing index search | [`_find_crossing_index`](../../src/data_analysis/plasma/langmuir.py#L471) | IV branch boundaries |
 
 ## 8. Ensemble statistics and binning
 
 | Technique | Implementation | Where used |
 |---|---|---|
-| Shot-ensemble mean and SEM | [`mean_sem`](../../src/data_analysis/plasma/langmuir.py#L822) | per-position `V_p`, `T_e`, `n_e` with error bars |
+| Shot-ensemble mean and SEM | [`mean_sem`](../../src/data_analysis/plasma/langmuir.py#L824) | per-position `V_p`, `T_e`, `n_e` with error bars |
 | Log-space (geometric) averaging of ratios | [`combine_log`](../../src/data_analysis/plasma/mach.py#L204) | Mach face ratios — the arithmetic mean of ratios is biased high, and `log_std` is the population spread, not the SEM |
 | Time-binned ensemble of face ratios | [`binned_face_ratio`](../../src/data_analysis/plasma/mach.py#L166) | Mach `R(t)` with a per-bin minimum sample count |
 | NaN-aware masking of bad shots/fits | [`finite_row_mask`](../../src/data_analysis/signal/core.py#L438), `np.nanmean` | failed-fit rejection before averaging |
@@ -114,7 +114,7 @@
 
 | Technique | Implementation | Where used |
 |---|---|---|
-| Interferometer-to-Langmuir absolute density calibration (chord-average matching over a time window) | [`interferometer_calibration`](../../src/data_analysis/plasma/langmuir.py#L1077), [`calibrate_plasma_npz`](../../src/data_analysis/plasma/langmuir.py#L1153) | Jun-2026 — scales probe `n_e` to the line-integrated measurement |
+| Interferometer-to-Langmuir absolute density calibration (chord-integral matching over a time window) | [`interferometer_calibration`](../../src/data_analysis/plasma/langmuir.py#L1197), [`calibrate_plasma_npz`](../../src/data_analysis/plasma/langmuir.py#L1260) | Jun-2026 — scales probe `n_e` to the line-integrated measurement |
 | Mach-probe area-ratio (κ) calibration from rotation runs | [`fit_calibration`](../../src/data_analysis/plasma/mach.py#L227) | Jun-2026 P33 6-tip; κ binds to the **probe**, so it carries across ports and campaigns |
 | Trigger-time alignment between instruments | [`compare_trigger_times`](../../src/data_analysis/io/scope_reader.py#L167) | Nov-2024 scope/camera sync |
 | Scope-time ↔ chamber-time mapping | [`scope_ms_to_chamber_s`](Aug-2025/tracking_utils.py#L88) | Aug-2025 x-ray/camera correlation |
