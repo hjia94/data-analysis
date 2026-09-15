@@ -190,6 +190,18 @@ _SHUNT_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# A third phrasing, self-naming like the bullets: a positional list pairing
+# values to tips, e.g. Jun-2026's line runs "Resistor: 75/300/75/75 for
+# X+/X-/Y+/Y- respectively". Two "/"-separated runs -- numbers, then tips --
+# joined by "for"; the tips are named in the line, so this needs no `tips` arg.
+# Captures the two run strings; the pairing and length check are done in code,
+# since a regex cannot assert the two lists are the same length.
+_SHUNT_LIST_RE = re.compile(
+    r"([\d.]+(?:\s*/\s*[\d.]+)+)\s*(?:ohm\w*\s*)?for\s+"
+    r"([XYZ][+-](?:\s*/\s*[XYZ][+-])+)",
+    re.IGNORECASE,
+)
+
 # The other phrasing: one line for the whole probe, e.g. Mar-2026's "All four
 # tips used ground referemce, -98 V bias, and 45 Ohm resistor". Anchored on
 # "all ... tips" so a stray "45 ohm" elsewhere in the description cannot claim
@@ -202,30 +214,56 @@ _UNIFORM_TIPS_RE = re.compile(r"\ball\b[^\n]*?\btips?\b([^\n]*)", re.IGNORECASE)
 _OHM_RE = re.compile(r"(?<![\d.])([\d.]+)\s*ohm", re.IGNORECASE)
 
 
+def _parse_shunt_list(text):
+    """Positional ``values for tips respectively`` lines -> ``{'X+': 75.0, ...}``.
+
+    Each match pairs its value list to its tip list by position; a length
+    mismatch raises rather than truncating to the shorter, since a silently
+    dropped or shifted tip is exactly the mispairing that scales a Mach ratio
+    with nothing downstream looking wrong. Later matches win over earlier ones
+    for a repeated tip, matching the dict-update order of the bullet path.
+    """
+    out = {}
+    for m in _SHUNT_LIST_RE.finditer(text):
+        values = [float(v) for v in re.split(r"\s*/\s*", m.group(1).strip())]
+        keys = [t.upper() for t in re.split(r"\s*/\s*", m.group(2).strip())]
+        if len(values) != len(keys):
+            raise ValueError(
+                f"shunt list pairs {len(values)} values to {len(keys)} tips: "
+                f"{m.group(0).strip()!r}")
+        out.update(zip(keys, values))
+    return out
+
+
 def parse_shunts(text, tips=None):
     """Extract per-tip shunt resistances from description text -> ``{'X+': 75.0, ...}``.
 
     Every analysis starts here: the digitizer records volts across this resistor,
-    and ``I = V / R`` needs its value per tip. Campaigns write it two ways --
-    per-tip bullets (Jun-2026: 300 ohm on X- against 75/43 elsewhere) or one
+    and ``I = V / R`` needs its value per tip. Campaigns write it three ways --
+    per-tip bullets (Jun-2026 run 32: ``- X-, 300 ohm``), a positional list
+    (Jun-2026 line runs: "75/300/75/75 for X+/X-/Y+/Y- respectively"), or one
     sentence for the whole probe (Mar-2026: "All four tips ... 45 Ohm resistor").
-    Bullets win where present; the uniform sentence is read only if there are
-    none, and then needs ``tips`` to say which tips it covers, since the sentence
-    names a count rather than the tips themselves.
+    The first two name their own tips and are tried in order without ``tips``;
+    the uniform sentence is read only if neither found anything, and then needs
+    ``tips`` to say which tips it covers, since it names a count, not the tips.
 
     A missing value cannot be defaulted to 1.0 or to a neighbour's: the error
     lands in a calibration as a spurious gain with nothing downstream looking
     wrong. So an unparsed description returns ``{}`` rather than a guess, letting
     a caller tell "none recorded" from "some recorded" and decide.
 
-    Raises ``ValueError`` if a uniform line names two different resistances --
-    picking either would be the silent guess this parser exists to prevent.
+    Raises ``ValueError`` if a positional list's value and tip counts disagree,
+    or if a uniform line names two different resistances -- either mispairing is
+    the silent guess this parser exists to prevent.
     """
     text = text or ""
     per_tip = {m.group(1).upper(): float(m.group(2))
                for m in _SHUNT_RE.finditer(text)}
-    if per_tip or not tips:
+    if per_tip:
         return per_tip
+    listed = _parse_shunt_list(text)
+    if listed or not tips:
+        return listed
     for m in _UNIFORM_TIPS_RE.finditer(text):
         found = {float(v) for v in _OHM_RE.findall(m.group(1))}
         if len(found) > 1:
