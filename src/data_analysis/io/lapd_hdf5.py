@@ -1,11 +1,10 @@
 """Unified LAPD HDF5 reader: :func:`open_lapd` + :class:`LapdRun`.
 
 Three provenances of LAPD HDF5 file are parsed by three backends under
-:mod:`data_analysis.io._backends` (moved near-verbatim from the old readers in
-Step 3 of the reorg). :func:`open_lapd` sniffs the file's group signatures,
-picks a backend, and returns a :class:`LapdRun` that delegates to that backend's
-existing functions. Behavior is preserved (wrap, don't rewrite); experiment code
-imports the readers from :mod:`data_analysis.io`.
+:mod:`data_analysis.io._backends`. :func:`open_lapd` sniffs the file's group
+signatures, picks a backend, and returns a :class:`LapdRun` that delegates to that
+backend's functions; experiment code imports the readers from
+:mod:`data_analysis.io`.
 
 Handle lifecycle
 ----------------
@@ -21,9 +20,10 @@ Large runs must be readable in part or streamed shot-by-shot rather than loaded
 whole. ``channel(name, shots=...)`` reads a chosen subset into a rectangular
 ``(nshot, nsamples)`` stack; ``iter_shots(name, shots=...)`` yields one shot at a
 time (the read-and-analyze / process-and-discard pattern); ``shots()`` lists the
-available shot numbers. The pydaq backend supports these natively via
-``scope_io``; the bapsflib backend maps ``shots`` onto its ``index`` argument;
-the legacy 2018 layout has no per-shot concept and raises ``NotImplementedError``.
+available shot numbers. The pydaq backend supports all three natively via
+``scope_io``; the bapsflib backend supports only ``channel(shots=...)``, mapping
+``shots`` onto its ``index`` argument (0-based rows, not shot numbers);
+``iter_shots``/``shots`` and the legacy 2018 layout raise ``NotImplementedError``.
 
 Output normalization (Step 3b)
 ------------------------------
@@ -32,8 +32,7 @@ provenance, so cross-provenance analysis code no longer branches on
 ``.backend``: ``channel()`` -> ``(stack, tarr)`` with ``stack`` a
 ``(nshot, nsamples)`` float array and ``tarr`` the 1-D time axis; ``time_array()``
 -> ``tarr`` for every backend. Each backend's native reader output is adapted at
-the seam (the readers themselves are unchanged from Step 3 -- wrap, don't
-rewrite). ``positions()`` and ``info()`` remain backend-native: the three
+the seam. ``positions()`` and ``info()`` remain backend-native: the three
 position layouts share no clean common schema, so a forced unification would be
 lossy; see ``positions()``.
 """
@@ -632,15 +631,19 @@ class LapdRun:
         adapted to this schema at the seam; ``name`` is still backend-specific:
 
         - pydaq: ``name`` is the scope channel name (e.g. ``'C2'``). ``shots`` may
-          be ``None`` (all shots in the scope group), an int (one shot), or a
-          sequence/slice (that subset). The reader returns the ``(nshot, nsamples)``
+          be ``None`` (all shots in the scope group), an int or sequence (shot
+          NUMBERS, 1-based), or a slice (positions in the sorted shot-number
+          list). The reader returns the ``(nshot, nsamples)``
           float64 ``stack`` (NaN rows for unreadable shots); ``tarr`` is the scope
           group's stored ``time_array`` -- the ground truth shared by every channel
           on that scope -- read directly, not rebuilt from per-channel header
           ``dt``/``t0``.
         - bapsflib: ``name`` must be ``(board_num, chan_num)``; ``shots`` maps to
-          the digitizer ``index`` argument (None = all). The reader returns
-          ``(data, tarr)`` with ``data['signal']`` the ``(nshot, nsamples)`` stack.
+          the digitizer ``index`` argument -- 0-based ROW indices, not shot
+          numbers (None = all). The reader returns ``(data, tarr)`` with
+          ``data['signal']`` the ``(nshot, nsamples)`` stack; ``tarr`` is
+          ``arange(nt) * dt`` -- 0 at the first recorded sample, with no trigger
+          offset applied, unlike pydaq's stored ``time_array``.
         - legacy: ``name`` is the channel number; ``shots`` is not supported (the
           2018 layout stores one trace per channel). The single trace is returned
           as a 1-row stack with ``tarr`` built from the channel header.

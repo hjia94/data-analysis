@@ -145,10 +145,10 @@ def generate_spectral_density(probe_wavelength, T_e, T_i, n_e, scattering_angle=
 
 def power_ratio(Skw, n_e, L, scattering_angle=180):
     '''
-    calculate the ratio scattered power/incident power
+    Scattered/incident power per unit angular frequency, i.e. the integrand of the
+    power ratio: the frequency integral is NOT taken here (returns an array shaped like Skw).
     n_e: electron density in cm^-3
-    omega_arr: angular frequency array in rad/s
-    Skw: spectral density in rad/s
+    Skw: spectral density, per rad/s
     scattering_angle: scattering angle in degrees
     L: length of the plasma in cm
     '''
@@ -179,7 +179,8 @@ def faraday_rotation_angle(omega, ne, B, L):
     L: length of plasma in m
 
     Returns:
-    - theta_deg : Faraday rotation angle in degrees
+    - theta_deg : Faraday rotation angle in degrees; any value above 360 is
+      returned as 0 (not wrapped), so a 0 can mean a very large rotation
     """
     coeff = e**3 / (2*epsilon_0*m_e**2*c)
     theta_rad = coeff/omega**2 * ne * B * L
@@ -228,8 +229,6 @@ def generate_thz_waveform(f0_THz, sigma_t, npulses, dt, pulse_offset=0, npd=1000
             Frequency array in Hz
         - signal_fft: ndarray
             Frequency-domain representation of the waveform
-        - x: float
-            Wave covered distance in meters
         - center_ind: int
             Index of the center of the wave packet
     """
@@ -334,11 +333,10 @@ def plasma_dispersion_relation(omega, wpe, debug=False):
     --------
     tuple
         - k: ndarray
-            Wavenumber array in rad/m
+            Wavenumber array in rad/m (0 at and below wpe, i.e. evanescent
+            components are passed through unattenuated rather than cut off)
         - wpe: float
             Plasma frequency in rad/s
-        - vgarr: ndarray
-            Group velocity array in m/s
     """
     if debug:
         print(f"Plasma frequency: {wpe/(2*np.pi)/1e9:.2f} GHz")
@@ -359,6 +357,8 @@ def propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=Fal
     
     Parameters:
     -----------
+    NT: int
+        Length of the time-domain output (the original waveform length, for irfft)
     freqs: ndarray
         Frequency array in Hz
     signal_fft: ndarray
@@ -369,7 +369,7 @@ def propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=Fal
         Propagation distance in meters
     debug: bool, optional
         If True, print debug information (default: False)
-        
+
     Returns:
     --------
     tuple
@@ -377,10 +377,6 @@ def propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=Fal
             Propagated signal in time domain
         - fft_propagated: ndarray
             Propagated signal in frequency domain
-        - vgarr: ndarray
-            Group velocity array in m/s
-        - center_ind: int
-            Index of the center of the propagated wave packet
     """
     
     # Calculate angular frequencies and plasma frequency

@@ -60,7 +60,7 @@ import Jun2026_Isat as jis
 import Jun2026_IV as jiv
 
 
-# Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/
+# Default subdirectory under <OUTPUT_ROOT>/figures/ (io/paths.py)
 FIG_SUBDIR = jpl.FIG_SUBDIR
 
 # Upper limit of the frequency band rendered to the html page, kHz.

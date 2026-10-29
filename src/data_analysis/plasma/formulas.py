@@ -48,14 +48,14 @@ def eV_to_K(eV):
 	return eV * 11604.525
 
 def collision_ee(Te, ne):
+	'''NRL electron collision rate [s^-1]; Te in eV, ne in cm^-3. Assumes ln(Lambda) = 10 (the trailing factor).'''
 	return 2.91 * 10**-6 * ne/Te**(3/2) * 10
 
 def collision_en(Te, ng, tfn = r"D:\data\cross-section\num.txt"):
 	'''
-	return collision frequency from electron neutral collision cross section
-	Cross section data comes from LXCAT
-	Neutral gas density calculated from ideal gas law (see collision-Oct2019.xlsx)
-	'''    
+	Electron-neutral cross section and mean free path -> (sig [m^2], mfp [m]); not a frequency.
+	Cross section is interpolated at Te from the LXCAT table in tfn; ng in m^-3 (see neutral_density).
+	'''
 	
 	data = np.loadtxt(tfn) # Read cross section info from txt file
 

@@ -88,6 +88,9 @@ def save_to_npy(data, npy_file_path):
     """
     Save data to a .npy file.
 
+    If the file exists, blocks on ``input()`` for y/n; only 'n' cancels -- any
+    other reply (including a typo) overwrites. Not for unattended/batch use.
+
     Parameters:
     data (numpy.ndarray): The data to be saved.
     npy_file_path (str): The file path to save the .npy file.

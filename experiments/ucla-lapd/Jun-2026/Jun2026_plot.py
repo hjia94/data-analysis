@@ -3,7 +3,9 @@
 The **plotting** home for the Jun-2026 LAPD analyses.  The processing modules
 (e.g. ``Jun2026_IV.py``) read raw HDF5, do the heavy lifting, and save results
 to ``.npz``; this module reads those saved arrays back and draws the figures.
-It does **no** processing of its own.
+It does **no** analysis of its own; it opens the raw HDF5 only for the run
+description (titles) and a few shots of the Isat reference trace
+(``_read_isat_trace`` / ``_read_isat_avg``).
 
 Figure functions (each reads the relevant run's saved ``.npz`` -- process first):
 
@@ -36,7 +38,7 @@ from data_analysis.viz.plot_utils import finalize_figure, grid_by_position
 import Jun2026_Isat as jis
 import Jun2026_xcorr as jxc
 
-# Default subdirectory under $DATA_ANALYSIS_OUTPUT/figures/ for Jun-2026 figures.
+# Default subdirectory under <OUTPUT_ROOT>/figures/ (io/paths.py) for Jun-2026 figures.
 FIG_SUBDIR = "Jun2026"
 
 # Isat reference panel (5th panel of the IV line-scan figure).  A fixed-bias

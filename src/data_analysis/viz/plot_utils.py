@@ -265,10 +265,11 @@ def plot_counts_per_bin(bin_centers, counts, bin_width_ms, ax=None):
 def plot_photon_detection(tarr, data, pulse_times, detector, ax=None):
     """
     Plot photon pulses from x-ray detector data with dynamic baseline.
-    
+
     Args:
-        time_array (np.ndarray): Time array in seconds
-        signal_data (np.ndarray): Signal data to analyze
+        tarr (np.ndarray): ``detector.tarr_ds`` [ms] -- the baseline lives on the
+            downsampled grid, so the raw ``tarr`` would not match its length
+        data (np.ndarray): ``detector.data_ds``
         pulse_times (np.ndarray): Array of detected pulse times in milliseconds
         detector (Photons): Photon detector object containing baseline and threshold
         ax (matplotlib.axes.Axes, optional): Axes to plot on. If None, current axes will be used
@@ -375,7 +376,7 @@ def plot_subtracted_signal(tarr, data, pulse_times, detector, ax=None):
     """Plot baseline-subtracted signal with detected pulses.
     
     Args:
-        tarr: Time array in milliseconds
+        tarr: ``detector.tarr_ds`` [ms] (the downsampled grid every array here lives on)
         data: Original signal data (not used, kept for API consistency)
         pulse_times: Not used, kept for API consistency
         detector: Photons detector object containing baseline-subtracted signal
@@ -556,8 +557,8 @@ def fig_path(name, subdir, ext=".png"):
     """Centralized figure location under the repo-external output root.
 
     Routes through :func:`data_analysis.io.paths.output_path`, so figures land in
-    ``$DATA_ANALYSIS_OUTPUT/figures/<subdir>/`` (default ``~/data-analysis-output``)
-    rather than next to the raw data or in the repo.  ``name`` is the filename
+    ``<OUTPUT_ROOT>/figures/<subdir>/`` (the constant in ``io/paths.py``; no
+    environment variable is read) rather than next to the raw data or in the repo.  ``name`` is the filename
     stem already including any run/tip/figure tags (e.g. ``"02-tipR-line"``); the
     ``ext`` extension is added if absent.
 

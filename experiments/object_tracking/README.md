@@ -79,7 +79,7 @@ Override only if the camera is physically remounted.
 
 | Function | Description |
 |----------|-------------|
-| `track_object_per_frame(avi_path, cx=None, cy=None, chamber_radius=None, n_workers=1)` | Track the ball through every frame of the video. Chamber comes from `get_chamber()` unless `cx/cy/chamber_radius` are passed explicitly. Uses a fast cropped-ROI search around the last detection and falls back to full-chamber Hough after `BALL_ROI_LOSS_LIMIT` misses. Set `n_workers>1` to split frames into contiguous ranges across a `multiprocessing.Pool`. Returns a `TrackingResult`. |
+| `track_object_per_frame(avi_path, cx=None, cy=None, chamber_radius=None, n_workers=1)` | Track the ball through every frame of the video. Chamber comes from `get_chamber()` unless `cx/cy/chamber_radius` are passed explicitly. Each frame tries a fast cropped-ROI search around the last detection first and falls back to full-chamber Hough on that same frame when it misses; after `BALL_ROI_LOSS_LIMIT` consecutive frames with no detection at all, the ROI seed is dropped. Set `n_workers>1` to split frames into contiguous ranges across a `multiprocessing.Pool`. Returns a `TrackingResult`. |
 | `track_object_sparse(avi_path, cine_path, cm_per_px, cx=None, cy=None, chamber_radius=None)` | Sample ~`SPARSE_TARGET_POINTS` frames at least `SPARSE_MIN_SEPARATION_CM` apart and fit a line. Returns a **dict** (the `tracking_result.npy` entry schema), not a `TrackingResult`. Detection runs on the `.avi`; fps and `t_start` come from `cine_path`. |
 | `TrackingResult` | Fields: `positions` `(N, 2)`, `frame_numbers` `(N,)`, `min_ydiff_frame`. Iterable, so `pos, fn, mf = track_object_per_frame(...)` still works. |
 | `position_from_fit(t_ms, fit)`, `get_ball_position_at_time(...)` | Evaluate a saved sparse line fit at a time. |
@@ -88,7 +88,7 @@ Override only if the camera is physically remounted.
 
 | Function | Description |
 |----------|-------------|
-| `extract_calibration(cine_path)` | Track one cine and fit `y_px(τ) = a + bτ + cτ²` to deduce `cm/px = -0.5 g·100 / c`. Returns `(cm_per_px_gravity, cm_per_px_chamber, x_cm)`, or `(None, None, None)` on failure — check before using, since the three are not distinguishable from a valid result by shape. |
+| `extract_calibration(cine_path)` | Track one cine and fit `y_px(τ) = a + bτ + cτ²` to deduce `cm/px = -0.5 g·100 / c`. Returns `(cm_per_px_gravity, cm_per_px_chamber, x_cm)`, `(None, None, None)` if reading/tracking failed, or `(nan, nan, nan)` if the fitted parabola is not falling — check before using, since neither failure is distinguishable from a valid result by shape. |
 | `average_calibration(dir_path, n=5, pattern="*.cine", out_dir=r"E:\\")` | Run `extract_calibration` over up to `n` files in `dir_path` and save a per-port summary under `out_dir`. The port tag (`P21`, `P30`, …) is parsed from the filenames and must be consistent across the sampled files. Drift is summarized per shot as `np.ptp(x_cm)`. |
 
 ### Tracking results dictionary
@@ -105,13 +105,9 @@ analysis that needs `t = 0` aligned to the chamber crossing.
 
 ### Free-fall reference model
 
-Used to compare tracked trajectories against ideal kinematics.
-
-| Function | Description |
-|----------|-------------|
-| `get_vel_freefall(h)` | Speed `sqrt(2 g h)` after falling distance `h` from rest. |
-| `get_pos_freefall(t, t0, height=0.5, ...)` | Center-relative position vs. time, given the ball passes the chamber center at `t0` after pre-falling `height`. |
-| `get_vel_freefall_time(t, t0, height=0.5)` | Velocity vs. time for the same model. |
+Not in this module: `get_vel_freefall(h)` and `get_pos_freefall(t, t0, height=0.5, ...)`
+are defined locally in
+[experiments/ucla-lapd/Nov-2024/process_xray_bdot.py](../ucla-lapd/Nov-2024/process_xray_bdot.py).
 
 ## Tunable parameters
 
@@ -129,8 +125,9 @@ bodies:
 
 ## Logging
 
-Both modules use the standard `logging` library. To see info/warning output
-in a notebook or script:
+`track_object` reports progress through the standard `logging` library (it
+also prints some messages directly; `data_analysis.io.cine` only prints). To
+see the logged info/warning output in a notebook or script:
 
 ```python
 import logging

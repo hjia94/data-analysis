@@ -8,16 +8,16 @@ Workflow
    saving a line fit for the trajectory to ``base_dir/tracking_result.npy``.
    The per-port ``calibration_factor_P{N}.npy`` is loaded once at the top so
    the saved fits are in cm directly.
-2. ``verify_tracking(base_dir)`` loads that npy and overlays each shot's
-   sample points and saved line, plus a ``y = 0`` reference and the
-   derived centre-crossing time ``ct``. Used to confirm visually that the
-   sparse fit lies through the points and crosses zero where expected.
+2. ``verify_tracking(base_dir)`` loads that npy and histograms, over all
+   shots, the fitted ``y = 0`` crossing time ``ct`` and the ``y = +30 cm``
+   crossing time. ``plot_tracking_comparison`` is the per-shot check that the
+   sparse fit lies through the per-frame detections.
 
 On-disk schema for tracking_result.npy
 --------------------------------------
 ``{cine_path: <dict returned by track_object_sparse>}``. Each entry stores:
 ``x_slope, x_intercept, y_slope, y_intercept`` (cm vs s, chamber-centre
-frame), ``cm_per_px`` (the value used at fit time), ``n_points``,
+frame), ``cm_per_px`` (the value used at fit time), ``fps``, ``t_start``, ``n_points``,
 ``t_min``, ``t_max``, ``ct = -y_intercept / y_slope``, and
 ``sample_points`` ((n_points, 3) int — frame_idx, rel_x_px, rel_y_px).
 Failed shots have NaN coefficients and ``n_points = 0``.
@@ -195,7 +195,7 @@ def count_y_passes(base_dir, y, t_start, t_stop, tracking_dict=None):
 
 
 def verify_tracking(base_dir, show=True):
-    """Plot a histogram of centre-crossing times (ct) over all tracked shots.
+    """Histogram the fitted y = 0 (ct) and y = +30 cm crossing times over all tracked shots.
 
     Args:
         base_dir: Folder containing ``tracking_result.npy``.

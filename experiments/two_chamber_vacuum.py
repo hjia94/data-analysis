@@ -106,7 +106,8 @@ def estimate_nB_ambipolar(geom: Geometry, plasma: PlasmaParams) -> dict:
     Ambipolar-leak model (no sources in B):
       C_p = tau_p * hole * c_sA      [cm^3/s]   (plasma 'conductance' through hole)
       B_loss = wall_area_B * c_sB    [cm^3/s]   (loss capacity of B walls)
-      n_B = (C_p / (C_p + L_B)) * n_A
+      n_B = (C_p / (C_p + B_loss)) * n_A
+    c_sA and c_sB are the same value: both use plasma.Te_eV (one T_e for both chambers).
     """
     c_sA = ion_sound_speed(plasma.Te_eV, plasma.mi_amu)  # returns cm/s
     c_sB = ion_sound_speed(plasma.Te_eV, plasma.mi_amu)  # returns cm/s

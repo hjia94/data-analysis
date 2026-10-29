@@ -134,9 +134,10 @@ Represents a single ring current for magnetic field calculations.
 - `RingCurrent(R, z, cur=1.0)`: Ring at radius R, position z, with current cur
 
 **Methods:**
-- `B(R, z)`: Magnetic field at point (R, z)
-- `A(R, z)`: Vector potential at point (R, z)
-- `Mutual(other)`: Mutual inductance with another ring
+- `B(R, z)`: Magnetic field `(BR, Bz)` at point (R, z), in Tesla
+- `Aphi(R, z)`: Vector potential at point (R, z)
+- `Psi(R, z)`: Magnetic flux through the circle at (R, z)
+- `Mutual(other)` or `Mutual(R, z)`: Mutual inductance with another ring
 
 #### `CoilData`
 Data structure for individual coil parameters.
@@ -145,6 +146,7 @@ Data structure for individual coil parameters.
 - `color`: Coil color (YELLOW, PURPLE, BLACK)
 - `supply_number`: Power supply number (1-12)
 - `z`: Axial position (m)
+- `eff_port_number`: Effective port number of the coil (-1 where none)
 - `a`: Coil radius (m)
 - `num_turns`: Number of turns
 - `current`: Current (A)
@@ -155,6 +157,7 @@ Data structure for individual coil parameters.
 - `create_LaB6_coil_set()`: Create LaB6 coil configuration  
 - `calculate_field_from_ring_currents(rings, R, z)`: Calculate total field from ring list
 - `calculate_vector_potential_from_ring_currents(rings, R, z)`: Calculate total vector potential
+  (not re-exported by `compute_B`; import it from `compute_B.magnetic_field_calculator`)
 - `calculate_flux_from_ring_currents(rings, R, z)`: Calculate total flux from ring list
 
 ### Constants

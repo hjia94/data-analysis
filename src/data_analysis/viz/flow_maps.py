@@ -1,8 +1,8 @@
 """Renders for a calibrated in-plane flow map: slider page and static frame.
 
 Both renders consume the ``(npos, nbin)`` velocity cubes a Mach-flow batch
-writes, resolve them about a fitted rotation centre
-(:mod:`data_analysis.plasma.flow`), and draw the same panels in the same order
+writes, with ``v_r``/``v_th`` already resolved by the caller about a fitted
+rotation centre (:mod:`data_analysis.plasma.flow`), and draw the same panels in the same order
 -- so a figure and the slider page it was chosen from cannot show different
 things. That ordering guarantee is the reason these live together rather than
 being written per campaign.
@@ -108,8 +108,10 @@ def plot_flow_frame(pos_x, pos_y, vx, vy, v_r, v_th, centre, suptitle,
 
     Every argument is one value per position (a single time bin, already
     selected). ``extra_panels`` are ``(values, title, colourbar_label)`` drawn
-    after the two polar panels on the same diverging scale -- run 32's axial
-    ``v_Z``. ``centre`` is marked on the panels resolved about it.
+    after the two polar panels with the same diverging colormap -- run 32's axial
+    ``v_Z``. Each diverging panel is symmetric about 0 at ``+-vmax``, or at its
+    own ``max|value|`` when ``vmax`` is None, so autoscaled panels are not on a
+    common scale. ``centre`` is marked on the panels resolved about it.
 
     Returns the figure; the caller saves it (campaign figure paths and naming
     are the caller's business).

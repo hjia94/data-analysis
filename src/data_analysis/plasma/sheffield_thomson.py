@@ -92,7 +92,8 @@ class SheffieldThomson:
         scattering_angle : float, optional
             Scattering angle in degrees (default: 180)
         ions : str or tuple, optional
-            Ion species information (default: "He+")
+            Ion species information (default: "He+"). Strings other than "He+"
+            and "H+" are silently treated as He+; pass a (Z, A, fract) tuple instead.
         """
         # Store input parameters
         self.probe_wavelength = probe_wavelength
@@ -682,7 +683,7 @@ def Sheffield_Behn_example():
             T_i=Ti,
             n_e=neg,
             scattering_angle=90,
-            ions=(np.array([4]), np.array([4]), np.array([1]))  # He++
+            ions=(np.array([4]), np.array([4]), np.array([1]))  # (Z, A, fract) = (4, 4, 1); He++ would be Z=2
         )
         
         # Calculate spectral density

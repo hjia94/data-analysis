@@ -24,7 +24,7 @@ compare_trigger_times(file path1, file path2) => True/False
 read_hdf5_scope_tarr(f, scope_name) => time array
 	Read the time array for a given scope group from an open HDF5 file.
 --------------------------------------------------------------------------
-read_hdf5_scope_data(f, scope_name, channel_name, shot_number) => voltage data array
+read_hdf5_scope_data(f, scope_name, channel_name, shot_number) => (voltage data array, dt, t0)
 	Read and convert raw scope channel data for a given shot from an open HDF5 file.
 --------------------------------------------------------------------------
 read_hdf5_all_scopes_channels(f, shot_number, include_tarr=True) => dict of all scope data
@@ -123,18 +123,9 @@ def decode_header_info(hdr_bytes):
 #======================================================================================
 
 def get_trigger_time(file_path):
-	"""
-	Extract trigger timing information from LeCroy scope file header.
-	
-	Parameters:
-	-----------
-	file_path : str
-		Path to the .trc file
-		
-	Returns:
-	--------
-	datetime
-		datetime object of when the trace was triggered
+	"""Trigger time from a .trc header -> ``{'year', 'month', 'day', 'hour', 'minute', 'second'}``.
+
+	``year`` is the full year (e.g. 2026); ``second`` is fractional.
 	"""
 	
 	with open(file_path, mode='rb') as file:
@@ -150,8 +141,6 @@ def get_trigger_time(file_path):
 	if header is None:
 		raise ValueError("Could not decode header information")
 	
-	# Extract trigger time components from header
-	# Note: LeCroy stores year as offset from 1900
 	year = header.hdr.tt_year
 	month = header.hdr.tt_months
 	day = header.hdr.tt_days
@@ -165,22 +154,11 @@ def get_trigger_time(file_path):
 #======================================================================================
 
 def compare_trigger_times(file_path1, file_path2, debug=False):
-	"""
-	Compare trigger times of two LeCroy scope files.
-	
-	Parameters:
-	-----------
-	file_path1 : str
-		Path to the first .trc file
-	file_path2 : str
-		Path to the second .trc file
-	tolerance_seconds : float, optional
-		Maximum difference in seconds to consider times as "same" (default: 1 second)
-		
-	Returns:
-	--------
-	bool
-		True if trigger times are the same (within tolerance), False otherwise
+	"""True if two .trc files have identical trigger times, to the header's fractional second.
+
+	No tolerance: two scopes triggered by the same event can differ in the last
+	digits and compare False. ``debug`` prints the minute+second difference when
+	they differ. Returns False (after printing) if either header cannot be read.
 	"""
 	
 	try:

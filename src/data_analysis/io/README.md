@@ -29,8 +29,7 @@ module:
 - **`legacy`** — the 2018–2020 `process-plasma` layout.
 
 `open_lapd()` sniffs the file's group signatures, picks the matching backend, and
-returns a `LapdRun` that delegates to that backend. Behavior is preserved — the
-backends wrap the original readers rather than rewriting them. The exact
+returns a `LapdRun` that delegates to that backend. The exact
 group-signature rules used for detection live in `detect_backend()` (in
 `lapd_hdf5.py`), the single source of truth for provenance sniffing.
 
@@ -59,7 +58,9 @@ every backend, so cross-provenance analysis code never branches on `.backend`:
 For large runs, read a subset rather than the whole file:
 `channel(name, shots=...)` reads a chosen subset; `iter_shots(name, shots=...)`
 yields one shot at a time (read-and-discard); `shots()` lists available shot
-numbers.
+numbers. `iter_shots`/`shots` are pydaq-only. `shots=` means shot **numbers**
+on pydaq (a slice means positions in the sorted list) but 0-based **rows** on
+bapsflib.
 
 **`LapdSession` — one open handle for many reads (bapsflib only).** Some
 experiment routines read several things from the *same* open file — digitizer
@@ -98,7 +99,7 @@ is the **port number** (`'<Hermes>  p29_LP'` ↔ `'Isat, LP@P29-R'`), so
 from data_analysis.io import probe_channel_map, moving_group, STATIONARY, UNMAPPED
 
 mapping = probe_channel_map(path)        # {(scope, chan): group | STATIONARY | UNMAPPED}
-group   = moving_group(mapping, ("LPscope", "C1"))   # None when stationary/unmapped
+group   = moving_group(mapping, ("lpscope", "C1"))   # on-disk group name; None when stationary/unmapped
 ```
 
 The map covers **every** described channel, so a caller sees stationary and
@@ -132,9 +133,9 @@ can tell a missing shot from a real one. A channel whose shots are all missing
 comes back with an empty `phase`. Feeds the absolute `n_e` calibration in
 `data_analysis.plasma.langmuir.interferometer_calibration`.
 
-## Run-description parser & diff (pydaq)
+## Run-description parser & diff
 
-LAPD pydaq files carry a hand-written `description` root attribute (purpose prose
+LAPD files carry a hand-written run description (purpose prose
 → `Operator:` → a `Setup:` block of indented bullets: plasma condition, magnetic
 field, bias, probe). Across a run series the operator usually changes **one**
 setting and re-runs, but the text drifts cosmetically (`800G` vs `800 G`, tabs vs
@@ -155,8 +156,11 @@ The diff compares a **normalized** form (so formatting drift is *not* a
 difference) but reports the **raw** text. `summary()` lists changed settings
 compactly, ranked most-significant first (B-field, gas, bias, density, …), and
 collapses reworded prose into a trailing `(+N/-M other)` count. `description()` /
-`compare_runs` are pydaq-only (bapsflib/legacy store metadata differently and
-raise `NotImplementedError`).
+`compare_runs` work on pydaq and bapsflib files (bapsflib keeps the same text in
+the `Description` attr of `Raw data + config`), and can diff one against the
+other -- though the match is only as good as the two texts' shared layout (Mar-2026
+run 01 vs Jun-2026 run 00 pair up no settings: every item shows as added/removed);
+the legacy layout has no description and raises `NotImplementedError`.
 
 ### Extracting one setting: `gas_puff`
 

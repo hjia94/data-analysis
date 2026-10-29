@@ -39,7 +39,7 @@ from data_analysis.signal.core import analyze_downsample_options, hl_envelopes_i
 @dataclass
 class PhotonPulse:
     """Represents a single photon pulse detection."""
-    time: float  # Average time of pulse (ms)
+    time: float  # Time of the pulse peak (ms)
     area: float  # Integrated area of pulse
     width: float # Temporal width of pulse (ms)
 
@@ -48,11 +48,14 @@ class Photons:
     """Analyzes photon pulses in time series data.
 
     Attributes:
+        tarr_ds, data_ds (NDArray): Downsampled time [ms] and filtered signal;
+            baseline and baseline_subtracted live on this grid
         baseline (NDArray): Computed baseline of the signal
-        std_dev (float): Standard deviation of the baseline-subtracted signal
-        dt (float): Time step between samples
-        threshold (float): Detection threshold for pulses
-        pulses (list[PhotonPulse]): Detected photon pulses
+        noise_std (float): Std of the first 0.1% of the baseline-subtracted signal
+        dt (float): Time step between downsampled samples [ms]
+        lower_threshold, upper_threshold (float): Detection threshold, and the
+            level above which a peak (and its neighbours) is rejected as oversized
+        pulses (list[PhotonPulse]): Detected photon pulses (after reduce_pulses)
     """
 
     def __init__(self,
@@ -74,7 +77,8 @@ class Photons:
             tsh_mult (list[int]): [lower, upper] threshold multipliers for pulse detection
             savgol_window (int): Window length for Savitzky-Golay filter
             savgol_order (int): Polynomial order for Savitzky-Golay filter
-            distance_mult (float): Multiplier for baseline distance calculation
+            distance_mult (float): Multiplier for baseline distance calculation;
+                0 selects a constant baseline (see _compute_baseline for the sign caveat)
             downsample_rate (Optional[int]): Manual downsample rate. If None, will be automatically determined
             debug (bool): Whether to show debug plots
         """
@@ -120,7 +124,13 @@ class Photons:
         self._detect_pulses()
 
     def _compute_baseline(self) -> None:
-        """Compute baseline using envelope detection or constant baseline."""
+        """Compute baseline using envelope detection or constant baseline.
+
+        The two modes assume opposite pulse polarity: the constant baseline
+        (``distance_mult == 0``) forms ``data - baseline`` (positive-going pulses),
+        the upper-envelope baseline forms ``baseline - data`` (negative-going, PMT
+        style). Detection looks for positive peaks of that difference either way.
+        """
 
         if self.distance_mult == 0:
             # Use constant baseline: average of first 5% and last 5% of data
@@ -209,7 +219,7 @@ class Photons:
 
         # For each detected peak
         for i, peak_idx in enumerate(self.peak_indices):
-            # Find pulse boundaries (where signal crosses noise mean or changes direction)
+            # Find pulse boundaries: where the signal drops to the noise mean
             left_idx = peak_idx
             while (left_idx > 0 and
                    self.baseline_subtracted[left_idx-1] > self.noise_mean):
@@ -258,7 +268,8 @@ def counts_per_bin(tarr, amplitudes, bin_width=0.2, amplitude_min=None, amplitud
     Args:
         tarr (array-like): Array of pulse times
         amplitudes (array-like): Array of pulse amplitudes
-        bin_width (float): Width of time bins
+        bin_width (float): Target width of time bins (tarr units); the span is split into
+            int(span / bin_width) equal bins, so actual bins are at least this wide
         amplitude_min (float, optional): Minimum amplitude threshold for counting pulses
         amplitude_max (float, optional): Maximum amplitude threshold for counting pulses
     Returns:

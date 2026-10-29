@@ -1,6 +1,7 @@
 """Tolerant parser + diff for the hand-written LAPD ``description`` attribute.
 
-LAPD pydaq HDF5 files carry a free-text ``description`` root attribute that the
+LAPD HDF5 files carry a free-text description attribute (pydaq: ``description``
+on the root; bapsflib: ``Description`` on ``Raw data + config``) that the
 operator writes by hand (purpose prose -> ``Operator:`` -> a ``Setup:`` block of
 indented bullets: plasma condition, magnetic field, multi-electrode bias, probe).
 During a run series usually **one** setting changes (``uniform 800G`` ->
@@ -15,8 +16,8 @@ reports the *raw* text the operator wrote. :meth:`RunDiff.summary` renders all
 changes on one line, suitable for a plot title or a printed banner.
 
 Pure text in, pure data out -- no HDF5/h5py dependency, so it is unit-testable
-without data files. The HDF5 read path lives in :mod:`..pydaq`
-(``_find_description_attribute`` -> this parser); experiment code reaches it via
+without data files. The HDF5 read paths live in each backend's
+``parse_description`` (-> this parser); experiment code reaches it via
 ``data_analysis.io.open_lapd(path).description()`` and ``compare_runs``.
 """
 

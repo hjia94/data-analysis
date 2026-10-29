@@ -8,8 +8,8 @@ All positions are stored as (rel_x, rel_y) relative to the chamber center
     rel_x = px - cx        (positive = rightward)
     rel_y = cy - py        (positive = upward; inverts the image y-axis)
 
-Core tracking logic (track_object)
------------------------------------
+Core tracking logic (track_object_per_frame)
+---------------------------------------------
 For each video frame the detector (Hough circles on an inverted, blurred
 grayscale image) finds the brightest ball candidate inside the chamber disk.
 A narrow ROI crop around the last known position is tried first for speed;
@@ -65,7 +65,7 @@ BALL_HOUGH_PARAMS = dict(dp=1, param1=50, param2=12)
 
 # ROI tracking parameters
 BALL_ROI_RADIUS_PX = 60          # half-width of crop around last detection
-BALL_ROI_LOSS_LIMIT = 3          # consecutive ROI misses before giving up tracking
+BALL_ROI_LOSS_LIMIT = 3          # consecutive missed frames before the ROI seed is dropped
 
 # Sparse-sampling tracker parameters (track_object_sparse)
 SPARSE_FIRST_DETECT_STRIDE = 50  # phase-1 scan: full-chamber Hough is slow
@@ -93,7 +93,7 @@ def chamber_cm_per_px(chamber_radius_px: int = CHAMBER_RADIUS) -> float:
 
 @dataclass
 class TrackingResult:
-    """Result of track_object. Iterable for backward-compatible tuple unpacking."""
+    """Result of track_object_per_frame. Iterable for backward-compatible tuple unpacking."""
     positions: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=int))
     frame_numbers: np.ndarray = field(default_factory=lambda: np.empty((0,), dtype=int))
     min_ydiff_frame: Optional[int] = None
@@ -129,8 +129,9 @@ def extract_calibration(cine_path):
     """Track a cine file and deduce cm/px from the parabolic y(t) trajectory.
 
     Returns:
-        (cm_per_px_gravity, cm_per_px_chamber, x_cm) on success, or
-        (None, None, None) on failure.
+        (cm_per_px_gravity, cm_per_px_chamber, x_cm) on success,
+        (None, None, None) if reading/tracking failed, or (nan, nan, nan) if the
+        fitted parabola is not falling (c_px >= 0).
     """
     cine_name = os.path.basename(cine_path)
 
@@ -432,8 +433,8 @@ def track_object_per_frame(avi_path: str, cx: Optional[int] = None, cy: Optional
             results with n_workers=1 once for any new codec to confirm.
 
     Returns:
-        TrackingResult — iterable, so existing `pos, fn, mf = track_object(...)`
-        callers still work.
+        TrackingResult — iterable, so `pos, fn, mf = track_object_per_frame(...)`
+        unpacking works.
     """
     if not os.path.exists(avi_path):
         raise FileNotFoundError(f"Video file not found: {avi_path}")
@@ -584,7 +585,9 @@ def track_object_sparse(
     Phase 2 walks forward one frame at a time (using the previous detection
     as the ROI seed for cheap detection), keeping samples that are at least
     ``SPARSE_MIN_SEPARATION_CM`` away from every existing sample, until
-    ``SPARSE_TARGET_POINTS`` are collected or the ball leaves the chamber.
+    ``SPARSE_TARGET_POINTS`` are collected, the video ends, or
+    ``SPARSE_SWEEP_MAX_FRAMES`` frames have been scanned (missed detections
+    do not stop the sweep). Fewer than 2 samples -> NaN fit.
 
     ``avi_path`` is used only for frame-by-frame object detection.
     All timing (fps, t_start) is read from ``cine_path`` via read_cine_header.
@@ -708,11 +711,13 @@ def get_ball_position_at_time(
 
     Fits straight lines to the x(t) and y(t) data observed in the cine frames
     (converted to cm via cm_per_px), then evaluates those lines at any arbitrary
-    time — including before or after the recording window.
+    time — including before or after the recording window. The ball is in free
+    fall, so y(t) is a parabola: the straight line's error grows quadratically
+    with distance from the tracked window.
 
     Args:
         t_ms: Query time in milliseconds (same reference as tarr * 1000).
-        result: TrackingResult from track_object.
+        result: TrackingResult from track_object_per_frame.
         tarr: Time array in seconds from read_cine.
         cm_per_px: Calibration factor in cm/px — use cm_per_px_mean from the
             .npy file saved by average_calibration.

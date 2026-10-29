@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Phantom ``.cine`` high-speed-camera reader (was object_tracking/read_cine.py).
-
-Moved here in Step 2 of the reorg (wrap, don't rewrite): a file reader belongs
-under ``data_analysis.io``, grouped by data shape. The body is unchanged; only
-callers' import path changed, to ``from data_analysis.io.cine import ...``.
-"""
+"""Phantom ``.cine`` high-speed-camera reader (was object_tracking/read_cine.py)."""
 
 import cv2
 import matplotlib.pyplot as plt

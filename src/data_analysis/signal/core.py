@@ -147,7 +147,7 @@ def hl_envelopes_idx(s, dmin=1, dmax=1, split=False):
     dmin, dmax: int, optional, size of chunks, use this if the size of the input signal is too big
     split: bool, optional, if True, split the signal in half along its mean, might help to generate the envelope in some cases
     Output :
-    lmin,lmax : high/low envelope idx of input signal s
+    lmin,lmax : low/high envelope idx of input signal s
     """
 
     # locals min
@@ -304,9 +304,8 @@ def calculate_stft(time_array, data_arr, freq_bins=100, overlap_fraction=0.1, wi
 
     Returns:
         freq: Frequency array
-        stft_matrix: STFT magnitude matrix
-        stft_time: Time array corresponding to each FFT segment
-        freq_resolution: Frequency resolution of the STFT
+        stft_matrix: STFT magnitude matrix, shape (n_segments, n_freq)
+        stft_time: Time array corresponding to each FFT segment (segment midpoints)
     """
     # Calculate basic parameters
     dt = time_array[1] - time_array[0]  # Time step
@@ -465,7 +464,7 @@ def line_integral(profile, x):
     if profile is None:
         return np.nan
     # abs: trapezoid is signed, and a descending x (motion list with delta<0,
-    # via the linspace in bapsflib_daq.positions) would negate the integral.
+    # via the linspace in bapsflib_daq.read_probe_motion_6k) would negate the integral.
     return abs(trapezoid(profile, x))
 
 
