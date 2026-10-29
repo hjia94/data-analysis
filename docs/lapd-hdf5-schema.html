@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LAPD HDF5 Schema</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2937;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --panel: #f9fafb;
+    --code-bg: #f3f4f6;
+    --accent: #7c3aed;
+    --link: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111827;
+      --fg: #e5e7eb;
+      --muted: #9ca3af;
+      --line: #374151;
+      --panel: #1f2937;
+      --code-bg: #1f2937;
+      --accent: #a78bfa;
+      --link: #93c5fd;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111827;
+    --fg: #e5e7eb;
+    --muted: #9ca3af;
+    --line: #374151;
+    --panel: #1f2937;
+    --code-bg: #1f2937;
+    --accent: #a78bfa;
+    --link: #93c5fd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1800px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.7rem; margin: 0 0 4px; }
+  h2 { font-size: 1.3rem; margin: 40px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 24px 0 6px; }
+  p, li { max-width: 110ch; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  code {
+    font: 0.88em/1.4 ui-monospace, "Cascadia Code", Consolas, monospace;
+    background: var(--code-bg);
+    padding: 1px 4px;
+    border-radius: 4px;
+    overflow-wrap: anywhere;
+  }
+  .key {
+    display: flex; flex-wrap: wrap; gap: 6px 22px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 14px; margin: 12px 0 16px; font-size: 0.92rem;
+  }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 1000px) { .charts { grid-template-columns: 1fr; } }
+  .chart {
+    border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    background: var(--panel); min-width: 0;
+  }
+  .chart h3 { margin: 0 0 8px; }
+  .chart svg { width: 100%; height: auto; }
+  .chart .err { color: #dc2626; white-space: pre-wrap; font-size: 0.85rem; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 0.92rem; }
+  th, td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); }
+  td:first-child { white-space: nowrap; }
+  .table-wrap { overflow-x: auto; }
+  ul { padding-left: 22px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>LAPD HDF5 data schema</h1>
+<p class="sub">How a Large Plasma Device (LAPD, UCLA BaPSF) data-run file is organised: what data it holds, where, and which metadata is designed to be there.</p>
+
+<h2>Background</h2>
+<p>Each <b>data run</b> is saved as one HDF5 file. A run is a sequence of <b>shots</b>, where each shot is one plasma discharge. On every shot, the digitizers record a waveform from each wired channel. Between shots, a motorised <b>probe drive</b> can move a probe, so each shot also has a recorded probe position. A run can scan a line or a plane, taking several shots at each position.</p>
+<p>Two acquisition systems write these files, so there are two layouts:</p>
+<ul>
+  <li><b>Layout 1 – bapsflib:</b> written by the BaPSF LabVIEW DAQ and its C translator. The digitizer is an SIS 3302 crate. The file also holds the machine-state record (MSI). It is named after <code>bapsflib</code>, the BaPSF Python library that reads it. The example is the Mar-2026 run <code>01-mach-p29-xline-bias.hdf5</code>.</li>
+  <li><b>Layout 2 – pydaq:</b> written by the Python <code>LAPD_DAQ</code> repo. The digitizers are LeCroy oscilloscopes. The example is the Jun-2026 run <code>00-He-800G-bias40V-LP-p29-line_2026-06-10.hdf5</code>.</li>
+</ul>
+<p>Every name, shape and attribute below was read from those two files. Shapes use these symbols:</p>
+<ul>
+  <li><code>nshot</code>: shots in the run</li>
+  <li><code>nt</code>: samples per trace</li>
+  <li><code>nmsi</code>: rows in the machine-state record, which need not equal <code>nshot</code></li>
+</ul>
+
+<h2>Structure</h2>
+<div class="key">
+  <span><b>( rounded )</b> the file</span>
+  <span><b>[ rectangle ]</b> group</span>
+  <span><b>cylinder</b> dataset</span>
+  <span><code>@name</code> attribute (metadata)</span>
+  <span><code>{braces}</code> name changes per run</span>
+  <span><b style="color:var(--accent)">purple</b> the recorded waveforms</span>
+  <span><b>dotted arrow</b> datasets linked by shot number</span>
+</div>
+
+<div class="charts">
+  <div class="chart">
+    <h3>Layout 1: bapsflib (LabVIEW DAQ)</h3>
+    <script type="text/plain" class="mmd">
+flowchart TB
+    accTitle: bapsflib LAPD HDF5 layout
+    accDescr: LabVIEW DAQ schema. MSI holds machine state; Raw data + config holds SIS-crate waveforms with their per-shot headers and wiring config, and bmotion probe positions linked by Shot number.
+
+    file(["💾 run.hdf5<br/>@LaPD HDF5 software version"])
+    msi["MSI/<br/>machine state · @MSI version"]
+    raw["Raw data + config/<br/>@Description · @Data run · @Investigator"]
+    bfield[("Magnetic field/<br/>profile (nmsi, 1024) f32<br/>@Profile z locations")]
+    discharge[("Discharge/<br/>current, voltage (nmsi, 4096)<br/>@Start time · @Timestep")]
+    msi_other[("Interferometer array/<br/>Gas pressure/ · Heater/")]
+    seq[("Data run sequence/<br/>DAQ step log")]
+    sis["SIS crate/<br/>{cfg}/ e.g. cf1-sis-4ch-mach"]
+    bm["bmotion/<br/>(older runs: 6K Compumotor/)"]
+    wave[("{cfg} [Slot S: SIS 3302 ch C]<br/>(nshot, nt) uint16<br/>row i = i-th shot")]
+    hdr[("{cfg} [Slot S: …] headers<br/>(nshot,) Shot number · Offset")]
+    cfg["{cfg}/SIS crate 3302 configurations[k]<br/>@Data type C · @Enabled C<br/>k ≠ board"]
+    bpos[("bmotion_positions<br/>Shot number · motion_group_name<br/>a0…a5 in cm")]
+    baxes[("bmotion_axis_names<br/>a0='X' · a1='Y' · unused=-9999")]
+
+    file --> msi
+    file --> raw
+    msi --> bfield
+    msi --> discharge
+    msi --> msi_other
+    raw --> seq
+    raw --> sis
+    raw --> bm
+    sis --> wave
+    sis --> hdr
+    sis --> cfg
+    bm --> bpos
+    bm --> baxes
+    wave -.->|"per-shot header"| hdr
+    hdr -.->|"Shot number"| bpos
+
+    classDef data fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+    classDef signal fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
+    class bfield,discharge,msi_other,seq,hdr,bpos,baxes data
+    class wave signal
+    </script>
+  </div>
+  <div class="chart">
+    <h3>Layout 2: pydaq (Python DAQ)</h3>
+    <script type="text/plain" class="mmd">
+flowchart TB
+    accTitle: pydaq LAPD HDF5 layout
+    accDescr: Python DAQ schema. Each scope group holds a shared time array and one shot_N group of int16 traces with headers; Control/Positions maps shot_num to probe x, y; diagnostics holds interferometer traces merged after the run.
+
+    file(["💾 run.hdf5<br/>@description · @creation_time · @source_code"])
+    conf[("Configuration/<br/>experiment_config: INI, [channels] wiring<br/>bmotion_config · bmotion_selection")]
+    ctrl["Control/Positions/<br/>{group}/ one per probe drive"]
+    scope["{scope}/ e.g. lpscope<br/>@Cn_description · @shot_count"]
+    diag["diagnostics/interferometer/<br/>merged after the run"]
+    actual[("positions_array<br/>(nrow,) shot_num · x · y (cm)<br/>shot_num=0 is padding")]
+    setup[("positions_setup_array<br/>planned grid · @xpos · @ypos")]
+    tarr[("time_array<br/>(nt,) float64 s<br/>trigger-relative")]
+    shot["shot_N/  N = 1, 2, …<br/>@acquisition_time<br/>@skipped if empty"]
+    phase[("phase_pNN/{shot}<br/>(nti,) float64 rad<br/>@calibration factor (m^-3/rad)")]
+    itarr[("time_array/{shot}<br/>(nti,) float64 ms")]
+    cdata[("Cn_data<br/>(nt,) int16")]
+    chdr[("Cn_header<br/>346-byte WAVEDESC")]
+
+    file --> conf
+    file --> ctrl
+    file --> scope
+    file --> diag
+    ctrl --> actual
+    ctrl --> setup
+    scope --> tarr
+    scope --> shot
+    diag --> phase
+    diag --> itarr
+    shot --> cdata
+    shot --> chdr
+    cdata -.->|"per-shot header"| chdr
+    shot -.->|"N = shot_num"| actual
+
+    classDef data fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+    classDef signal fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
+    class conf,actual,setup,tarr,phase,itarr,chdr data
+    class cdata signal
+    </script>
+  </div>
+</div>
+
+<h2>At a glance</h2>
+<div class="table-wrap">
+<table>
+  <tr><th></th><th>Layout 1: bapsflib</th><th>Layout 2: pydaq</th></tr>
+  <tr><td>How to recognise it</td><td>top-level group <code>Raw data + config/</code></td><td>top-level scope groups that contain <code>shot_*</code> groups, and/or <code>Control/Positions/</code></td></tr>
+  <tr><td>Digitizer</td><td>SIS 3302 crate (16-bit): boards × 8 channels</td><td>LeCroy oscilloscopes, one group per scope, channels <code>C1</code>…<code>C8</code></td></tr>
+  <tr><td>A channel is identified by</td><td>board + channel. The dataset name gives the crate slot (see the slot table below)</td><td>scope group + channel name, e.g. <code>lpscope</code> / <code>C2</code></td></tr>
+  <tr><td>Shots are stored as</td><td>one 2-D dataset per channel, one row per shot</td><td>one group per shot (<code>shot_N</code>), one 1-D dataset per channel inside it</td></tr>
+  <tr><td>Raw sample type</td><td><code>uint16</code></td><td><code>int16</code></td></tr>
+  <tr><td>Time axis</td><td>not stored. It follows from the board's <code>Clock rate</code> and <code>Sample averaging</code> attributes, and starts at the first sample</td><td>stored once per scope as <code>time_array</code>, in seconds, relative to the trigger</td></tr>
+  <tr><td>Channel wiring (what is connected)</td><td><code>Data type C</code> attributes on the board configuration</td><td><code>Cn_description</code> attributes on the scope group, and <code>[channels]</code> in <code>Configuration/experiment_config</code></td></tr>
+  <tr><td>Probe positions</td><td><code>Raw data + config/bmotion/</code>, cm</td><td><code>Control/Positions/{group}/</code>, cm</td></tr>
+  <tr><td>Operator's run notes</td><td><code>Description</code> attribute on <code>Raw data + config/</code></td><td><code>description</code> attribute on the file root</td></tr>
+  <tr><td>Machine state (B field, discharge, gas, heater)</td><td><code>MSI/</code></td><td>not recorded</td></tr>
+  <tr><td>Interferometer</td><td><code>MSI/Interferometer array/</code></td><td><code>diagnostics/interferometer/</code>, merged into the file after the run (optional)</td></tr>
+</table>
+</div>
+
+<h2>Layout 1: bapsflib — full reference</h2>
+
+<h3>File root and machine state (<code>MSI/</code>)</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Path</th><th>Kind · shape · type</th><th>Holds</th><th>Metadata (attributes / fields)</th></tr>
+  <tr><td><code>/</code></td><td>file root</td><td>—</td><td><code>@LaPD HDF5 software version</code></td></tr>
+  <tr><td><code>MSI/</code></td><td>group</td><td>Machine-state record of the LAPD device itself</td><td><code>@MSI version</code>, <code>@LaPD lab units</code></td></tr>
+  <tr><td><code>MSI/Discharge/</code></td><td>group</td><td>Discharge (plasma source) traces</td><td><code>@Start time</code>, <code>@Timestep</code> (s, time axis of the traces), <code>@Calibration tag</code>, <code>@Current conversion factor</code>, <code>@Voltage conversion factor</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>Discharge current</code>, <code>Cathode-anode voltage</code></td><td>dataset · (nmsi, 4096) · float32</td><td>Discharge current and voltage waveforms</td><td>—</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>Discharge summary</code></td><td>dataset · (nmsi,) · compound</td><td>One summary row per recorded shot</td><td>fields <code>Shot number</code>, <code>Timestamp</code>, <code>Data valid</code>, <code>Pulse length</code>, <code>Peak current</code>, <code>Bank voltage</code></td></tr>
+  <tr><td><code>MSI/Magnetic field/</code></td><td>group</td><td>Axial magnetic field and magnet currents</td><td><code>@Profile z locations</code> (1024 z positions), <code>@Calibration tag</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>Magnetic field profile</code></td><td>dataset · (nmsi, 1024) · float32</td><td>B along the machine axis at the 1024 z locations</td><td>—</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>Magnet power supply currents</code></td><td>dataset · (nmsi, 13) · float32</td><td>Current in each of the 13 magnet supplies</td><td>—</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>Magnetic field summary</code></td><td>dataset · (nmsi,) · compound</td><td>Per-shot summary</td><td>fields <code>Shot number</code>, <code>Timestamp</code>, <code>Data valid</code>, <code>Peak magnetic field</code></td></tr>
+  <tr><td><code>MSI/Interferometer array/</code></td><td>group</td><td>Facility interferometers (line-integrated density)</td><td><code>@Interferometer count</code>, and per-interferometer arrays <code>@Start times</code>, <code>@Timesteps</code>, <code>@n_bar_L</code>, <code>@z locations</code>, <code>@Calibration tag</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>I/Interferometer trace</code></td><td>dataset · (nmsi, 4096) · float32</td><td>Interferometer waveform</td><td>—</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>I/Interferometer summary list</code></td><td>dataset · (nmsi,) · compound</td><td>Per-shot summary</td><td>fields <code>Shot number</code>, <code>Timestamp</code>, <code>Data valid</code>, <code>Peak density</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>Interferometer [i]/</code></td><td>group (attributes only)</td><td>Settings of interferometer <i>i</i></td><td><code>@Start time</code>, <code>@Timestep</code>, <code>@n_bar_L</code>, <code>@z location</code></td></tr>
+  <tr><td><code>MSI/Gas pressure/</code></td><td>group</td><td>Fill pressure and residual-gas analyser (RGA)</td><td><code>@RGA AMUs</code> (50 masses), <code>@Ion gauge calibration tag</code>, <code>@RGA calibration tag</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>RGA partial pressures</code></td><td>dataset · (nmsi, 50) · float32</td><td>Partial pressure at each mass in <code>@RGA AMUs</code></td><td>—</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>Gas pressure summary</code></td><td>dataset · (nmsi,) · compound</td><td>Per-shot summary</td><td>fields <code>Shot number</code>, <code>Timestamp</code>, <code>Ion gauge data valid</code>, <code>RGA data valid</code>, <code>Fill pressure</code>, <code>Peak AMU</code></td></tr>
+  <tr><td><code>MSI/Heater/</code></td><td>group</td><td>Cathode heater</td><td><code>@Calibration tag</code>; dataset <code>Heater summary</code> with fields <code>Shot number</code>, <code>Timestamp</code>, <code>Data valid</code>, <code>Heater current</code>, <code>Heater voltage</code>, <code>Heater temperature</code></td></tr>
+</table>
+</div>
+
+<h3>Run information and digitizer data (<code>Raw data + config/</code>)</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Path</th><th>Kind · shape · type</th><th>Holds</th><th>Metadata (attributes / fields)</th></tr>
+  <tr><td><code>Raw data + config/</code></td><td>group</td><td>Everything recorded by the DAQ for this run</td><td><code>@Data run</code> (run name), <code>@Description</code> (operator's notes on the setup), <code>@Experiment name</code>, <code>@Experiment description</code>, <code>@Experiment set name</code>, <code>@Experiment set description</code>, <code>@Investigator</code>, <code>@Status</code>, <code>@Status date</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>Data run sequence/</code></td><td>group</td><td>The scripted sequence the DAQ executed</td><td><code>@Data run sequence</code> (sequence name), <code>@Meta-sequence definition</code>, <code>@Expanded meta-sequence</code>, <code>@Description</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>Data run sequence</code></td><td>dataset · (nsteps,) · compound</td><td>Log of every DAQ step and whether it completed</td><td>fields <code>Line</code>, <code>Shot number</code>, <code>Expanded line number</code>, <code>Line status</code>, <code>Time stamp</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>SIS crate/</code></td><td>group</td><td>The digitizer crate</td><td><code>@Device name</code>, <code>@Description</code>, <code>@Type</code>, <code>@Module IP address</code>, <code>@Module VI path</code>, <code>@Created date</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>{cfg}/</code><br>e.g. <code>cf1-sis-4ch-mach</code></td><td>group</td><td>The crate configuration used for this run</td><td><code>@SIS crate slot numbers</code>, <code>@SIS crate config indices</code> (paired element by element: slot ↔ <code>configurations[k]</code>), <code>@SIS crate board types</code>, <code>@SIS crate base addresses</code>, <code>@SIS crate max average shots</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<code>SIS crate 3302 configurations[k]</code></td><td>group (attributes only)</td><td>Settings of one board</td><td>Per channel C = 1…8: <code>@Data type C</code> (wiring label, e.g. <code>'Vx+, p29'</code>), <code>@Enabled C</code> (<code>'TRUE'</code>/<code>'FALSE'</code>), <code>@Comment C</code>, <code>@DC offset C</code>, <code>@Ch C</code>.<br>Per board: <code>@Samples</code>, <code>@Clock rate</code> (code), <code>@Sample averaging (hardware)</code> (code), <code>@Shot averaging (software)</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<code>SIS crate 3302 calibration[j]</code></td><td>group (attributes only)</td><td>Calibration constants of one channel</td><td><code>@Slot</code>, <code>@Channel</code>, <code>@m</code>, <code>@b</code>, <code>@Timestamp</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>{cfg} [Slot S: SIS 3302 ch C]</code></td><td>dataset · (nshot, nt) · uint16</td><td><b>The recorded waveforms</b> of one channel. Row <i>i</i> is the <i>i</i>-th recorded shot</td><td>—</td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>{cfg} [Slot S: SIS 3302 ch C] headers</code></td><td>dataset · (nshot,) · compound</td><td>One header row per waveform row</td><td>fields <code>Shot number</code>, <code>Scale</code>, <code>Offset</code>, <code>Min</code>, <code>Max</code>, <code>Clipped</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>bmotion/</code></td><td>group</td><td>Probe-drive motion record (older runs: <code>6K Compumotor/</code>)</td><td><code>@Device name</code>, <code>@Description</code>, <code>@Type</code>, <code>@Module IP address</code>, <code>@Module VI path</code>, <code>@Created date</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>bmotion_positions</code></td><td>dataset · (nshot,) · compound</td><td>Position each probe actually reached, per shot</td><td>fields <code>Shot number</code>, <code>motion_group_id</code>, <code>motion_group_name</code> (which probe), <code>motionlist_index</code> (which grid point), <code>a0</code>…<code>a5</code> (axis coordinates, cm)</td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>bmotion_target_positions</code></td><td>dataset · (nshot,) · compound</td><td>Position that was commanded, per shot</td><td>same fields as <code>bmotion_positions</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>bmotion_axis_names</code></td><td>dataset · (nshot,) · compound</td><td>Label for each axis column</td><td>same fields. <code>a0</code>…<code>a5</code> hold axis names, e.g. <code>'X'</code>, <code>'Y'</code>; unused axes are empty in this dataset and <code>-9999</code> in the position datasets</td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>Run time list</code></td><td>dataset · (nshot,) · compound</td><td>Which motion configuration ran on each shot</td><td>fields <code>Shot number</code>, <code>Configuration name</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>{motion group}/</code></td><td>group (attributes only)</td><td>Full configuration of one probe drive</td><td><code>@RUN_CONFIG</code> (TOML text: drive, axes, units, coordinate transform, motion list), <code>@BAPSF_MOTION_VERSION</code>, <code>@BAPSFDAQ_MOTION_LV_VERSION</code>, <code>@EXPANSION_ATTR</code></td></tr>
+</table>
+</div>
+
+<h3>Crate slot → board</h3>
+<table style="width:auto">
+  <tr><th>Slot</th><td>5</td><td>7</td><td>9</td><td>11</td><td>13</td><td>15</td></tr>
+  <tr><th>Board</th><td>SIS 3302 #1</td><td>SIS 3302 #2</td><td>SIS 3302 #3</td><td>SIS 3302 #4</td><td>SIS 3305 #1</td><td>SIS 3305 #2</td></tr>
+</table>
+
+<h3>Things to know</h3>
+<ul>
+  <li><b>The <code>k</code> in <code>configurations[k]</code> is not the board number.</b> Find each one's slot by pairing <code>@SIS crate config indices</code> with <code>@SIS crate slot numbers</code>, then look the slot up in the table above. In the example run, <code>configurations[1]</code> is slot 11, which is board 4.</li>
+  <li><b>Only channels with <code>@Enabled C = 'TRUE'</code> recorded data.</b> Disabled channels can still carry a <code>Data type</code> label left over from a previous setup.</li>
+  <li><b>Waveform rows are numbered from 0, but shot numbers start at 1.</b> The <code>Shot number</code> field in <code>headers</code> gives each row's shot number. That same number links the row to <code>bmotion_positions</code>.</li>
+  <li><b><code>MSI/</code> is not one row per digitizer shot.</b> The example run has 2 MSI rows against 405 digitizer shots. Match rows by <code>Shot number</code>, not by position.</li>
+</ul>
+
+<h2>Layout 2: pydaq — full reference</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Path</th><th>Kind · shape · type</th><th>Holds</th><th>Metadata (attributes / fields)</th></tr>
+  <tr><td><code>/</code></td><td>file root</td><td>—</td><td><code>@description</code> (operator's notes: purpose, operator, plasma / magnetic-field / bias / probe setup), <code>@creation_time</code>, <code>@source_code</code> (the acquisition scripts, verbatim)</td></tr>
+  <tr><td><code>Configuration/</code></td><td>group</td><td>The acquisition configuration files, stored verbatim as text</td><td>—</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>experiment_config</code></td><td>dataset · scalar · bytes</td><td>INI text: run name, shots per position, which scopes, and a <code>[channels]</code> section with the wiring of each channel (e.g. <code>LPScope_C2 = V, LP@P29-L</code>)</td><td>—</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>bmotion_config</code></td><td>dataset · scalar · bytes</td><td>TOML text: probe drives, axes, motion lists</td><td>—</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>bmotion_selection</code></td><td>dataset · scalar · bytes</td><td>JSON: which motion groups ran, in which direction and order</td><td>—</td></tr>
+  <tr><td><code>Control/Positions/{group}/</code></td><td>group, one per probe drive</td><td>Probe positions for one probe</td><td><code>@name</code>, <code>@key</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>positions_array</code></td><td>dataset · (nrow,) · compound</td><td>Position actually reached, per shot</td><td>fields <code>shot_num</code> (uint32), <code>x</code>, <code>y</code> (float32, cm)</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>positions_setup_array</code></td><td>dataset · (npos,) · compound</td><td>Planned scan grid</td><td>same fields; <code>@xpos</code>, <code>@ypos</code> (the unique x and y grid values)</td></tr>
+  <tr><td><code>{scope}/</code><br>e.g. <code>lpscope</code></td><td>group, one per oscilloscope</td><td>All data from one scope</td><td><code>@Cn_description</code> (wiring of channel Cn, one attribute per recorded channel), <code>@description</code> (scope model), <code>@scope_type</code> (identity string), <code>@ip_address</code>, <code>@shot_count</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>time_array</code></td><td>dataset · (nt,) · float64</td><td>Time of every sample, shared by all channels on this scope; seconds relative to the trigger</td><td><code>@units</code> (<code>'seconds'</code>), <code>@description</code>, <code>@dtype</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>shot_N/</code></td><td>group, one per shot (N = 1, 2, …)</td><td>Everything this scope recorded on shot N</td><td><code>@acquisition_time</code>. A skipped shot has <code>@skipped = True</code>, <code>@skip_reason</code>, sometimes <code>@failed = True</code>, and no datasets</td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>Cn_data</code></td><td>dataset · (nt,) · int16</td><td><b>The recorded waveform</b> of channel Cn on shot N. Shape is (n_segments, nt) if the scope used segmented (sequence) acquisition</td><td><code>@description</code>, <code>@dtype</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>Cn_header</code></td><td>dataset · scalar · 346-byte opaque</td><td>The scope's own LeCroy WAVEDESC header for that trace: vertical gain/offset, sample interval, trigger offset, and other settings</td><td><code>@description</code></td></tr>
+  <tr><td><code>diagnostics/interferometer/</code></td><td>group (optional)</td><td>Interferometer phase traces, added to the file after the run</td><td><code>@description</code>, <code>@reference scope</code>, <code>@merged shot numbers</code>, <code>@merged interferometer timestamps (s since epoch)</code>, <code>@run window (s since epoch)</code>, <code>@timestamp source</code>, <code>@window pad applied (s)</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>phase_pNN/</code></td><td>group, one per interferometer (NN = port)</td><td>Phase traces of the interferometer at port NN</td><td><code>@description</code>, <code>@unit</code> (<code>'rad'</code>), <code>@calibration factor (m^-3/rad)</code> (assumes a 40 cm plasma length), <code>@Microwave frequency (Hz)</code></td></tr>
+  <tr><td>&nbsp;&nbsp;&nbsp;&nbsp;<code>{shot}</code></td><td>dataset · (nti,) · float64</td><td>Phase trace, named by the shot number it was matched to</td><td><code>@interferometer timestamp (s since epoch)</code>, <code>@interferometer time (local)</code>, <code>@time difference from shot trigger (s)</code>. On <code>phase_p40</code>, a missing trace is empty and carries <code>@rigol_missing</code>, <code>@rigol_missing_reason</code></td></tr>
+  <tr><td>&nbsp;&nbsp;<code>time_array/{shot}</code></td><td>dataset · (nti,) · float64</td><td>Time axis for the phase traces, in ms</td><td>group: <code>@unit</code> (<code>'ms'</code>), <code>@description</code>. Datasets carry the same timestamp attributes as above</td></tr>
+  <tr><td>&nbsp;&nbsp;<code>time_array_p40/{shot}</code></td><td>dataset · (nti,) · float64</td><td>Separate time axis for <code>phase_p40</code>, which is recorded on a different scope</td><td>same as <code>time_array</code></td></tr>
+</table>
+</div>
+
+<h3>Things to know</h3>
+<ul>
+  <li><b>Scope group names are lowercase in the file</b> (<code>lpscope</code>) but mixed-case in <code>experiment_config</code> (<code>LPScope_C2</code>).</li>
+  <li><b><code>[channels]</code> can list channels that were never saved.</b> In the example run, <code>LPScope_C1</code> is configured but <code>lpscope/shot_*/</code> has no <code>C1_data</code>. The file's own <code>Cn_description</code> attributes and datasets show what was actually recorded.</li>
+  <li><b><code>shot_N</code> groups sort as text</b> (<code>shot_1</code>, <code>shot_10</code>, <code>shot_100</code>, …), not as numbers. Sort them by N.</li>
+  <li><b>In multi-probe runs, each probe's <code>positions_array</code> spans the whole run.</b> Rows for shots belonging to the other probe have <code>shot_num = 0</code>; treat those as padding. Otherwise, <code>shot_num</code> = N links a position row to <code>shot_N/</code>.</li>
+  <li><b>The interferometer holds only two traces per channel:</b> the ones nearest the run's first and last shots, recorded in <code>@merged shot numbers</code>. They describe the run as a whole, not each shot.</li>
+  <li><b>Waveform datasets are compressed</b> with lzf (built into h5py) or Blosc2. Reading Blosc2 needs the <code>hdf5plugin</code> package.</li>
+</ul>
+
+</main>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: false, theme: dark ? "dark" : "neutral", flowchart: { useMaxWidth: true } });
+  // Source kept in <script type="text/plain"> so the browser does not parse the <br/> in labels as HTML.
+  const blocks = document.querySelectorAll("script.mmd");
+  for (const [i, block] of blocks.entries()) {
+    const host = document.createElement("div");
+    block.after(host);
+    try {
+      const { svg } = await mermaid.render(`chart${i}`, block.textContent.trim());
+      host.innerHTML = svg;
+    } catch (e) {
+      host.className = "err";
+      host.textContent = "Chart failed to render (needs an internet connection to load Mermaid): " + e;
+    }
+  }
+</script>
+</body>
+</html>
