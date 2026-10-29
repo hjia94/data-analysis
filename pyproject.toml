@@ -13,6 +13,8 @@ dependencies = [
     "matplotlib",
     "h5py",
     "tqdm",
+    # data_analysis.io.network_analyzer (VNA CSV reader) imports it at module load.
+    "pandas",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +32,13 @@ gui = ["screeninfo"]
 # no cv2 GUI calls (imshow/waitKey) are made. Install the `tracking` extra to use
 # those modules: `pip install ".[tracking]"`.
 tracking = ["opencv-python-headless"]
+# LabVIEW-DAQ (bapsflib-layout) LAPD files: data_analysis.io._backends.bapsflib_daq
+# imports bapsflib, loaded lazily by open_lapd only for those files. For local
+# co-development, prefer an editable sibling install: `pip install -e ../bapsflib`.
+bapsflib = ["bapsflib"]
+# Collective Thomson scattering (data_analysis.plasma.cts) imports plasmapy and
+# astropy at module load.
+cts = ["plasmapy", "astropy"]
 
 [tool.setuptools.dynamic]
 version = { attr = "data_analysis.__version__" }
