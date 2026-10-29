@@ -242,30 +242,19 @@ def print_scope_channels(hdf5_filename, scope_name):
 					print(f"  {channel}: No description available")
 
 def read_positions(hdf5_filename, motion_group_name=None, interactive=False):
-	"""
-	Read Control/Positions data from HDF5 file written by acquisition_bmotion.py
+	"""Read ``Control/Positions/<group>`` -> ``(setup, pos_array, npos, nshot)``.
 
-	Parameters:
-	-----------
-	hdf5_filename : str
-		Path to the HDF5 file
-	motion_group_name : str, optional
-		Name of the motion group to read. If None and the file has exactly one
-		group, that one is used; with several, the caller must name one (or pass
-		interactive=True). Defaulting to the first would silently pair one
-		probe's coordinates with another probe's signals.
-	interactive : bool, optional
-		Prompt to choose when the file has several motion groups. Default False
-		so batch/headless callers raise instead of blocking on input().
+	``setup`` is the planned grid: ``motion_list`` where an older file carries it,
+	else ``positions_setup_array`` (all current LAPD_DAQ files), ``pos_array`` the per-shot recorded
+	``(shot_num, x, y)`` rows with ``shot_num == 0`` padding dropped (multi-probe
+	runs pad each group's array over the other group's shots), ``npos =
+	len(setup)``, and ``nshot`` the shots per position, counted from the leading
+	run of identical (x, y). Returns None (after printing why) if a group or
+	dataset is missing.
 
-	Returns:
-	--------
-	pos_array : ndarray
-		Full position array (structured array with fields shot_num, x, y)
-	npos : int
-		Number of unique positions
-	nshot : int
-		Number of shots per position
+	With several motion groups and no ``motion_group_name``, raises unless
+	``interactive=True`` (which prompts): defaulting to the first would silently
+	pair one probe's coordinates with another probe's signals.
 	"""
 	with h5py.File(hdf5_filename, 'r') as f:
 		if 'Control/Positions' not in f:
@@ -307,18 +296,23 @@ def read_positions(hdf5_filename, motion_group_name=None, interactive=False):
 			return None
 
 		pos_array = mg_group['positions_array'][:]
+		pos_array = pos_array[pos_array['shot_num'] != 0]
+		if pos_array.size == 0:
+			print(f"positions_array in {motion_group_name} has no live rows (all shot_num == 0).")
+			return None
 
 		print(f"Position array shape: {pos_array.shape}")
 		print(f"Position array dtype: {pos_array.dtype}")
 		print(f"Structured array fields: {pos_array.dtype.names}")
 
-		# Get motion_list which contains the planned unique positions
-		if 'motion_list' not in mg_group:
-			print(f"motion_list not found in {motion_group_name}.")
+		# motion_list first: files that carry it (older LAPD_DAQ) keep returning it unchanged.
+		setup_name = next((n for n in ('motion_list', 'positions_setup_array') if n in mg_group), None)
+		if setup_name is None:
+			print(f"Neither positions_setup_array nor motion_list found in {motion_group_name}.")
 			return None
 
-		motion_list = mg_group['motion_list'][:]
-		npos = len(motion_list)
+		setup = mg_group[setup_name][:]
+		npos = len(setup)
 
 		# Find number of shots per position by counting consecutive identical (x, y) pairs
 		# from the start of positions_array. All shots at the same position are contiguous.
@@ -338,8 +332,7 @@ def read_positions(hdf5_filename, motion_group_name=None, interactive=False):
 		print(f"Shots per position: {nshot}")
 		print(f"Number of unique positions: {npos}")
 
-
-		return motion_list, pos_array, npos, nshot
+		return setup, pos_array, npos, nshot
 
 
 #===============================================================================================================================================

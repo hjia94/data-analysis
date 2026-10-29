@@ -554,7 +554,7 @@ class LapdRun:
           ``read_probe_motion_6k(f)`` if no bmotion group) ->
           ``(pos_array, xpos, ypos, zpos, npos, nshot)``
         - pydaq: ``read_positions(path, motion_group_name=...)`` ->
-          ``(motion_list, pos_array, npos, nshot)``
+          ``(setup, pos_array, npos, nshot)``, ``setup`` the planned grid
         - legacy: ``read_position_data(path)`` -> ``(pos_array, xpos, ypos, zpos)``
         """
         if self._backend == "bapsflib":

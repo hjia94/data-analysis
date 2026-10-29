@@ -417,17 +417,15 @@ def total_propagation(NT, freqs, signal_fft, n_e, L_arr, debug=False):
         
     Returns:
     --------
-    tuple
-        - freqs: ndarray
-            Frequency array in Hz
-        - tot_wave: ndarray
-            Total propagated wave, summed over all distances with 1/L² attenuation
+    tot_wave: ndarray
+        Total propagated time-domain wave: the L_arr[0] term unattenuated, every
+        later term weighted by 1/L**2
     """
-    tot_wave, _, _ = propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L_arr[0], debug=debug)
+    tot_wave, _ = propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L_arr[0], debug=debug)
 
     for L in L_arr[1:]:
 
-        signal_propagated, _, _ = propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=debug)
+        signal_propagated, _ = propagate_through_dispersive_medium(NT, freqs, signal_fft, n_e, L, debug=debug)
         tot_wave += signal_propagated / L**2
     
     return tot_wave

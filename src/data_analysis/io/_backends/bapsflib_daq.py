@@ -327,35 +327,37 @@ def read_probe_motion_bmotion(f):
             first['npos'], first['nshot'])
 
 def read_digitizer_config(f):
+	"""Enabled SIS 3302 channels of the active config -> ``('SIS 3302', {board: [chan, ...]})``.
 
-	grp = f['/Raw data + config/SIS crate']
-
-	for k in grp.keys():
-		if 'siscf' in k:
-			grp = grp[k]
-			print("SIS Crate activated:")
-			break
-		else:
-			print('SIS configuration not found?')
+	Prints every channel's enabled flag and wiring label. Boards are resolved via
+	``slot_info`` exactly as in ``channel_wiring``; ``configurations[k] + 1`` is
+	right only when every board is configured (Mar-2026 run 01's k=1 is board 4).
+	"""
+	sis = f.digitizers['SIS crate']
+	config_name = sis.active_configs[0]  # the same config read_data reads from
+	cfg = f[_SIS_CRATE_PATH][config_name]
+	print("SIS crate config:", config_name)
 
 	digi_dict = {}
 	adc = None
-	for k in grp.keys():
-		if 'configurations' in k:
-			if '3302' in k:
-				adc = 'SIS 3302'
-				board_num = int(k.split('configurations[')[1].split(']')[0]) + 1
-				print('3302 board', board_num)
-				digi_dict[board_num] = []
+	for slot, index in zip(cfg.attrs['SIS crate slot numbers'], cfg.attrs['SIS crate config indices']):
+		if int(slot) not in sis.slot_info:
+			continue  # the 3820 timing board: no signal channels
+		board_num, slot_adc = sis.slot_info[int(slot)]
+		if slot_adc != 'SIS 3302':
+			continue
+		adc = slot_adc
+		grp = cfg[f'SIS crate 3302 configurations[{index}]']
+		print('3302 board', board_num)
+		digi_dict[board_num] = []
 
-				for i in range(1,9):
-					enabled = grp[k].attrs['Enabled '+ str(i)]
-					enabled = enabled.decode('utf-8')
-					if enabled == 'TRUE':
-						digi_dict[board_num].append(i)
+		for i in range(1,9):
+			enabled = _attr_text(grp.attrs['Enabled '+ str(i)])
+			if enabled == 'TRUE':
+				digi_dict[board_num].append(i)
 
-					ch_des = grp[k].attrs['Data type '+ str(i)]
-					print('Channel %i -- active: %s -- description: %s' % (i, enabled, ch_des.decode('utf-8')))
+			ch_des = _attr_text(grp.attrs['Data type '+ str(i)])
+			print('Channel %i -- active: %s -- description: %s' % (i, enabled, ch_des))
 
 	if adc is None:
 		raise NotImplementedError(

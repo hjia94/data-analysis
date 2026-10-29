@@ -522,16 +522,21 @@ def compute_thomson_formfactor(omgs, omgL, Te=0.005, Ti=0.001, ne=1e13, Z=np.arr
     
     This is maintained for backward compatibility with the original code.
     For new code, use the SheffieldThomson class instead.
+
+    ``Te``/``Ti`` are in keV (Sheffield's convention, unlike the class's eV),
+    ``ne`` in cm^-3; an array ``Ti`` uses only its first element.
     """
     # Create a calculator with the given parameters
     if isinstance(Ti, np.ndarray):
         Ti_val = Ti[0]
     else:
         Ti_val = Ti
-    
+
     # Convert from keV to eV for the calculator
     calc = SheffieldThomson(
-        probe_wavelength=300e9 * 299792458 * 1e9,  # Convert from Hz to nm
+        # Placeholder (300 GHz -> nm): the form factor uses the omgL passed in,
+        # not the calculator's own probe frequency.
+        probe_wavelength=299792458 / 300e9 * 1e9,
         T_e=Te * 1000,  # Convert from keV to eV
         T_i=Ti_val * 1000,  # Convert from keV to eV
         n_e=ne,

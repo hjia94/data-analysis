@@ -342,11 +342,13 @@ def read_hdf5_all_scopes_channels(f, shot_number, include_tarr=True):
 		  ...
 		}
 	"""
+	from .lapd_hdf5 import _has_shot_groups
+
 	result = {}
 
-	skip_groups = {'Configuration', 'Control'}
+	# Positive scope test, not a deny-list: merged files add `diagnostics/`.
 	for scope_name, scope_group in f.items():
-		if scope_name in skip_groups:
+		if not _has_shot_groups(scope_group):
 			continue
 		result[scope_name] = {}
 		shot_group_name = f'shot_{shot_number}'

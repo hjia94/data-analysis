@@ -295,7 +295,7 @@ def plot_photon_detection(tarr, data, pulse_times, detector, ax=None):
     ax.plot(pulse_times, pulse_heights, 'r.', label='Pulses')
 
     # Plot threshold level
-    ax.axhline(y=baseline_mean + detector.threshold, color='r',
+    ax.axhline(y=baseline_mean + detector.lower_threshold, color='r',
                linestyle='--', alpha=0.5, label='Threshold')
     
     ax.set_xlabel('Time (ms)')
@@ -384,12 +384,12 @@ def plot_subtracted_signal(tarr, data, pulse_times, detector, ax=None):
     """
     if ax is None:
         ax = plt.gca()
-    
+
     # Plot baseline-subtracted signal
     ax.plot(tarr, detector.baseline_subtracted, 'b-', alpha=0.3, label='Raw - Baseline')
-    
-    # Plot filtered signal
-    ax.plot(tarr, detector.filtered_signal, 'g-', alpha=0.7, label='Filtered Signal')
+
+    # Savitzky-Golay filtered signal, downsampled onto tarr's grid
+    ax.plot(tarr, detector.data_ds, 'g-', alpha=0.7, label='Filtered Signal')
     
     # Plot detected peaks
     if hasattr(detector, 'pulses'):
@@ -403,7 +403,7 @@ def plot_subtracted_signal(tarr, data, pulse_times, detector, ax=None):
                    'r-', alpha=0.3, linewidth=1)
     
     # Plot threshold level
-    ax.axhline(y=detector.threshold, color='r', linestyle='--', 
+    ax.axhline(y=detector.lower_threshold, color='r', linestyle='--',
                alpha=0.5, label='Threshold')
     ax.axhline(y=0, color='k', linestyle='-', alpha=0.2)
 

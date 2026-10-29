@@ -244,8 +244,7 @@ def _describe_motion_group(mg):
 def read_lp_positions(fn, motion_group_name=None, interactive=False):
     """Read line-scan probe positions from a LAPD_DAQ pydaq file.
 
-    The unified ``run.positions()`` needs a ``motion_list`` dataset these files
-    lack, so we read ``Control/Positions/<group>`` directly:
+    Reads ``Control/Positions/<group>`` directly:
 
     * ``positions_setup_array`` -- the planned unique (x, y) positions.
     * ``positions_array``       -- the (x, y) actually visited for every shot;
