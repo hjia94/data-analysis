@@ -174,10 +174,14 @@ Data structure for individual coil parameters.
 
 ## Examples
 
-`example.py` is runnable (`python compute_B/example.py`) and defines:
+`example.py` is runnable (`python compute_B/example.py`) and plots on-axis Bz for
+several supply-current configurations at once. Edit the `CONFIGS` list in its
+`__main__` block to try your own. It defines:
 
-1. **`uniform_field_to_currents(B0=0.1)`**: Configure a uniform field and extract the resulting supply currents
-2. **`plot_Bz_onAxis(supply_currents)`**: Use those currents to plot Bz along the machine axis
+1. **`uniform_field_currents(B0=0.1)`**: Supply currents for a uniform field
+2. **`currents_from_groups(yellow, purple, black)`**: Supply currents from one value per coil color
+3. **`compute_Bz_onAxis(supply_currents)`**: On-axis Bz for a given current set, as `(z, Bz_kG, port)`
+4. **`plot_Bz_onAxis(configs)`**: Overlay the Bz curves for a list of `(label, supply_currents)` pairs
 
 
 ## Physics Background
