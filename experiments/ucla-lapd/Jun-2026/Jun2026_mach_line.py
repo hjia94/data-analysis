@@ -225,9 +225,8 @@ def batch_line(ifn, iv_run, cal_path=CAL_NPZ, te_ev=TE_EV, out_path=None):
 
     timestamps = iv_sweep_timestamps(os.path.dirname(ifn), iv_run)
     edges, upper_idx = sweep_bin_edges(tarr, timestamps)
-    # reduceat rejects a start index == nt (a bin starting past the record). Trim
-    # trailing edges so the last bin-start is a real sample; the dropped bins were
-    # empty anyway (both timestamps beyond the record).
+    # Trim trailing edges whose bin starts past the end of the Mach record so
+    # trailing all-empty bins are dropped rather than padded onto the output.
     last = int(np.searchsorted(edges, tarr.size, side="left"))
     edges = edges[:max(last + 1, 2)]
     nbin = edges.size - 1

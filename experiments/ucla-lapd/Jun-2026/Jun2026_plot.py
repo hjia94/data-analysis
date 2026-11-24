@@ -546,8 +546,12 @@ def _load_xcorr_run(ifn, ch_a, ch_b, npz_path=None):
     key = jxc._pair_key(ch_a, ch_b)
     try:
         with np.load(npz_path) as d:
+            # Prefer per-pair coordinates (co-moving probes in a two-drive run
+            # can scan in opposite order); fall back to file-level for older npz.
+            pos_x = d[f"{key}__pos_x"] if f"{key}__pos_x" in d.files else d["pos_x"]
+            pos_y = d[f"{key}__pos_y"] if f"{key}__pos_y" in d.files else d["pos_y"]
             return (d["freq"], d[f"{key}__gamma2"], d[f"{key}__phase"],
-                    d["pos_x"], d["pos_y"])
+                    pos_x, pos_y)
     except (OSError, KeyError) as e:
         print(f"  (xcorr: no saved entry for pair '{key}' in {npz_path} -- {e})")
         return None

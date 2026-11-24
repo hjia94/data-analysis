@@ -181,23 +181,31 @@ def binned_face_ratio(plus, minus, edges):
     two describe the *same* pooled sample -- a separate re-slice would silently
     average over samples this mask excluded.
 
-    Vectorized with ``add.reduceat``, which is exact here (summation is
-    associative, so pooling the shot axis before the bin segments gives the same
-    sums). ``reduceat`` returns ``arr[i]`` instead of 0 for an empty segment;
-    :func:`time_bin_edges` rules that out by rejecting any bin below
-    ``min_samples``, so callers building edges by hand must do the same.
+    Uses cumulative sums padded with a leading zero so every bin ``k`` sums
+    strictly over ``[edges[k], edges[k + 1])``: zero-width bins
+    (``edges[k] == edges[k + 1]``, e.g. out-of-record sweep timestamps clamped
+    to ``0`` or ``nt``) yield ``counts = 0``, ``ratio = nan``, and
+    ``amplitude = nan``, and a final edge ``edges[-1] < nt`` never bleeds past
+    the last bin into the rest of the trace.
     """
-    edges = np.asarray(edges)
-    starts = edges[:-1]
+    edges = np.asarray(edges, dtype=np.intp)
     width = np.diff(edges)
     ok = valid_current_mask(plus, minus)
+
+    def _bin_sums(arr_1d):
+        cs = np.empty(arr_1d.size + 1, dtype=arr_1d.dtype)
+        cs[0] = 0
+        np.cumsum(arr_1d, out=cs[1:])
+        return cs[edges[1:]] - cs[edges[:-1]]
+
     with np.errstate(invalid="ignore", divide="ignore"):
         # sum/sum, not mean-of-ratios: n cancels, so no division per sample.
-        sp = np.add.reduceat(np.where(ok, plus, 0.0).sum(axis=0), starts)
-        sm = np.add.reduceat(np.where(ok, minus, 0.0).sum(axis=0), starts)
-        counts = np.add.reduceat(ok.sum(axis=0), starts).astype(np.int32)
+        sp = _bin_sums(np.where(ok, plus, 0.0).sum(axis=0))
+        sm = _bin_sums(np.where(ok, minus, 0.0).sum(axis=0))
+        counts = _bin_sums(ok.sum(axis=0)).astype(np.int32)
         ratio = np.where(counts > 0, sp / sm, np.nan)
-        amplitude = (sp + sm) / (width * plus.shape[0])
+        amplitude = np.where(width > 0, (sp + sm) / (width * plus.shape[0]),
+                             np.nan)
     return ratio, counts, amplitude
 
 
