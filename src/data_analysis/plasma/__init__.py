@@ -3,6 +3,8 @@
 ``formulas`` holds parameter calculations (densities, sound speed, collision
 frequencies); ``profiles`` holds radial profile pressure, signed gradients,
 floating potential, sheath factor, and local magnetized-plasma scales;
+``modes`` holds azimuthal/axial mode decomposition, B-dot dipole quadrature,
+and plasma-frame dispersion helpers;
 ``langmuir`` holds Langmuir-probe IV analysis; ``mach`` holds
 Mach-probe area-ratio calibration and flow estimators; ``flow`` holds
 diagnostic-agnostic in-plane flow-field geometry (polar resolution about a
