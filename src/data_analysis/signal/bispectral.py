@@ -103,10 +103,11 @@ def bicoherence_threshold(n_avg, p=0.05):
     ``1 - p**(1/(N - 1))`` (about ``-ln(p) / N`` for large ``N``; mean ``1/N``).
     It holds per ``(f1, f2)`` point: over a grid of ``M`` points about ``p*M``
     exceed it by chance. Overlapping segments are not independent, so with
-    ``noverlap > 0`` the chance rate is no longer ``p``: for ``p = 0.05`` and
-    50 % overlap, Gaussian noise exceeded it 3-5 % of the time with a Hann
-    window and 9 % with a boxcar, depending on the band. Use ``noverlap=0``
-    when the threshold matters.
+    ``noverlap > 0`` the chance rate is no longer exactly ``p``. For
+    ``p = 0.05`` and 50 % overlap, Gaussian noise (20 trials of 200 segments)
+    exceeded it 5.2 % of the time on average with a Hann window (3-7 % per
+    trial, the same spread as without overlap) and 9 % with a boxcar
+    (8-11 %). Use ``noverlap=0`` when the threshold matters.
     """
     n = int(n_avg)
     if n < 2:

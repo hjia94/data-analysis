@@ -98,7 +98,7 @@ _MODE = None
 def p30_job(args):
     """Bicoherence, surrogate and top triads of one P30 component for one mode."""
     m, c, ch, dt, kw, f_pump, seed = args
-    sel = _MODE != "off" if m == "all" else _MODE == m
+    sel = mode_select(_MODE, m)
     x = _D[ch][sel]
     r = bicoherence(x, dt, **kw)
     s = cross_bicoherence(x[shuffle_within(_MODE[sel], np.random.default_rng(seed))], x, x, dt, **kw)
@@ -114,11 +114,23 @@ def p30_job(args):
     return m, c, r, s.b2, coupled, top, line
 
 
+def mode_select(mode, m):
+    """Shots of antenna mode ``m``. For ``"all"``: every mode that is on and has
+    at least 2 shots, so that :func:`shuffle_within` can pair each shot with
+    another shot of its own mode."""
+    if m != "all":
+        return mode == m
+    names, counts = np.unique(mode, return_counts=True)
+    return np.isin(mode, names[(counts >= 2) & (names != "off")])
+
+
 def shuffle_within(groups, rng):
     """Permutation with no fixed point that only swaps shots within the same group."""
     q = np.arange(len(groups))
     for g in np.unique(groups):
         idx = np.flatnonzero(groups == g)
+        if idx.size < 2:
+            raise ValueError(f"group {str(g)!r} has 1 shot; it has no other shot to pair with")
         p = rng.permutation(idx.size)
         q[idx[p]] = idx[np.roll(p, 1)]                        # cyclic shift: nobody stays put
     return q
@@ -173,8 +185,11 @@ def main():
     _MODE = mode
     f_mode = {"A": round(fA / df) * df, "B": round(fB / df) * df}   # each mode's own pump line
     jobs = [(m, c, ch, dt, kw, f_mode.get(m, f_pump), 10 * k + c) for k, m in enumerate(MODES)
-            if (mode != "off" if m == "all" else mode == m).sum() >= 2
+            if mode_select(mode, m).sum() >= 2
             for c, ch in enumerate(CH_P30) if ch in D]
+    if not jobs:
+        raise SystemExit(f"run {args.run}: no P30 channel recorded, or no antenna mode with "
+                         f"2+ shots; nothing to analyse")
     with ProcessPoolExecutor(min(args.workers, len(jobs)), mp_context=multiprocessing.get_context("fork")) as ex:
         out = list(ex.map(p30_job, jobs))
     res = {(m, c): (r, sb2, coupled) for m, c, r, sb2, coupled, _, _ in out}
@@ -223,8 +238,13 @@ def main():
                 r = bicoherence(D[ch][sel], dt, **pkw)
                 scan[c, jy, ix] = np.nanmean(r.b2)
                 nrz[jy, ix] = r.n_avg
-    n_typ = int(np.median(nrz[nrz > 0]))
-    print(f"\nP28 per position: {what}; {n_typ} realizations/position, no-coupling level 1/N = {1/n_typ:.3f}")
+    if (nrz > 0).any():
+        n_typ = int(np.median(nrz[nrz > 0]))
+        print(f"\nP28 per position: {what}; {n_typ} realizations/position, "
+              f"no-coupling level 1/N = {1/n_typ:.3f}")
+    else:
+        n_typ = 0
+        print("\nP28 per position: skipped (P28 not recorded, or < 3 realizations at every position)")
     for c in range(3):
         if not np.isfinite(scan[c]).any():
             continue
