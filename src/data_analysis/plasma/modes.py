@@ -127,9 +127,12 @@ def axial_wavenumber(phase_diff_rad, dz_m, gamma2_a=None, gamma2_b=None, *,
 
     ``phase_diff_rad`` is the phase difference ``phi(z_a) - phi(z_b)`` [rad]
     across spatial points separated axially by ``dz_m = z_a - z_b`` [m].
-    Circular statistics handle ``+-pi`` wrapping cleanly and report the
-    resultant length ``R in [0, 1]`` (close to 1 means spatially uniform axial
-    phase shift).
+    The sign of ``k_par`` follows the caller's ``+z`` convention (reversing
+    ``dz_m`` flips ``k_par`` while leaving ``|k_par|`` and ``lambda_par``
+    unchanged). Note that axial wavenumbers with ``|k_par * dz_m| > pi``
+    alias into ``[-pi, pi]``. Circular statistics handle ``+-pi`` wrapping
+    cleanly and report the resultant length ``R in [0, 1]`` (close to 1 means
+    spatially uniform axial phase shift).
     """
     dz_m = float(dz_m)
     if dz_m == 0.0:
@@ -172,6 +175,12 @@ def bdot_cartesian_dipole_check(phase_bx_rad, phase_by_rad,
     rotating with azimuthal number ``m_B = 2 * m_J`` and constant phase lag:
     - ``m_J = +1`` (CCW): ``phi_phys(By) - phi_phys(Bx) = -90 deg``
     - ``m_J = -1`` (CW):  ``phi_phys(By) - phi_phys(Bx) = +90 deg``
+
+    **Coil-polarity caveat:** inverting one coil's winding sign flips
+    ``dphi_by_minus_bx_deg`` by 180 deg and reverses ``inferred_m_j``. By
+    contrast, the single-coil azimuthal fit (:func:`fit_azimuthal_mode` on
+    ``Bx`` or ``By`` alone) gives ``m_B = 2 * m_J`` independently of coil
+    sign; verify the two agree to confirm right-handed ``(Bx, By)`` polarity.
 
     Returns :class:`BdotDipoleResult` with ``inferred_m_j in {-1, 0, +1}``
     (``0`` if the circular mean is not within 35 deg of ``+-90 deg`` or

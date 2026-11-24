@@ -1,8 +1,18 @@
 """Unit tests for azimuthal/axial mode decomposition and plasma-frame dispersion."""
 
+import os
+import sys
+import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
+
+_JUN2026_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "experiments", "ucla-lapd", "Jun-2026")
+)
+if _JUN2026_DIR not in sys.path:
+    sys.path.insert(0, _JUN2026_DIR)
 
 from data_analysis.plasma.modes import (
     axial_wavenumber,
@@ -11,6 +21,8 @@ from data_analysis.plasma.modes import (
     plasma_frame_dispersion,
 )
 from data_analysis.signal import avg_cross_spectrum
+import Jun2026_modes as jmo
+import Jun2026_plot as jpl
 
 
 class TestModesAndDispersion(unittest.TestCase):
@@ -115,6 +127,41 @@ class TestModesAndDispersion(unittest.TestCase):
         self.assertAlmostEqual(disp["f_star_p_hz"], disp["f_star_n_hz"] + disp["f_star_T_hz"], places=6)
         self.assertGreater(disp["beta_e_over_me_mi"], 1.0)  # kinetic Alfven regime (beta_e > me/mi)
         self.assertGreater(disp["f_alfven_hz"], 1e4)
+
+    def test_blockmean_to_grid_suppresses_aliasing(self):
+        # 5 MHz source with a 4 kHz signal + huge 104 kHz tone (aliases to 4 kHz under
+        # unfiltered 100 kHz point-sampling, but integrates out over 50-sample block mean!)
+        dt_src = 2e-7  # 5 MHz
+        t_src = np.arange(15000) * dt_src  # 3.0 ms
+        t_grid = np.arange(0.0, 2.95e-3, 1e-5)  # 100 kHz
+        sig_4k = 1.0 * np.sin(2.0 * np.pi * 4000.0 * t_src)
+        hf_104k = 10.0 * np.sin(2.0 * np.pi * 104000.0 * t_src)
+        stack = (sig_4k + hf_104k)[None, :]
+
+        out_aa = jmo._blockmean_to_grid(t_src, stack, t_grid)[0]
+        out_raw = np.interp(t_grid, t_src, stack[0])
+        ref_4k = np.sin(2.0 * np.pi * 4000.0 * t_grid)
+
+        # Unfiltered interp folds 100% of the 10x 104 kHz tone (RMS ~ 7.07);
+        # 10 us block-mean has exact sinc(1.04) = 0.038 attenuation -> >20x suppression.
+        err_aa = float(np.std(out_aa - ref_4k))
+        err_raw = float(np.std(out_raw - ref_4k))
+        self.assertLess(err_aa, 0.35)
+        self.assertGreater(err_raw, 5.0)
+        self.assertLess(err_aa, 0.05 * err_raw)
+
+    def test_require_xcorr_raises_keyerror_and_batch_all_skips_by_default(self):
+        with mock.patch.object(jpl, "_load_xcorr_run", return_value=None):
+            with self.assertRaises(KeyError):
+                jmo._require_xcorr("26.hdf5", ("s", "C1"), ("s", "C2"), "missing.npz")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_npz = os.path.join(tmp, "modes_dispersion_jun2026.npz")
+            np.savez(out_npz, sentinel=np.int64(42))
+            res = jmo.batch_all(data_dir=tmp, out_path=out_npz, overwrite=False)
+            self.assertEqual(res, out_npz)
+            with np.load(out_npz) as d:
+                self.assertEqual(int(d["sentinel"]), 42)
 
 
 if __name__ == "__main__":
