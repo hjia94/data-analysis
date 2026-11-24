@@ -18,6 +18,7 @@ is a Windows path.
 | `Aug2026_bdot_plot.py <run>` | `figures/<run>-bdot-plane.png` | Real-data checks (see its docstring); for planes, per-mode maps of \|B⊥\|, J_z = curl_z B/μ₀, \|div B⊥\|, and the wave envelope. |
 | `Aug2026_bicoherence.py <run>` | `<run>-bicoherence.npz`, `figures/<run>-bicoherence.png` | Three-wave coupling (`signal.bispectral`) between low frequencies f₁ (0.5–20 kHz) and the pump side f₂ (168–208 kHz), on raw dB/dt over the steady burst. Covers fixed probe P30 per antenna mode, with a shot-shuffled surrogate that separates real coupling from trigger locking, and per-position maps of moving probe P28. |
 
+
 B-dot runs: `03`, `05` (coarse planes), `17`, `18` (vertical lines), `21` (horizontal line),
 `29` (cross), `30` (12×12 plane, 2 cm), `35` (31×31 plane, 1 cm, 14 GB).
 
@@ -92,3 +93,31 @@ the wave drives the low-frequency response.
 - **Not instrumental.** On run 30 the coupling does not follow the local pump amplitude: the
   correlation is −0.14 to +0.10. Amplifier intermodulation would follow it.
 
+## Swept Langmuir probe
+
+| Script | Product | Purpose |
+|---|---|---|
+| `Aug2026_IV.py <run>` | `<run>-iv-plane.npz` | Plane of P26 sweeps (`lp_scope` C1 = I / 50 Ω, C4 = V), as `Vp`, `Te`, `ne` per position × sweep × antenna mode. Steps: removes the 188 kHz pickup with a one-period boxcar; fits each mode's shot-averaged current, plus every shot, using `langmuir.analyze_IV`; scales `ne` to the interferometer (phase_p29, y = 0 row). |
+| `Aug2026_IV_slider.py <run>` | `figures/<run>-iv-plane.html`, `.png` | Slider page (`viz.slider_html`). The slider scrubs time and the dropdown picks the antenna mode. Panels show ne, Te, Vp and their change from the last pre-burst sweep. |
+
+Run 34 (P26, 37×37 plane at 1 cm, 9 shots/position):
+- **Coverage:** the scan stopped at y = −16 cm (1266 positions), and the last 10 shots are empty.
+- **Sweeps:** 20 per shot, each a −93 → +80 V ramp of 0.66 ms, every 0.8 ms, from 2.9 to 18.0 ms. The burst runs 8.0–13.3 ms.
+- **Current polarity:** the electron current reads negative, so `I_POLARITY = −1`.
+- **Fit failures:** 2 % with all shots, 4 % per mode, mostly at the low-density edge.
+- **Profiles before the burst (7.7 ms):** ne peaks off-axis, on a band at y ≈ 2–10 cm with its peak at (−8, 5) cm, ~16e12 cm⁻³. Te is 7–9 eV and Vp is ~24 V at the center.
+- **During the burst** (sweeps 8.5–12.5 ms, median change from 7.7 ms):
+
+  | Mode | Vp, dense region | ne at center (r ≤ 1.5 cm) | Te |
+  |---|---|---|---|
+  | A | +3.8 V | −2 % | +0.3 eV |
+  | B | +1.5 V | −11 % | ±0.3 eV |
+  | AB | +4.8 V | −17 % | ±0.3 eV |
+
+  - Vp rises in every mode.
+  - The central density drop is local: averaged over r < 10 cm, ne changes by less than ±1 %.
+  - Te barely changes.
+- **Caveats:**
+  - **No antenna-off shots.** Every shot is A, B or AB, so burst effects are separated from slow discharge evolution only by timing. After the burst Vp stays ~3 V above its pre-burst value.
+  - **Wave potential.** An oscillating 188 kHz plasma potential across the sheath can bias the time-averaged IV, i.e. Vp and Te.
+  - **ne biased high.** The y = 0 profile at x = ±18 cm is still 45–80 % of its peak, so the chord integral misses plasma outside the scan. The implied effective probe area (1/factor) is ~1.1e-4 cm².
