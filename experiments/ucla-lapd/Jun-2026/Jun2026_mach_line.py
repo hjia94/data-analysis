@@ -313,14 +313,18 @@ def line_ifn(data_dir, mach_run):
     return hits[0]
 
 
-def batch_all(data_dir=DATA_DIR, mapping=None):
-    """Batch every mapped Mach line run whose npz is missing -> written paths."""
+def batch_all(data_dir=DATA_DIR, mapping=None, overwrite=False):
+    """Batch every mapped Mach line run -> written npz paths.
+
+    Existing npz files are skipped unless ``overwrite=True`` (use ``overwrite``
+    to regenerate after calibration or binning changes).
+    """
     mapping = mapping or MACH_TO_IV
     out = []
     for mach_run, iv_run in sorted(mapping.items()):
         ifn = line_ifn(data_dir, mach_run)
         npz = line_npz_path(ifn)
-        if os.path.exists(npz):
+        if not overwrite and os.path.exists(npz):
             print(f"  run {mach_run}: {os.path.basename(npz)} exists, skipping")
             out.append(npz)
             continue

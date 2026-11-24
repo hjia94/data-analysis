@@ -16,6 +16,7 @@ Same read path as ``Jun2026_IV`` / ``Jun2026_Isat``: channels via
 the coherence/phase is what matters, not absolute current scaling.
 """
 
+import glob
 import os
 import numpy as np
 from tqdm import tqdm
@@ -36,11 +37,52 @@ import Jun2026_IV as jiv
 
 
 # --- Configuration (edit-in-place, like Jun2026_Isat.py) --------------------
-IFN = r"D:\data\LAPD\jun2026-jia\26-He-800G-bias40V-Bdot-LP-plane_2026-06-12.hdf5"
+DATA_DIR = r"D:\data\LAPD\jun2026-jia"
+IFN = os.path.join(DATA_DIR, "26-He-800G-bias40V-Bdot-LP-plane_2026-06-12.hdf5")
 CH_A        = ("bdotscope", "C1")
 CH_B        = ("lpscope", "C3")
 TMIN_MS, TMAX_MS = 1.5, 4.5            # analysis time window (ms)
 NPERSEG     = 4096                     # Welch segment length (freq res vs variance)
+
+# Campaign pair manifest for ``batch_all()``: run_num -> list of
+# ``(ch_a, ch_b, motion_group_name)``.
+#   * Runs 26 (800G) and 31 (filename says 800G; run description is 600G):
+#     B-dot channels are UNMAPPED in the run description, so they pass the
+#     explicit ``<Athena>    p28_Bdot`` motion group; LP pairs auto-resolve to
+#     ``<Hermes>    p29_LP`` against stationary P25-L (``lpscope/C3``).
+#   * Runs 27 (800G), 28 (600G), 30 (1kG): co-moving P29 + P25 axial lines plus
+#     stationary P33 reference (``scope/C5``).
+#   * Run 29 (800G): two-phase 31x31 plane (P29 shots 1-4805, P25 shots
+#     4806-9610), so only moving-vs-stationary-P33 pairs are physically valid.
+_BDOT_LP_PLANE_PAIRS = [
+    (("lpscope", "C1"), ("lpscope", "C3"), None),
+    (("lpscope", "C2"), ("lpscope", "C3"), None),
+    (("lpscope", "C3"), ("bdotscope", "C1"), "<Athena>    p28_Bdot"),
+    (("lpscope", "C3"), ("bdotscope", "C2"), "<Athena>    p28_Bdot"),
+    (("lpscope", "C3"), ("bdotscope", "C3"), "<Athena>    p28_Bdot"),
+]
+_AXIAL_LP_LINE_PAIRS = [
+    (("scope", "C1"), ("scope", "C3"), None),  # P29-L vs P25-L (axial phase)
+    (("scope", "C2"), ("scope", "C4"), None),  # P29-R vs P25-R (axial phase)
+    (("scope", "C1"), ("scope", "C5"), None),  # P29-L vs P33 ref
+    (("scope", "C2"), ("scope", "C5"), None),  # P29-R vs P33 ref
+    (("scope", "C3"), ("scope", "C5"), None),  # P25-L vs P33 ref
+    (("scope", "C4"), ("scope", "C5"), None),  # P25-R vs P33 ref
+]
+_TWOPHASE_LP_PLANE_PAIRS = [
+    (("scope", "C1"), ("scope", "C5"), None),  # P29-L vs P33 ref (phase 1)
+    (("scope", "C2"), ("scope", "C5"), None),  # P29-R vs P33 ref (phase 1)
+    (("scope", "C3"), ("scope", "C5"), None),  # P25-L vs P33 ref (phase 2)
+    (("scope", "C4"), ("scope", "C5"), None),  # P25-R vs P33 ref (phase 2)
+]
+XCORR_RUNS = {
+    "26": _BDOT_LP_PLANE_PAIRS,
+    "27": _AXIAL_LP_LINE_PAIRS,
+    "28": _AXIAL_LP_LINE_PAIRS,
+    "29": _TWOPHASE_LP_PLANE_PAIRS,
+    "30": _AXIAL_LP_LINE_PAIRS,
+    "31": _BDOT_LP_PLANE_PAIRS,
+}
 
 
 # =========================================================================== #
@@ -548,6 +590,51 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
           f"({int(nshots.sum())} shots total), {freq.size} freq bins, "
           f"window {tmin_ms}-{tmax_ms} ms")
     return out_path
+
+
+def xcorr_ifn(data_dir, run_num):
+    """Resolve the raw HDF5 for a zero-padded run number (e.g. ``"26"``)."""
+    hits = sorted(glob.glob(os.path.join(data_dir, f"{run_num}-*.hdf5")))
+    if not hits:
+        raise FileNotFoundError(f"no HDF5 for run {run_num} in {data_dir}")
+    if len(hits) > 1:
+        raise ValueError(f"multiple HDF5 files for run {run_num}: {hits}")
+    return hits[0]
+
+
+def batch_all(data_dir=DATA_DIR, runs=None, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
+              nperseg=NPERSEG, overwrite=False):
+    """Batch every run/pair in :data:`XCORR_RUNS` -> written npz paths.
+
+    ``runs`` may be a subset of run numbers (e.g. ``["26", "31"]``) or a
+    custom ``{run_num: [(ch_a, ch_b, motion_group_name), ...]}`` mapping.
+    Pairs already stored in a run's npz are skipped unless ``overwrite=True``,
+    which removes the existing npz first so no stale keys remain.
+    """
+    if runs is None:
+        manifest = XCORR_RUNS
+    elif isinstance(runs, dict):
+        manifest = runs
+    else:
+        manifest = {r: XCORR_RUNS[r] for r in runs}
+
+    written = []
+    for run_num, pair_specs in sorted(manifest.items()):
+        ifn = xcorr_ifn(data_dir, run_num)
+        out_path = xcorr_npz_path(ifn)
+        if overwrite and os.path.isfile(out_path):
+            os.remove(out_path)
+        existing = (set(stored_pair_tuples(out_path))
+                    if os.path.isfile(out_path) else set())
+        for ch_a, ch_b, mg in pair_specs:
+            if (ch_a, ch_b) in existing:
+                print(f"  run {run_num}: pair {_pair_key(ch_a, ch_b)} exists, skipping")
+                continue
+            batch_xcorr(ifn, ch_a=ch_a, ch_b=ch_b,
+                        tmin_ms=tmin_ms, tmax_ms=tmax_ms,
+                        nperseg=nperseg, motion_group_name=mg)
+        written.append(out_path)
+    return written
 
 
 if __name__ == "__main__":
