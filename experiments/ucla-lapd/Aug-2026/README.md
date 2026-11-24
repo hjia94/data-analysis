@@ -16,6 +16,7 @@ is a Windows path.
 |---|---|---|
 | `Aug2026_bdot.py <run>` | `<run>-bdot-phasors.npz` | Per shot: P28 dB/dt → B (`plasma.bdot`, all three baselines); drive-frequency phasors of B, dB/dt and both antenna currents; per-cycle wave power; drift and noise-floor diagnostics. Burst timing and drive frequency are detected from the antenna currents. |
 | `Aug2026_bdot_plot.py <run>` | `figures/<run>-bdot-plane.png` | Real-data checks (see its docstring); for planes, per-mode maps of \|B⊥\|, J_z = curl_z B/μ₀, \|div B⊥\|, and the wave envelope. |
+| `Aug2026_bicoherence.py <run>` | `<run>-bicoherence.npz`, `figures/<run>-bicoherence.png` | Three-wave coupling (`signal.bispectral`) between low frequencies f₁ (0.5–20 kHz) and the pump side f₂ (168–208 kHz), on raw dB/dt over the steady burst. Covers fixed probe P30 per antenna mode, with a shot-shuffled surrogate that separates real coupling from trigger locking, and per-position maps of moving probe P28. |
 
 B-dot runs: `03`, `05` (coarse planes), `17`, `18` (vertical lines), `21` (horizontal line),
 `29` (cross), `30` (12×12 plane, 2 cm), `35` (31×31 plane, 1 cm, 14 GB).
@@ -45,3 +46,49 @@ Run 30 results (1728 shots, ~40 s with 12 workers):
 - **Offset drift:** cut from ~1000× to ~20× |B(f)|.
 - **Field structure:** a single field-aligned current channel near (x, y) ≈ (−7, 5) cm, with
   a return current around it, the same in all three modes.
+
+## Bicoherence: low-frequency × pump coupling
+
+`Aug2026_bicoherence.py <run>` runs on the steady burst at df = 500 Hz. The f₁ bins at 0.5 and 1 kHz fall inside
+the Hann main lobe of DC and are masked, so the f₁ band is effectively 1.5–20 kHz.
+
+The two numbers compared below:
+- **Pump-line b²:** the mean of b² over f₁ at f₂ = f_pump. Each run's value is compared with the
+  shot-shuffled surrogate, which keeps only the trigger-locked content.
+- **Surrogate:** f₁ is taken from a different shot of the same antenna mode, so it keeps everything locked to
+  the trigger and removes coupling to the shot's own fluctuation.
+
+| Run | Antennas | P30 pump-line b² (per mode) | Surrogate | Coupled? |
+|---|---|---|---|---|
+| 17 | 188 / 193 kHz, vertical line | 0.01–0.03 | 0.006–0.025 | Weak or none |
+| 18 | 188 kHz, vertical line | 0.01–0.03 | 0.005–0.011 | Weak |
+| 21 | 188 kHz, "straight" horizontal line | 0.13–0.36 | 0.014–0.022 | Yes |
+| 29 | 188 kHz, "straight" cross | 0.08–0.41 | 0.006–0.013 | Yes |
+| 30 | 188 kHz, "straight" 12×12 plane | 0.07–0.40 | 0.001–0.004 | Yes |
+| 35 | 188 kHz, 31×31 plane (P30 By only) | 0.26–0.31 | 0.0004–0.0007 | Yes |
+
+Runs 03 and 05 are not covered. Run 03 has no P30 or north-antenna current, and run 05's antenna currents
+are on at the record start, so the burst windowing does not apply.
+
+**What the coupled runs show (P30):**
+- **Upper and lower sidebands.** The upper sidebands f_pump + f₁ and the lower sidebands f_pump − f₁ are
+  phase-coupled to f₁ for every f₁ in the band. They appear in the maps as a vertical line at
+  f₂ = f_pump and a diagonal at f₁ + f₂ = f_pump. Single triads reach b² ≈ 0.6–0.8.
+- **A discrete mode at 4.5 kHz.** It has its own sidebands at 183.5 and 192.5 kHz.
+- **Random phase across shots.** The f₁ and sideband components have shot-to-shot phase
+  consistency ≲ 0.2 while the pump has 0.99, so the coupling is not trigger locking.
+- **Same in all antenna modes.** It appears in A, B and AB.
+
+This is the signature of the pump being modulated by the low-frequency fluctuations. Bicoherence does
+not give the direction: it cannot tell whether the wave is modulated by background fluctuations or
+the wave drives the low-frequency response.
+
+**Moving probe P28:**
+- **Run 35:** the coupling is concentrated on an arc at r ≈ 14–16 cm from the grid origin, on the +y and +x side.
+  - The arc is seen in Bx where it crosses the x axis and in By where it crosses the y axis, i.e. in
+    the radial component.
+  - Bz is at noise level everywhere.
+  - Runs 29 and 30 show the same pattern near y ≈ 13–15 cm.
+- **Not instrumental.** On run 30 the coupling does not follow the local pump amplitude: the
+  correlation is −0.14 to +0.10. Amplifier intermodulation would follow it.
+
