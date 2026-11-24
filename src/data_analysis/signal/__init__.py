@@ -20,6 +20,12 @@ from data_analysis.signal.core import (
     avg_cross_spectrum,
     band_cross_spectrum,
     peak_cross_spectrum,
+    GrowthFit,
+    DominantFreqResult,
+    sliding_detrended_rms,
+    detect_onset_time,
+    fit_exponential_growth,
+    dominant_frequency,
 )
 
 __all__ = [
@@ -42,4 +48,10 @@ __all__ = [
     "avg_cross_spectrum",
     "band_cross_spectrum",
     "peak_cross_spectrum",
+    "GrowthFit",
+    "DominantFreqResult",
+    "sliding_detrended_rms",
+    "detect_onset_time",
+    "fit_exponential_growth",
+    "dominant_frequency",
 ]

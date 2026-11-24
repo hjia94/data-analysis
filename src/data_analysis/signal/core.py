@@ -8,6 +8,8 @@ Author: Jia Han
 Date: 2024-02-28
 '''
 
+from typing import NamedTuple
+
 import numpy as np
 from scipy import signal, ndimage
 
@@ -788,3 +790,357 @@ def peak_cross_spectrum(stack_x, stack_y, dt, search_band, delta_f,
     band = (freq >= f_peak - delta_f) & (freq <= f_peak + delta_f)
     gamma2, phase = _collapse_band(pxy_mean, pxx_mean, pyy_mean, band)
     return float(f_peak), gamma2, phase, n_used
+
+
+# =========================================================================== #
+#  Instability onset, exponential growth rate, and fine dominant frequency
+# =========================================================================== #
+
+class GrowthFit(NamedTuple):
+    """Result of log-linear exponential growth fit ``env(t) ~ A * exp(gamma * t)``.
+
+    ``gamma`` and ``gamma_err`` have units ``1 / (unit of t_env)`` (i.e.
+    ``s^-1`` when ``t_env`` is in seconds). All float fields are ``NaN`` (and
+    ``n_points = 0``) when no valid rising interval can be fitted.
+    """
+    gamma: float
+    gamma_err: float
+    r2: float
+    t_start: float
+    t_end: float
+    n_points: int
+
+
+class DominantFreqResult(NamedTuple):
+    """High-resolution shot-averaged dominant frequency peak inside ``fband``."""
+    f_peak_hz: float
+    f_fwhm_hz: float
+    peak_snr: float
+    freq_hz: np.ndarray
+    psd_mean: np.ndarray
+    n_used: int
+
+
+def sliding_detrended_rms(stack, t, win_s, step_s=None, normalize=True,
+                          min_mean=1e-6, window="hann"):
+    """Per-shot sliding-window linearly detrended RMS fluctuation envelope.
+
+    Removes a per-window weighted linear trend inside each window of duration
+    ``win_s`` so slow DC ramp/drift does not inflate the fluctuation amplitude.
+    Using a Hann window (default, effective FWHM ``0.5 * win_s``) eliminates
+    the ``2*f`` phase ripple produced by a 1-cycle boxcar detrend when ``win_s``
+    spans ~2 wave periods. When ``normalize=True`` (default), each window's RMS
+    is divided by ``max(|window_mean|, min_mean)`` to yield relative fluctuation
+    amplitude ``delta_s / |<s>|``.
+
+    Args:
+        stack: 1-D ``(nt,)`` or 2-D ``(nshot, nt)`` signal array.
+        t: Uniform 1-D time axis ``(nt,)`` in seconds.
+        win_s: Window duration in seconds (at least 3 samples).
+        step_s: Window step in seconds (defaults to ``win_s / 5``).
+        normalize: If True, divide RMS by ``max(|window_mean|, min_mean)``.
+        min_mean: Floor on ``|window_mean|`` when ``normalize=True``.
+        window: Window specification passed to :func:`scipy.signal.get_window`
+            (default ``"hann"``; pass ``"boxcar"`` for unweighted RMS).
+
+    Returns:
+        ``(t_env, env)`` where ``t_env`` is ``(nwin,)`` window center times [s]
+        and ``env`` has shape ``(nwin,)`` for 1-D input or ``(nshot, nwin)``
+        for 2-D input.
+    """
+    arr = np.asarray(stack, dtype=float)
+    is_1d = arr.ndim == 1
+    if is_1d:
+        arr = arr[None, :]
+    elif arr.ndim != 2:
+        raise ValueError(f"stack must be 1-D or 2-D, got shape {arr.shape}")
+
+    t = np.asarray(t, dtype=float)
+    if t.ndim != 1 or t.size != arr.shape[1] or t.size < 3:
+        raise ValueError("t must be a 1-D array matching stack's last axis (len >= 3)")
+
+    dt = float(t[1] - t[0])
+    if dt <= 0:
+        raise ValueError(f"t must be strictly increasing, got dt={dt}")
+
+    nwin = int(round(win_s / dt))
+    if nwin < 3:
+        raise ValueError(f"win_s={win_s} s is fewer than 3 samples at dt={dt} s")
+    if nwin > t.size:
+        raise ValueError(f"win_s={win_s} s ({nwin} samples) exceeds record length ({t.size})")
+
+    step_s = win_s / 5.0 if step_s is None else step_s
+    nstep = max(1, int(round(step_s / dt)))
+
+    w = np.asarray(signal.get_window(window, nwin, fftbins=False), dtype=float)
+    w_sum = float(w.sum())
+    if w_sum <= 0.0:
+        raise ValueError(f"window {window!r} has non-positive weight sum")
+    w = w / w_sum
+
+    # Sliding window view: (nshot, n_out, nwin) without copying the full trace.
+    windows = np.lib.stride_tricks.sliding_window_view(arr, nwin, axis=1)[:, ::nstep, :]
+    t_wins = np.lib.stride_tricks.sliding_window_view(t, nwin)[::nstep, :]
+    t_env = np.sum(t_wins * w[None, :], axis=1)
+
+    # Vectorized weighted linear detrend: y - mean_w - slope_w * (x - x_w).
+    x = np.arange(nwin, dtype=float)
+    x = x - float(np.dot(w, x))
+    wx = w * x
+    sxx = float(np.dot(wx, x))
+    mean = np.sum(windows * w[None, None, :], axis=2, keepdims=True)
+    centered = windows - mean
+    slope = np.sum(centered * wx[None, None, :], axis=2, keepdims=True) / sxx
+    detrended = centered - slope * x[None, None, :]
+    rms = np.sqrt(np.maximum(np.sum(w[None, None, :] * (detrended ** 2), axis=2), 0.0))
+
+    if normalize:
+        denom = np.maximum(np.abs(mean[:, :, 0]), float(min_mean))
+        env = rms / denom
+    else:
+        env = rms
+
+    return (t_env, env[0]) if is_1d else (t_env, env)
+
+
+def detect_onset_time(t_env, env, threshold, t_min=None, sustain=2):
+    """First time ``env`` exceeds ``threshold`` for ``sustain`` consecutive bins.
+
+    Args:
+        t_env: 1-D envelope time axis ``(nwin,)`` (any time unit).
+        env: 1-D ``(nwin,)`` or 2-D ``(nshot, nwin)`` envelope array.
+        threshold: Detection threshold (same units as ``env``).
+        t_min: Optional minimum time (same unit as ``t_env``); earlier bins are
+            ignored (e.g. to skip a ``t=0`` turn-on transient).
+        sustain: Number of consecutive bins required above ``threshold`` (>= 1).
+
+    Returns:
+        Scalar float (for 1-D ``env``) or 1-D float array ``(nshot,)`` with
+        ``NaN`` where no sustained crossing occurs.
+    """
+    if sustain < 1:
+        raise ValueError(f"sustain must be >= 1, got {sustain}")
+    t_env = np.asarray(t_env, dtype=float)
+    arr = np.asarray(env, dtype=float)
+    is_1d = arr.ndim == 1
+    if is_1d:
+        arr = arr[None, :]
+    elif arr.ndim != 2:
+        raise ValueError(f"env must be 1-D or 2-D, got shape {arr.shape}")
+    if t_env.ndim != 1 or t_env.size != arr.shape[1]:
+        raise ValueError("t_env must match env's last axis")
+
+    mask = np.ones(t_env.size, dtype=bool) if t_min is None else (t_env >= t_min)
+    above = np.isfinite(arr) & (arr > threshold) & mask[None, :]
+
+    nshot = arr.shape[0]
+    onset = np.full(nshot, np.nan, dtype=float)
+    if t_env.size < sustain:
+        return float(onset[0]) if is_1d else onset
+
+    # Check runs of `sustain` consecutive True entries per shot.
+    runs = np.lib.stride_tricks.sliding_window_view(above, sustain, axis=1).all(axis=2)
+    has_hit = runs.any(axis=1)
+    if has_hit.any():
+        first_idx = np.argmax(runs[has_hit], axis=1)
+        onset[has_hit] = t_env[first_idx]
+    return float(onset[0]) if is_1d else onset
+
+
+def fit_exponential_growth(t_env, env, t_onset=None, low_frac=0.15,
+                           high_frac=0.65, noise_floor=None, min_points=4):
+    """Fit exponential growth rate ``gamma`` on the rising edge of an envelope.
+
+    Isolates the contiguous ramp ending at the first crossing of
+    ``high_frac * env_peak`` and starting at the last point at or below
+    ``max(low_frac * env_peak, 2 * noise_floor)`` before that crossing, then
+    performs ordinary least squares on ``ln(env) = a + gamma * t``.
+
+    Args:
+        t_env: 1-D envelope time axis ``(nwin,)`` (seconds -> ``gamma`` in s^-1).
+        env: 1-D envelope amplitude ``(nwin,)``.
+        t_onset: Optional onset time (same unit as ``t_env``); peak search is
+            restricted to ``t_env >= t_onset``.
+        low_frac: Lower fraction of ``env_peak`` bounding the linear-growth ramp.
+        high_frac: Upper fraction of ``env_peak`` (below nonlinear saturation).
+        noise_floor: Optional baseline RMS level; the ramp start stays above
+            ``2 * noise_floor`` when given.
+        min_points: Minimum number of finite positive samples required for fit.
+
+    Returns:
+        :class:`GrowthFit` (all-NaN / ``n_points=0`` if no valid ramp exists).
+    """
+    empty = GrowthFit(np.nan, np.nan, np.nan, np.nan, np.nan, 0)
+    t_env = np.asarray(t_env, dtype=float)
+    env = np.asarray(env, dtype=float)
+    if t_env.ndim != 1 or env.ndim != 1 or t_env.size != env.size:
+        raise ValueError("t_env and env must be 1-D arrays of equal length")
+    if not (0.0 < low_frac < high_frac <= 1.0):
+        raise ValueError(f"require 0 < low_frac < high_frac <= 1, got {low_frac}, {high_frac}")
+
+    if t_onset is not None:
+        if not np.isfinite(t_onset):
+            return empty
+        i_search = int(np.searchsorted(t_env, t_onset, side="left"))
+    else:
+        i_search = 0
+    if i_search >= env.size:
+        return empty
+
+    post = env[i_search:]
+    if not np.any(np.isfinite(post)):
+        return empty
+    i_peak_rel = int(np.nanargmax(post))
+    i_peak = i_search + i_peak_rel
+    env_peak = float(env[i_peak])
+    if not np.isfinite(env_peak) or env_peak <= 0.0:
+        return empty
+
+    lo_val = low_frac * env_peak
+    if noise_floor is not None and np.isfinite(noise_floor) and noise_floor > 0.0:
+        lo_val = max(lo_val, 2.0 * float(noise_floor))
+    hi_val = high_frac * env_peak
+    if lo_val >= hi_val:
+        return empty
+
+    # First crossing of hi_val in [i_search, i_peak].
+    hi_hits = np.flatnonzero(
+        np.isfinite(env[i_search:i_peak + 1]) & (env[i_search:i_peak + 1] >= hi_val)
+    )
+    if hi_hits.size == 0:
+        return empty
+    i_hi = i_search + int(hi_hits[0])
+
+    # Walk backwards from i_hi to the last point <= lo_val so earlier baseline
+    # oscillations are excluded from the rising ramp.
+    pre_hi = env[:i_hi + 1]
+    lo_hits = np.flatnonzero(np.isfinite(pre_hi) & (pre_hi <= lo_val))
+    if lo_hits.size > 0:
+        i_lo = int(lo_hits[-1])
+        # If the point at i_lo is strictly below lo_val and there are enough
+        # points strictly above lo_val, start just inside the ramp; otherwise
+        # include i_lo so fast ramps keep their lower anchor.
+        if i_hi - i_lo >= min_points and env[i_lo] < lo_val:
+            i_lo += 1
+    else:
+        i_lo = i_search
+
+    t_seg = t_env[i_lo:i_hi + 1]
+    e_seg = env[i_lo:i_hi + 1]
+    good = np.isfinite(t_seg) & np.isfinite(e_seg) & (e_seg > 0.0)
+    t_seg = t_seg[good]
+    e_seg = e_seg[good]
+    n = int(t_seg.size)
+    if n < max(min_points, 3):
+        return empty
+
+    y = np.log(e_seg)
+    xm = float(t_seg.mean())
+    ym = float(y.mean())
+    dx = t_seg - xm
+    sxx = float(np.dot(dx, dx))
+    if sxx <= 0.0:
+        return empty
+
+    gamma = float(np.dot(dx, y - ym) / sxx)
+    if gamma <= 0.0:
+        return empty
+
+    resid = y - (ym + gamma * dx)
+    ssr = float(np.dot(resid, resid))
+    sst = float(np.dot(y - ym, y - ym))
+    r2 = float(1.0 - ssr / sst) if sst > 0.0 else np.nan
+    gamma_err = float(np.sqrt(ssr / ((n - 2) * sxx)))
+    return GrowthFit(gamma, gamma_err, r2, float(t_seg[0]), float(t_seg[-1]), n)
+
+
+def dominant_frequency(stack, dt, fband=(1000.0, 15000.0), pad_factor=4,
+                       window="hann"):
+    """Shot-averaged zero-padded PSD peak, FWHM, and SNR within ``fband``.
+
+    Uses the full provided trace length (rather than short Welch sub-segments)
+    so short bursts (~2-3 ms) retain their full ``1 / T`` spectral resolution,
+    zero-padded by ``pad_factor`` and parabolically refined around the peak.
+
+    Args:
+        stack: 1-D ``(nt,)`` or 2-D ``(nshot, nt)`` signal array (already
+            clipped to the analysis window).
+        dt: Sample interval in seconds.
+        fband: ``(f_lo, f_hi)`` search band in Hz.
+        pad_factor: Zero-padding multiplier (>= 1) for smooth peak interpolation.
+        window: Window name passed to :func:`scipy.signal.get_window`.
+
+    Returns:
+        :class:`DominantFreqResult`.
+    """
+    arr = np.asarray(stack, dtype=float)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    elif arr.ndim != 2:
+        raise ValueError(f"stack must be 1-D or 2-D, got shape {arr.shape}")
+
+    good = finite_row_mask(arr)
+    arr = arr[good]
+    n_used = int(arr.shape[0])
+    if n_used == 0:
+        raise ValueError("no finite shots for dominant_frequency")
+
+    nt = arr.shape[1]
+    if nt < 4:
+        raise ValueError(f"trace too short (nt={nt})")
+    if pad_factor < 1:
+        raise ValueError(f"pad_factor must be >= 1, got {pad_factor}")
+
+    win = signal.get_window(window, nt)
+    win_norm = float(np.dot(win, win)) / dt  # fs * sum(w^2)
+    nfft = int(2 ** np.ceil(np.log2(nt * pad_factor)))
+
+    centered = arr - arr.mean(axis=1, keepdims=True)
+    spec = np.fft.rfft(centered * win[None, :], n=nfft, axis=1)
+    psd = (np.abs(spec) ** 2) / win_norm
+    if nfft % 2 == 0:
+        psd[:, 1:-1] *= 2.0
+    else:
+        psd[:, 1:] *= 2.0
+    psd_mean = psd.mean(axis=0)
+    freq_hz = np.fft.rfftfreq(nfft, d=dt)
+
+    f_lo, f_hi = fband
+    in_band = (freq_hz >= f_lo) & (freq_hz <= f_hi)
+    if not np.any(in_band):
+        raise ValueError(f"fband {f_lo}-{f_hi} Hz selects no FFT bin")
+
+    band_idx = np.flatnonzero(in_band)
+    k_pk = int(band_idx[int(np.argmax(psd_mean[band_idx]))])
+    pk_val = float(psd_mean[k_pk])
+    med_val = float(np.median(psd_mean[band_idx]))
+    peak_snr = pk_val / med_val if med_val > 0.0 else np.nan
+
+    # Parabolic sub-bin refinement on log-PSD when peak is strictly interior.
+    f_peak = float(freq_hz[k_pk])
+    if 0 < k_pk < psd_mean.size - 1 and psd_mean[k_pk - 1] > 0 and psd_mean[k_pk + 1] > 0:
+        y_m, y_0, y_p = np.log(psd_mean[k_pk - 1:k_pk + 2])
+        denom = y_m - 2.0 * y_0 + y_p
+        if denom < 0.0:
+            delta = 0.5 * (y_m - y_p) / denom
+            if abs(delta) <= 1.0:
+                df = float(freq_hz[1] - freq_hz[0])
+                f_peak = float(freq_hz[k_pk] + delta * df)
+
+    # Full width at half maximum (linear interpolation at 0.5 * pk_val).
+    half = 0.5 * pk_val
+    f_left = np.nan
+    for k in range(k_pk, 0, -1):
+        if psd_mean[k - 1] <= half:
+            frac = (half - psd_mean[k - 1]) / max(psd_mean[k] - psd_mean[k - 1], 1e-30)
+            f_left = float(freq_hz[k - 1] + frac * (freq_hz[k] - freq_hz[k - 1]))
+            break
+    f_right = np.nan
+    for k in range(k_pk, psd_mean.size - 1):
+        if psd_mean[k + 1] <= half:
+            frac = (half - psd_mean[k + 1]) / max(psd_mean[k] - psd_mean[k + 1], 1e-30)
+            f_right = float(freq_hz[k + 1] - frac * (freq_hz[k + 1] - freq_hz[k]))
+            break
+    f_fwhm = float(f_right - f_left) if (np.isfinite(f_left) and np.isfinite(f_right)) else np.nan
+
+    return DominantFreqResult(f_peak, f_fwhm, peak_snr, freq_hz, psd_mean, n_used)
