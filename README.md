@@ -40,7 +40,7 @@ Modules are grouped by **what they do**, not by which experiment produced them:
 | Package | Contents |
 |---------|----------|
 | `data_analysis.io` | File readers, grouped by data shape — the unified LAPD HDF5 reader (`open_lapd`), interferometer traces, probe↔channel mapping, oscilloscope traces, `.cine` movies, network-analyzer CSV, and the output-path resolver. The *only* place a file format is parsed. See [src/data_analysis/io/README.md](src/data_analysis/io/README.md). |
-| `data_analysis.signal` | Generic digital signal processing — filters, STFT, envelopes, cross-spectra, zero-crossing detection, and downsampling helpers. |
+| `data_analysis.signal` | Generic digital signal processing — filters, STFT, envelopes, cross-spectra, bicoherence / bispectrum, zero-crossing detection, and downsampling helpers. |
 | `data_analysis.plasma` | Plasma-physics analysis — Langmuir probes (`langmuir`), Mach probes (`mach`), in-plane flow geometry (`flow`), B-dot calibration/integration (`bdot`), gridded E/B/J field operators (`fields`), photon/X-ray pulse detection (`photons`), CTS / Sheffield Thomson scattering, and `formulas`. |
 | `data_analysis.tracking` | High-speed-camera object tracking and trajectory fitting. |
 | `data_analysis.viz` | Plotting helpers — shared plot utilities, flow-field maps, and the standalone HTML slider renderer. |

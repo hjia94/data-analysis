@@ -1,4 +1,4 @@
-"""Generic digital-signal-processing helpers (filters, STFT, envelopes)."""
+"""Generic digital-signal-processing helpers (filters, STFT, envelopes, spectra, bicoherence)."""
 
 from data_analysis.signal.core import (
     downsample_stride,
@@ -27,6 +27,12 @@ from data_analysis.signal.core import (
     fit_exponential_growth,
     dominant_frequency,
 )
+from data_analysis.signal.bispectral import (
+    BicoherenceResult,
+    bicoherence,
+    bicoherence_threshold,
+    cross_bicoherence,
+)
 
 __all__ = [
     "downsample_stride",
@@ -54,4 +60,8 @@ __all__ = [
     "detect_onset_time",
     "fit_exponential_growth",
     "dominant_frequency",
+    "BicoherenceResult",
+    "bicoherence",
+    "bicoherence_threshold",
+    "cross_bicoherence",
 ]

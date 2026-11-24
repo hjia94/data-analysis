@@ -56,6 +56,12 @@
 | Peak-tracking band collapse (follows a drifting mode) | [`peak_cross_spectrum`](../../src/data_analysis/signal/core.py#L750) | mode frequency varying across a probe plane |
 | Ensemble-mean-trace cross-correlation | [`_ensemble_xcorr`](Jun-2026/Jun2026_xcorr.py#L144) | lag from shot-averaged traces |
 
+### 4c. Three-wave (higher-order) analysis
+| Technique | Implementation | Where used |
+|---|---|---|
+| Bicoherence and bispectrum `<X(f1) Y(f2) Z*(f1+f2)>`, Kim–Powers normalization (0–1), averaged over shots and segments, evaluated in chosen `f1`/`f2` bands (negative `f2` for difference triads) | [`bicoherence`](../../src/data_analysis/signal/bispectral.py#L192), [`cross_bicoherence`](../../src/data_analysis/signal/bispectral.py#L215) | quadratic phase coupling, e.g. pump / sideband / zonal-flow triads; rewritten from the HOSA port `synergetics/spectrum` |
+| Chance level of b² for N realizations, `1 - p^(1/(N-1))` | [`bicoherence_threshold`](../../src/data_analysis/signal/bispectral.py#L87) | significance of a bicoherence peak |
+
 ## 5. Differentiation and integration
 
 | Technique | Implementation | Where used |
