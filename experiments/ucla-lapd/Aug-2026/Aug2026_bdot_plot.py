@@ -139,8 +139,10 @@ def main():
         a.set(xlabel="t (ms)", ylim=(0, 1.6), title="wave |B_perp| envelope (cycle_means)")
     for a in ax[:, :3].ravel():
         a.set(xlabel="x (cm)", ylabel="y (cm)")
-    fig.suptitle(f"Aug-2026 run {args.run:02d}: {float(r['freq'])/1e3:.1f} kHz Alfvén wave, P28 B-dot "
-                 f"(unit coil area: relative scale)" if float(r["area"]) == 1.0 else "")
+    # area may be a scalar or a 3x3 calibration matrix; 1.0 is the uncalibrated placeholder
+    uncalibrated = np.ndim(r["area"]) == 0 and float(r["area"]) == 1.0
+    fig.suptitle(f"Aug-2026 run {args.run:02d}: {float(r['freq'])/1e3:.1f} kHz Alfvén wave, P28 B-dot"
+                 + (" (unit coil area: relative scale)" if uncalibrated else ""))
     out = args.out_dir / "figures" / f"{args.run:02d}-bdot-plane.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=80)
