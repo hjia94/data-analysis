@@ -2,7 +2,9 @@
 
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -12,7 +14,15 @@ _JUN2026_DIR = os.path.abspath(
 if _JUN2026_DIR not in sys.path:
     sys.path.insert(0, _JUN2026_DIR)
 
-from data_analysis.plasma.mach import binned_face_ratio
+from data_analysis.plasma.flow import (
+    antisymmetric_rotation_profile,
+    radial_flow_shear,
+)
+from data_analysis.plasma.mach import (
+    binned_face_ratio,
+    flow_velocity,
+    rescale_mach_velocity,
+)
 import Jun2026_mach_line as jml
 
 
@@ -80,6 +90,89 @@ class TestBinnedFaceRatio(unittest.TestCase):
         self.assertTrue(np.all(np.isnan(ratio[:n_pre])))
         self.assertTrue(np.all(counts[n_pre:n_pre + 10] > 0))
         np.testing.assert_allclose(ratio[n_pre:n_pre + 10], 1.0)
+
+
+class TestMachRescalingAndFlowShear(unittest.TestCase):
+    def test_rescale_mach_velocity_errors_and_invalid_te(self):
+        M = np.array([0.0, 0.25, -0.5])
+        Te = np.array([4.0, 4.0, -1.0])
+        v, v_err = rescale_mach_velocity(M, Te, mu=4.0, te_err_ev=0.4, M_err=0.05)
+        cs = flow_velocity(1.0, 4.0, 4.0)
+        # M = 0 must not produce 0/0 NaN; sigma_v = cs * M_err
+        self.assertAlmostEqual(v[0], 0.0, places=12)
+        self.assertAlmostEqual(v_err[0], cs * 0.05, places=12)
+        # M = 0.25, Te = 4.0, te_err = 0.4 (10% -> 5% on sqrt(Te))
+        self.assertAlmostEqual(v[1], 0.25 * cs, places=12)
+        expected_err1 = np.sqrt((cs * 0.05) ** 2 + (0.5 * v[1] * 0.1) ** 2)
+        self.assertAlmostEqual(v_err[1], expected_err1, places=12)
+        # Non-positive Te -> NaN for both v and v_err
+        self.assertTrue(np.isnan(v[2]) and np.isnan(v_err[2]))
+
+    def test_antisymmetric_rotation_cancels_uniform_offset(self):
+        x = np.arange(-6.0, 8.1, 1.0)
+        xc = 1.0
+        # Rigid rotation v_rot = 0.4 * r plus uniform DC offset +0.85 km/s
+        v = 0.85 + 0.4 * (x - xc)
+        r, v_rot, v_sym = antisymmetric_rotation_profile(x, v, x_center_cm=xc)
+        np.testing.assert_allclose(r, np.arange(1.0, 7.1, 1.0))
+        np.testing.assert_allclose(v_rot, 0.4 * r, atol=1e-12)
+        np.testing.assert_allclose(v_sym, 0.85, atol=1e-12)
+
+    def test_radial_flow_shear_rigid_body_zero_and_flat_profile_exact(self):
+        r = np.arange(1.0, 10.1, 1.0)
+        # Rigid-body rotation: v_theta = Omega0 * r -> gamma_E = r d(Omega)/dr == 0
+        v_rigid = 0.5 * r  # 0.5 km/s per cm -> Omega = 5e4 rad/s
+        sh_rigid = radial_flow_shear(r, v_rigid, smooth_window=5, polyorder=2)
+        np.testing.assert_allclose(sh_rigid.dv_dr_s, 5e4, rtol=1e-10)
+        np.testing.assert_allclose(sh_rigid.omega_rad_s, 5e4, rtol=1e-10)
+        np.testing.assert_allclose(sh_rigid.gamma_E_s, 0.0, atol=1e-7)
+
+        # Constant velocity v_theta = v0 = 2.0 km/s -> dv/dr = 0, gamma_E = -v0 / r
+        v_flat = np.full_like(r, 2.0)
+        sh_flat = radial_flow_shear(r, v_flat, smooth_window=1)
+        np.testing.assert_allclose(sh_flat.dv_dr_s, 0.0, atol=1e-12)
+        np.testing.assert_allclose(sh_flat.gamma_E_s, -(2.0 / r) * 1e5, rtol=1e-12)
+
+    def test_batch_rescaled_summary_settings_validation_and_partial_overwrite(self):
+        fake = {
+            "mach_run": "08", "iv_run": "06", "gas_puff_ms": 23.0,
+            "ref_bin_idx": 13, "ref_bin_t_ms": 1.6, "ref_iv_swp_idx": 14,
+            "x_cm": np.array([-1.0, 0.0, 1.0]),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out_npz = os.path.join(tmp, "mach_rescaled.npz")
+            with mock.patch.object(jml, "rescale_line_with_iv", return_value=fake) as m_rs:
+                jml.batch_rescaled_summary(
+                    data_dir=tmp, runs=["08", "09"], te_mode="upper", out_path=out_npz
+                )
+                self.assertEqual(m_rs.call_count, 2)
+
+            # Matching settings skip cleanly
+            with mock.patch.object(jml, "rescale_line_with_iv") as m_rs:
+                jml.batch_rescaled_summary(
+                    data_dir=tmp, runs=["08", "09"], te_mode="upper",
+                    out_path=out_npz, overwrite=False,
+                )
+                m_rs.assert_not_called()
+
+            # Mismatched te_mode raises ValueError advising overwrite=True
+            with self.assertRaises(ValueError) as ctx:
+                jml.batch_rescaled_summary(
+                    data_dir=tmp, runs=["08"], te_mode="midpoint",
+                    out_path=out_npz, overwrite=False,
+                )
+            self.assertIn("overwrite=True", str(ctx.exception))
+
+            # Partial overwrite updates only run 08 and keeps run 09 untouched
+            with mock.patch.object(jml, "rescale_line_with_iv", return_value=fake) as m_rs:
+                jml.batch_rescaled_summary(
+                    data_dir=tmp, runs=["08"], te_mode="midpoint",
+                    out_path=out_npz, overwrite=True,
+                )
+                self.assertEqual(m_rs.call_count, 1)
+            with np.load(out_npz) as d:
+                self.assertEqual(str(d["08__te_mode"]), "midpoint")
+                self.assertEqual(str(d["09__te_mode"]), "upper")
 
 
 if __name__ == "__main__":

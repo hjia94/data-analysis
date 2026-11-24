@@ -122,6 +122,43 @@ def flow_velocity(M, T_e_eV, mu, gamma=5 / 3, Z=1):
     return np.asarray(M, dtype=float) * ion_sound_speed(T_e_eV, mu, gamma, Z) * 1e-5
 
 
+def rescale_mach_velocity(M, T_e_eV, mu, *, te_err_ev=None, M_err=None,
+                          gamma=5 / 3, Z=1):
+    """Rescale Mach number ``M`` with measured ``T_e(x, t)`` [eV] -> **km/s**.
+
+    Invalid or non-positive ``T_e_eV`` entries yield ``NaN`` cleanly (no
+    ``RuntimeWarning``). When either ``te_err_ev`` or ``M_err`` is given,
+    returns ``(v_km_s, v_err_km_s)`` propagating uncorrelated errors via::
+
+        sigma_v^2 = (c_s * sigma_M)^2 + ((v / (2 * T_e)) * sigma_Te)^2
+
+    Using ``c_s * sigma_M`` directly avoids a ``0 / 0`` singularity at ``M = 0``.
+    """
+    m_arr = np.asarray(M, dtype=float)
+    te_arr = np.asarray(T_e_eV, dtype=float)
+    valid_te = np.isfinite(te_arr) & (te_arr > 0.0)
+    te_safe = np.where(valid_te, te_arr, 1.0)
+    cs_km_s = np.where(valid_te, ion_sound_speed(te_safe, mu, gamma, Z) * 1e-5, np.nan)
+    v = np.where(valid_te & np.isfinite(m_arr), m_arr * cs_km_s, np.nan)
+
+    if te_err_ev is None and M_err is None:
+        return v
+
+    var_v = np.zeros_like(v, dtype=float)
+    if M_err is not None:
+        me = np.asarray(M_err, dtype=float)
+        var_v = var_v + np.where(valid_te & np.isfinite(me), (cs_km_s * me) ** 2, np.nan)
+    if te_err_ev is not None:
+        te_e = np.asarray(te_err_ev, dtype=float)
+        var_v = var_v + np.where(
+            valid_te & np.isfinite(m_arr) & np.isfinite(te_e),
+            (0.5 * v * te_e / te_safe) ** 2,
+            np.nan,
+        )
+    v_err = np.where(np.isfinite(v), np.sqrt(var_v), np.nan)
+    return v, v_err
+
+
 #: Fewest samples a time bin may hold. A bin is the shot-and-sample pool one
 #: face ratio is formed from, so a handful of samples gives a ratio dominated by
 #: whichever sample landed in it. Real runs sit far above this -- the floor

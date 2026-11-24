@@ -23,7 +23,7 @@ Always invoke scripts with the repo virtual environment (`.venv\Scripts\python.e
 | `Jun2026_IV.py` | `00`–`06` (puff scan 23–45 ms), `07` (plane) | `<run>-sweep-data.npz`, `<run>-plasma-data.npz` | Swept Langmuir probe `Vp`, `Te`, `ne` (interferometer-calibrated when available). |
 | `Jun2026_Isat.py` | `00`–`06` (stationary ref), per-position scans | `isat_fft_00-06.npz`, `<run>-isat-fft-data.npz` | Fixed-bias `Isat` fluctuation traces and ensemble-averaged amplitude spectra. |
 | `Jun2026_mach_cal.py` | `17`–`20` (4-orientation rotation) | `17-20-mach-calibration.npz`, `.png` | P33 6-tip Mach probe area ratios `kappa = A_+/A_-` (stored alongside raw data). |
-| `Jun2026_mach_line.py` | `08`–`14` (puff scan 23–45 ms, P33 line) | `08`–`14-mach-flow-line-data.npz` | Calibrated `M_X`, `M_Y` and assumed-`Te` velocities binned to paired IV sweeps (`MACH_TO_IV`). |
+| `Jun2026_mach_line.py` | `08`–`14` (puff scan 23–45 ms, P33 line) | `08`–`14-mach-flow-line-data.npz`, `mach_line_rescaled_jun2026.npz` | Calibrated `M_X`, `M_Y` binned to paired IV sweeps (`MACH_TO_IV`), plus measured-`Te` rescaling, antisymmetric rotation `v_rot`, flow shear `gamma_E`, and P29 `E x B` comparison (`batch_rescaled_summary`). |
 | `Jun2026_mach_flow.py` | `32` (41×41 P33 3D Mach plane) | `32-mach-flow-data.npz`, slider HTML | Calibrated 3D flow map (`v_X`, `v_Y`, `v_Z`, polar `v_r`/`v_theta`). |
 | `Jun2026_xcorr.py` | `26`–`31` (B-dot/LP planes & axial lines) | `26`–`31-xcorr-data.npz` | Ensemble Welch coherence `gamma2(f)` and cross-phase `phase(f)` with per-pair `(pos_x, pos_y)`. |
 | `Jun2026_onset.py` | `00`–`06`, `08`–`14`, `26`–`31` | `onset_summary_jun2026.npz` | Per-shot & onset-aligned instability `t_onset`, exponential growth rate `gamma`, and post-onset full-window `f0` (Rayleigh `1/T_win ~ 300–770 Hz`). |
@@ -111,10 +111,10 @@ Documented directly from the raw HDF5 files and run logs so downstream scripts d
 ### Completed
 - Fixed zero-width and tail-bleed edge bugs in `binned_face_ratio` (`src/data_analysis/plasma/mach.py`, `Jun2026_mach_line.py`).
 - Fixed per-pair coordinates, moving-vs-stationary drive resolution, and optional `t_offset_b_ms` cross-scope alignment in `Jun2026_xcorr.py` / `Jun2026_plot.py`.
-- Generated and verified `08`–`14-mach-flow-line-data.npz`, `26`–`31-xcorr-data.npz`, `onset_summary_jun2026.npz`, and `profiles_summary_jun2026.npz`.
+- Generated and verified `08`–`14-mach-flow-line-data.npz`, `26`–`31-xcorr-data.npz`, `onset_summary_jun2026.npz`, `profiles_summary_jun2026.npz`, and `mach_line_rescaled_jun2026.npz`.
 - Added generic onset/growth-rate/dominant-frequency DSP helpers (`src/data_analysis/signal/core.py`) and `Jun2026_onset.py`.
-- Added generic radial profile, electron pressure, signed gradient, `Vf`/sheath-factor, and local scale helpers (`src/data_analysis/plasma/profiles.py`) and `Jun2026_profiles.py`, plus `tests/` unit tests (`python -m unittest discover -s tests`).
+- Added generic radial profile, electron pressure, signed gradient, `Vf`/sheath-factor, and local scale helpers (`src/data_analysis/plasma/profiles.py`) and `Jun2026_profiles.py`.
+- Added measured-`Te` Mach velocity rescaling (`data_analysis.plasma.mach.rescale_mach_velocity`), antisymmetric rotation & cylindrical flow shear (`data_analysis.plasma.flow`), and paired IV/`E x B` shear comparison in `Jun2026_mach_line.py`, plus `tests/` unit tests.
 
 ### Planned Next
-1. Measured-`Te` rescaling of Mach line flows (`Jun2026_mach_line.py` joined on `iv_sweep_index`) and `E x B` shear comparison.
-2. Azimuthal/axial mode decomposition (`m`, `k_par`), B-dot calibration, and plasma-frame dispersion comparison (`omega' = omega - k_theta v_ExB` vs. `omega_*n`, `omega_*T`).
+1. Azimuthal/axial mode decomposition (`m`, `k_par`), B-dot calibration, and plasma-frame dispersion comparison (`omega' = omega - k_theta v_ExB` vs. `omega_*n`, `omega_*T`).
