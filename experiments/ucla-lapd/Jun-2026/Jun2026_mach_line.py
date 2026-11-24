@@ -27,8 +27,8 @@ beside it, so a later measured-T_e pass rescales v without re-reading the run.
 
 import datetime
 import os
-
 import re
+import warnings
 
 import numpy as np
 from tqdm import tqdm
@@ -43,6 +43,8 @@ from data_analysis.plasma.langmuir import load_plasma_data, load_sweep_axes
 from data_analysis.plasma.mach import (K_HUTCHINSON, binned_face_ratio,
                                        flow_velocity, mach_single,
                                        rescale_mach_velocity)
+from data_analysis.plasma.profiles import (local_drift_scales,
+                                           radial_profile_gradients)
 from data_analysis.utils import merge_save_npz, run_num_of
 
 DATA_DIR = jmf.DATA_DIR
@@ -340,14 +342,26 @@ RESCALED_OUT_NAME = "mach_line_rescaled_jun2026.npz"
 SHEAR_ANNULUS_R_CM = (3.0, 6.0)     # outer antisymmetric dipole band [cm]
 INNER_WALL_R_CM = (1.5, 4.0)        # hollowing-boundary band [cm]
 DEFAULT_X_CENTER_CM = 1.0
+DEFAULT_B0_G = 800.0
 
 
-def _load_paired_iv_fields(data_dir, iv_run, profiles_npz=None, tip="P29-R"):
-    """Load paired IV ``(x_cm, Te, Te_err, v_ExB_km_s, t_mid_ms, ref_sweep_idx, gas_puff_ms)``."""
+def _load_paired_iv_fields(data_dir, iv_run, profiles_npz=None, tip="P29-R", *,
+                           x_center_cm=DEFAULT_X_CENTER_CM, smooth_window=5,
+                           smooth_poly=2, b0_g=DEFAULT_B0_G):
+    """Load paired IV ``(x_cm, Te, Te_err, v_ExB_km_s, ...)`` with x_center guard."""
     prof_path = profiles_npz or os.path.join(data_dir, "profiles_summary_jun2026.npz")
     if os.path.isfile(prof_path):
         with np.load(prof_path) as d:
             if f"{iv_run}__Te" in d.files:
+                xc_key = f"{iv_run}__x_center_cm"
+                if xc_key in d.files:
+                    stored_xc = float(d[xc_key])
+                    if not np.isclose(stored_xc, x_center_cm, atol=1e-6, rtol=0.0):
+                        raise ValueError(
+                            f"{prof_path}: IV run '{iv_run}' was signed around "
+                            f"x_center_cm={stored_xc:g}, which disagrees with requested "
+                            f"x_center_cm={x_center_cm:g}; regenerate profiles or match x_center_cm"
+                        )
                 return {
                     "x_cm": np.asarray(d[f"{iv_run}__x_cm"], dtype=float),
                     "Te": np.asarray(d[f"{iv_run}__Te"], dtype=float),
@@ -356,18 +370,34 @@ def _load_paired_iv_fields(data_dir, iv_run, profiles_npz=None, tip="P29-R"):
                     "t_mid_ms": np.asarray(d[f"{iv_run}__t_mid_ms"], dtype=float),
                     "ref_sweep_idx": int(d[f"{iv_run}__ref_sweep_idx"]),
                     "gas_puff_ms": float(d[f"{iv_run}__gas_puff_ms"]),
+                    "profiles_file": os.path.basename(prof_path),
                 }
-    # Fallback when profiles_summary_jun2026.npz has not been built yet.
-    _, Te, _, _, Te_err, _, t_ls = load_plasma_data(data_dir, iv_run, tip)
+
+    # Explicit fallback when profiles_summary_jun2026.npz is absent: compute
+    # v_ExB directly from saved Vp so it is never silently all-NaN.
+    warnings.warn(
+        f"{prof_path} not found (or missing IV run {iv_run}); falling back to "
+        f"{iv_run}-plasma-data.npz and computing E_r/B on the fly at B0={b0_g:g} G.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    Vp, Te, ne, _, Te_err, _, t_ls = load_plasma_data(data_dir, iv_run, tip)
     xpos, _, _, _ = load_sweep_axes(data_dir, iv_run, tip)
+    x_cm = np.asarray(xpos, dtype=float)
+    grads = radial_profile_gradients(
+        x_cm, ne, Te, Vp, x_center_cm=x_center_cm,
+        smooth_window=smooth_window, polyorder=smooth_poly, axis=0,
+    )
+    scales = local_drift_scales(ne, Te, b0_g, er_v_per_cm=grads.er_v_per_cm)
     return {
-        "x_cm": np.asarray(xpos, dtype=float),
+        "x_cm": x_cm,
         "Te": np.asarray(Te, dtype=float),
         "Te_err": np.asarray(Te_err, dtype=float),
-        "v_ExB_km_s": np.full_like(Te, np.nan, dtype=float),
+        "v_ExB_km_s": np.asarray(scales["v_ExB_m_s"], dtype=float) * 1e-3,
         "t_mid_ms": np.asarray(t_ls, dtype=float) * 1e3,
         "ref_sweep_idx": -1,
         "gas_puff_ms": np.nan,
+        "profiles_file": f"{iv_run}-plasma-data.npz",
     }
 
 
@@ -378,11 +408,19 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
     """Join a Mach line onto its paired IV run via ``iv_sweep_index`` and rescale ``v``.
 
     Replaces the placeholder constant ``T_e`` in ``<mach_run>-mach-flow-line-data.npz``
-    with the measured ``T_e(x, t)`` from ``MACH_TO_IV[mach_run]``, propagates
-    ``Te_err`` and calibration ``kappa_err_sys`` uncertainties, separates the
-    antisymmetric rotational profile ``v_rot(r)`` from uniform background
-    offsets, computes the cylindrical shearing rate ``gamma_E = r dOmega/dr``,
-    and compares directly against the paired P29 ``E_r / B`` drift profile.
+    with the measured ``T_e(x, t)`` from ``MACH_TO_IV[mach_run]`` (using
+    :func:`rescale_mach_velocity`, which follows ``mach.flow_velocity``'s
+    cold-ion ``gamma = 5/3`` sound speed), propagates ``Te_err`` and calibration
+    ``kappa_err_sys`` uncertainties, separates the antisymmetric rotational
+    profile ``v_rot(r)`` from uniform background offsets, computes the
+    cylindrical shearing rate ``gamma_E = r dOmega/dr``, and compares directly
+    against the paired P29 ``E_r / B`` drift profile on **matched** radial bands.
+
+    Also computes the Mach-space pre-bias increment ``dM_Y = M_Y - M_Y_pre``
+    before multiplying by ``c_s(T_e)``: a constant area-ratio calibration error
+    ``Delta kappa`` is additive in ``M`` (not ``v``), so subtracting in ``M``
+    cancels ``Delta M * c_s(x)`` even when ``T_e(x)`` is asymmetric, whereas
+    subtracting in ``v`` cancels a true pre-bias background velocity.
 
     ``te_mode`` controls which IV timestamp scales bin ``k`` (spanning sweeps
     ``swp - 1`` to ``swp``): ``"upper"`` uses ``Te[:, swp]`` (the bin's
@@ -405,7 +443,10 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
         kappa_err = np.asarray(m["kappa_err_sys"], dtype=float)
         M_by_axis = {a: np.asarray(m[f"M_{a}"], dtype=float) for a in axes}
 
-    iv = _load_paired_iv_fields(data_dir, iv_run, profiles_npz=profiles_npz, tip=tip)
+    iv = _load_paired_iv_fields(
+        data_dir, iv_run, profiles_npz=profiles_npz, tip=tip,
+        x_center_cm=x_center_cm, smooth_window=smooth_window, smooth_poly=smooth_poly,
+    )
     x_iv = iv["x_cm"]
 
     def _align_x(arr_2d):
@@ -445,19 +486,34 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
         rescaled[f"v_{a}_te_err"] = v_a_err
 
     # Rotational (Y) profile decomposition & flow shear.
+    MY = M_by_axis["Y"]
     vY = rescaled["v_Y_te"]
     pre_bins = (t_ms < -0.5) & np.any(np.isfinite(vY), axis=0)
-    if np.any(pre_bins):
+    has_pre_bias = bool(np.any(pre_bins))
+    if has_pre_bias:
         vY_pre = np.nanmedian(vY[:, pre_bins], axis=1, keepdims=True)
+        MY_pre = np.nanmedian(MY[:, pre_bins], axis=1, keepdims=True)
+        dvY = vY - vY_pre
+        dvY_dM = rescale_mach_velocity(MY - MY_pre, Te_bin, ion_mu)
     else:
-        vY_pre = np.zeros((x_mach.size, 1), dtype=float)
-    dvY = vY - vY_pre
+        warnings.warn(
+            f"Mach run {mach_run}: no finite pre-bias bins (t_ms < -0.5 ms); "
+            "leaving pre-bias baseline and flow increments (dv_Y_te, dv_Y_dM) as NaN.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        vY_pre = np.full((x_mach.size, 1), np.nan, dtype=float)
+        dvY = np.full_like(vY, np.nan, dtype=float)
+        dvY_dM = np.full_like(vY, np.nan, dtype=float)
 
     r_cm, v_rot, v_sym = antisymmetric_rotation_profile(
         x_mach, vY, x_center_cm=x_center_cm, axis=0
     )
     _, dv_rot, dv_sym = antisymmetric_rotation_profile(
         x_mach, dvY, x_center_cm=x_center_cm, axis=0
+    )
+    _, dv_rot_dM, _ = antisymmetric_rotation_profile(
+        x_mach, dvY_dM, x_center_cm=x_center_cm, axis=0
     )
     # Pair P29 E_r/B onto the same positive radii r_cm by averaging left/right walls
     # (vExB_bin is already signed outward Er/B, so symmetric mean gives the radial speed).
@@ -489,7 +545,9 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
     gamma_instab = np.nan
     t_onset_ms = np.nan
     onset_path = onset_npz or os.path.join(data_dir, "onset_summary_jun2026.npz")
+    onset_file = ""
     if os.path.isfile(onset_path):
+        onset_file = os.path.basename(onset_path)
         with np.load(onset_path) as od:
             if f"{iv_run}__gamma_med_s" in od.files:
                 gamma_instab = float(od[f"{iv_run}__gamma_med_s"])
@@ -499,6 +557,9 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
     out = {
         "mach_run": mach_run,
         "iv_run": iv_run,
+        "profiles_file": iv["profiles_file"],
+        "onset_file": onset_file,
+        "has_pre_bias": has_pre_bias,
         "gas_puff_ms": float(iv["gas_puff_ms"]),
         "x_cm": x_mach,
         "r_cm": r_cm,
@@ -509,9 +570,11 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
         "v_ExB_bin_km_s": vExB_bin,
         "v_Y_pre_km_s": vY_pre[:, 0],
         "dv_Y_te": dvY,
+        "dv_Y_dM_te": dvY_dM,
         "v_rot_km_s": v_rot,
         "v_sym_km_s": v_sym,
         "dv_rot_km_s": dv_rot,
+        "dv_rot_dM_km_s": dv_rot_dM,
         "dv_sym_km_s": dv_sym,
         "v_ExB_r_km_s": vExB_r,
         "dv_dr_mach_s": shear_mach.dv_dr_s,
@@ -541,38 +604,39 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
             fin = vals[np.isfinite(vals)]
             return float(np.median(fin)) if fin.size > 0 else np.nan
 
+        def _ratio(num, den):
+            return (abs(num) / abs(den)
+                    if (np.isfinite(num) and np.isfinite(den) and abs(den) > 0)
+                    else np.nan)
+
+        # Matched-band comparisons on SHEAR_ANNULUS_R_CM (3-6 cm)
         vrot_ann = _peak_abs(v_rot[:, ref_bin], ann)
         dvrot_ann = _peak_abs(dv_rot[:, ref_bin], ann)
+        dvrot_dM_ann = _peak_abs(dv_rot_dM[:, ref_bin], ann)
         vexb_ann = _peak_abs(vExB_r[:, ref_bin], ann)
+        ge_mach_ann = _peak_abs(shear_mach.gamma_E_s[:, ref_bin], ann)
+        ge_dv_ann = _peak_abs(shear_dv.gamma_E_s[:, ref_bin], ann)
+        ge_exb_ann = _peak_abs(shear_exb.gamma_E_s[:, ref_bin], ann)
+
+        # Inner-wall (1.5-4 cm) E x B reference (kept explicitly separate from annulus)
         vexb_wall = _peak_abs(vExB_r[:, ref_bin], wall)
-        ge_mach = _peak_abs(shear_mach.gamma_E_s[:, ref_bin], ann)
-        ge_dv = _peak_abs(shear_dv.gamma_E_s[:, ref_bin], ann)
-        ge_exb = _peak_abs(shear_exb.gamma_E_s[:, ref_bin], wall)
+        ge_exb_wall = _peak_abs(shear_exb.gamma_E_s[:, ref_bin], wall)
 
         out.update({
             "ref_v_rot_ann_km_s": vrot_ann,
             "ref_dv_rot_ann_km_s": dvrot_ann,
+            "ref_dv_rot_dM_ann_km_s": dvrot_dM_ann,
             "ref_v_sym_ann_km_s": _med(v_sym[:, ref_bin], ann),
             "ref_v_ExB_ann_km_s": vexb_ann,
             "ref_v_ExB_wall_km_s": vexb_wall,
-            "ref_ratio_vrot_to_vExB_ann": (
-                abs(vrot_ann) / abs(vexb_ann)
-                if (np.isfinite(vrot_ann) and np.isfinite(vexb_ann) and abs(vexb_ann) > 0)
-                else np.nan
-            ),
-            "ref_ratio_dvrot_to_vExB_wall": (
-                abs(dvrot_ann) / abs(vexb_wall)
-                if (np.isfinite(dvrot_ann) and np.isfinite(vexb_wall) and abs(vexb_wall) > 0)
-                else np.nan
-            ),
-            "ref_gamma_E_mach_s": ge_mach,
-            "ref_gamma_E_dv_s": ge_dv,
-            "ref_gamma_E_ExB_s": ge_exb,
-            "ref_ratio_gammaE_to_gamma": (
-                abs(ge_mach) / gamma_instab
-                if (np.isfinite(ge_mach) and np.isfinite(gamma_instab) and gamma_instab > 0)
-                else np.nan
-            ),
+            "ref_ratio_vrot_to_vExB_ann": _ratio(vrot_ann, vexb_ann),
+            "ref_ratio_dvrot_to_vExB_ann": _ratio(dvrot_ann, vexb_ann),
+            "ref_ratio_dvrot_dM_to_vExB_ann": _ratio(dvrot_dM_ann, vexb_ann),
+            "ref_gamma_E_mach_ann_s": ge_mach_ann,
+            "ref_gamma_E_dv_ann_s": ge_dv_ann,
+            "ref_gamma_E_ExB_ann_s": ge_exb_ann,
+            "ref_gamma_E_ExB_wall_s": ge_exb_wall,
+            "ref_ratio_gammaE_to_gamma": _ratio(ge_mach_ann, gamma_instab),
         })
     return out
 
@@ -656,6 +720,8 @@ def batch_rescaled_summary(data_dir=DATA_DIR, runs=None, *, profiles_npz=None,
         for k, v in res.items():
             if isinstance(v, str):
                 payload[f"{r}__{k}"] = np.str_(v)
+            elif isinstance(v, (bool, np.bool_)):
+                payload[f"{r}__{k}"] = np.bool_(v)
             elif isinstance(v, (int, np.integer)):
                 payload[f"{r}__{k}"] = np.int64(v)
             elif isinstance(v, (float, np.floating)):
@@ -679,18 +745,19 @@ def batch_rescaled_summary(data_dir=DATA_DIR, runs=None, *, profiles_npz=None,
 
 
 def print_rescaled_summary(npz_path=None):
-    """Print measured-Te Mach rotation & shear comparison against P29 E x B."""
+    """Print matched-band (r in 3-6 cm) measured-Te Mach vs. P29 E x B & shear."""
     npz_path = npz_path or os.path.join(DATA_DIR, RESCALED_OUT_NAME)
     with np.load(npz_path) as d:
         runs = [r for r in sorted(MACH_TO_IV) if f"{r}__ref_bin_idx" in d.files]
-        print("\n=== Measured-Te Mach Rotation (P33) vs. E x B Drift (P29) & Flow Shear ===")
+        print("\n=== Matched-Band (r in 3-6 cm) Measured-Te Mach (P33) vs. E x B (P29) & Shear ===")
         print(
             f"{'Mach':>4} {'IV':>3} {'Puff':>5} {'t_bin':>6} {'v_rot':>7} {'dv_rot':>7} "
-            f"{'vExB_w':>7} {'dv/ExB':>7} {'gE_M[/ms]':>10} {'gE_ExB':>8} {'g_in':>7} {'|gE|/g':>7}"
+            f"{'dv_dM':>7} {'vExB_a':>7} {'dv/ExB':>7} {'gE_M[/ms]':>10} {'gE_ExB':>8} "
+            f"{'g_in':>7} {'|gE|/g':>7}"
         )
         for r in runs:
-            ge_m = float(d[f"{r}__ref_gamma_E_mach_s"]) * 1e-3
-            ge_e = float(d[f"{r}__ref_gamma_E_ExB_s"]) * 1e-3
+            ge_m = float(d[f"{r}__ref_gamma_E_mach_ann_s"]) * 1e-3
+            ge_e = float(d[f"{r}__ref_gamma_E_ExB_ann_s"]) * 1e-3
             g_in = float(d[f"{r}__gamma_instab_s"]) * 1e-3
             rat_g = float(d[f"{r}__ref_ratio_gammaE_to_gamma"])
             gin_s = f"{g_in:6.2f}" if np.isfinite(g_in) else "   ---"
@@ -700,8 +767,9 @@ def print_rescaled_summary(npz_path=None):
                 f"{float(d[f'{r}__ref_bin_t_ms']):6.2f} "
                 f"{float(d[f'{r}__ref_v_rot_ann_km_s']):+7.2f} "
                 f"{float(d[f'{r}__ref_dv_rot_ann_km_s']):+7.2f} "
-                f"{float(d[f'{r}__ref_v_ExB_wall_km_s']):+7.2f} "
-                f"{float(d[f'{r}__ref_ratio_dvrot_to_vExB_wall']):7.2f} "
+                f"{float(d[f'{r}__ref_dv_rot_dM_ann_km_s']):+7.2f} "
+                f"{float(d[f'{r}__ref_v_ExB_ann_km_s']):+7.2f} "
+                f"{float(d[f'{r}__ref_ratio_dvrot_to_vExB_ann']):7.2f} "
                 f"{ge_m:+10.1f} {ge_e:+8.1f} {gin_s:>7} {rg_s:>7}"
             )
 

@@ -103,6 +103,7 @@ Documented directly from the raw HDF5 files and run logs so downstream scripts d
    - **Run `29`:** Two-phase 31×31 plane (`<Hermes> p29_LP` on shots 1–4805, `<Hades> p25_LP` on shots 4806–9610). Do not cross-correlate P29 directly against P25; correlate each against stationary P33 (`scope/C5`). Also, `<Hades>` live encoder positions jitter by ~5 µm (`31×34` unique values at 3 decimals vs. `31×31` at 2 decimals), so 2D gridding should snap to the planned 0.5 cm grid.
    - **Run `30` (1 kG axial line):** P25 (`Hades`) and P29 (`Hermes`) sit `1.0 cm` apart in `y` (`+0.5 cm` vs. `-0.5 cm`).
 6. **`xcorr` frequency resolution:** At the 5 MHz scope sampling rate, the default `NPERSEG = 4096` gives `df = 1220.7 Hz` (adequate for 2D coherence/phase maps, where the ~4.2 kHz mode spans the `3.66` and `4.88 kHz` bins). Use longer segments / full-window FFTs (`df <= 330 Hz`) for fine dispersion or `f(B0)` tracking.
+7. **Cold-ion sound speed in Mach velocities:** `data_analysis.plasma.mach.flow_velocity` / `rescale_mach_velocity` use `ion_sound_speed(T_e, mu=4, gamma=5/3)` with `T_i = 0`. At high puff (`40–45 ms`) where `T_e ~ 0.5 eV` approaches `T_i`, omitting `T_i` underestimates `c_s` (and therefore lower-bounds `v_rot(P33) / v_ExB(P29)`).
 
 ---
 

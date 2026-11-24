@@ -181,26 +181,33 @@ def antisymmetric_rotation_profile(x_cm, v_perp, x_center_cm=0.0, axis=0):
     )
 
 
-def radial_flow_shear(r_or_x_cm, v_theta_km_s, *, x_center_cm=None,
-                      smooth_window=1, polyorder=2, axis=0, r_min_cm=0.5):
+def radial_flow_shear(r_cm, v_theta_km_s, *, smooth_window=1, polyorder=2,
+                      axis=0, r_min_cm=0.5):
     """Compute velocity gradient ``dv_theta/dr``, ``Omega``, and shear ``gamma_E``.
 
-    Accepts either a purely radial coordinate ``r_cm >= 0`` (when
-    ``x_center_cm=None``, e.g. from :func:`antisymmetric_rotation_profile`) or
-    a full-chord coordinate ``x_cm`` together with ``x_center_cm``.
+    Expects a non-negative radial coordinate ``r_cm >= 0`` and azimuthal
+    velocity ``v_theta_km_s`` [km/s] (e.g. from :func:`antisymmetric_rotation_profile`
+    for a 1-D chord or azimuthally averaged :func:`polar_components` for a 2-D
+    plane). Passing negative ``r_cm`` raises :class:`ValueError` so raw signed
+    full-chord ``(x_cm, v_y)`` scans cannot be passed by mistake.
 
     Unit conversion: ``(km/s) / cm = (1e3 m/s) / (1e-2 m) = 1e5 s^-1``.
 
     Returns :class:`FlowShear` ``(dv_dr_s, omega_rad_s, gamma_E_s)``; points
-    with ``r < r_min_cm`` are masked to ``NaN`` in ``omega_rad_s`` and
+    with ``r_cm < r_min_cm`` are masked to ``NaN`` in ``omega_rad_s`` and
     ``gamma_E_s`` to avoid ``1/r`` amplification near the rotation axis.
     """
-    coord = np.asarray(r_or_x_cm, dtype=float)
+    coord = np.asarray(r_cm, dtype=float)
     v = np.asarray(v_theta_km_s, dtype=float)
     if coord.ndim != 1 or coord.size < 3:
-        raise ValueError("coordinate array must be 1-D with at least 3 points")
+        raise ValueError("r_cm must be a 1-D array with at least 3 points")
+    if np.any(coord < 0.0):
+        raise ValueError(
+            "r_cm must be non-negative radial coordinates; convert a full chord "
+            "(x_cm, v_y) via antisymmetric_rotation_profile() first."
+        )
     if v.shape[axis] != coord.size:
-        raise ValueError(f"coordinate length ({coord.size}) does not match v_theta.shape[{axis}]")
+        raise ValueError(f"r_cm length ({coord.size}) does not match v_theta.shape[{axis}]")
 
     vm = np.moveaxis(v, axis, 0)
     nx = vm.shape[0]
@@ -236,17 +243,9 @@ def radial_flow_shear(r_or_x_cm, v_theta_km_s, *, x_center_cm=None,
 
     # Unit conversion: (km/s) / cm = 1e5 s^-1.
     KM_S_PER_CM_TO_INV_S = 1e5
-    if x_center_cm is not None:
-        r = np.abs(coord - float(x_center_cm))
-        sgn = np.sign(coord - float(x_center_cm))
-        bshape = (nx,) + (1,) * (vm.ndim - 1)
-        dv_dr_s = dv_dc * sgn.reshape(bshape) * KM_S_PER_CM_TO_INV_S
-        r_b = r.reshape(bshape)
-    else:
-        r = coord
-        bshape = (nx,) + (1,) * (vm.ndim - 1)
-        dv_dr_s = dv_dc * KM_S_PER_CM_TO_INV_S
-        r_b = r.reshape(bshape)
+    bshape = (nx,) + (1,) * (vm.ndim - 1)
+    dv_dr_s = dv_dc * KM_S_PER_CM_TO_INV_S
+    r_b = coord.reshape(bshape)
 
     r_ok = r_b >= float(r_min_cm)
     r_safe = np.where(r_ok, r_b, 1.0)

@@ -133,6 +133,57 @@ class TestMachRescalingAndFlowShear(unittest.TestCase):
         np.testing.assert_allclose(sh_flat.dv_dr_s, 0.0, atol=1e-12)
         np.testing.assert_allclose(sh_flat.gamma_E_s, -(2.0 / r) * 1e5, rtol=1e-12)
 
+        # Negative coordinates (raw full-chord x_cm) must be rejected explicitly
+        with self.assertRaises(ValueError):
+            radial_flow_shear(np.array([-2.0, -1.0, 0.0, 1.0, 2.0]), np.ones(5))
+
+    def test_x_center_mismatch_raises_and_missing_prebias_warns_nan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. profiles_summary with x_center_cm=1.0 must fail if caller asks for 2.0
+            prof_p = os.path.join(tmp, "profiles_summary_jun2026.npz")
+            x = np.arange(-6.0, 8.1, 1.0)
+            np.savez(
+                prof_p,
+                **{
+                    "06__x_cm": x,
+                    "06__Te": np.full((x.size, 2), 3.0),
+                    "06__Te_err": np.full((x.size, 2), 0.1),
+                    "06__v_ExB_m_s": np.full((x.size, 2), 1500.0),
+                    "06__t_mid_ms": np.array([0.1, 1.1]),
+                    "06__ref_sweep_idx": np.int64(1),
+                    "06__gas_puff_ms": np.float64(23.0),
+                    "06__x_center_cm": np.float64(1.0),
+                },
+            )
+            with self.assertRaises(ValueError):
+                jml._load_paired_iv_fields(tmp, "06", profiles_npz=prof_p, x_center_cm=2.0)
+
+            # 2. Mach line with no pre-bias bins (all t_ms >= 0) warns and sets dv_Y_te=NaN
+            ifn = os.path.join(tmp, "08-He-800G-bias40V-Mach-p33-line_2026-06-11.hdf5")
+            with open(ifn, "wb") as f:
+                f.write(b"")
+            mach_npz = jml.line_npz_path(ifn)
+            np.savez(
+                mach_npz,
+                iv_run=np.str_("06"),
+                pos=x,
+                t_ms=np.array([0.6, 1.6]),
+                iv_sweep_index=np.array([0, 1], dtype=np.int32),
+                axes=np.array(["X", "Y"]),
+                ion_mu=np.float64(4.0),
+                K_hutchinson=np.float64(0.45),
+                kappa=np.array([1.0, 1.0]),
+                kappa_err_sys=np.array([0.05, 0.05]),
+                M_X=np.zeros((x.size, 2)),
+                M_Y=np.tile(0.2 * np.sign(x - 1.0)[:, None], (1, 2)),
+            )
+            with self.assertWarns(RuntimeWarning):
+                res = jml.rescale_line_with_iv("08", data_dir=tmp, profiles_npz=prof_p)
+            self.assertFalse(res["has_pre_bias"])
+            self.assertTrue(np.all(np.isnan(res["dv_Y_te"])))
+            self.assertTrue(np.all(np.isnan(res["dv_Y_dM_te"])))
+            self.assertEqual(res["profiles_file"], "profiles_summary_jun2026.npz")
+
     def test_batch_rescaled_summary_settings_validation_and_partial_overwrite(self):
         fake = {
             "mach_run": "08", "iv_run": "06", "gas_puff_ms": 23.0,
