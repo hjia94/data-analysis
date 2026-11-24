@@ -111,6 +111,27 @@ class TestPlasmaProfiles(unittest.TestCase):
         )
         self.assertGreater(float(sc["nu_ei_s"]), 1e6)
 
+        # Regression: v_ExB must still use true B_T when ne or Te is NaN
+        sc_nan = local_drift_scales(np.nan, 4.0, 800.0, er_v_per_cm=1.0)
+        self.assertAlmostEqual(float(sc_nan["v_ExB_m_s"]), 1250.0, places=6)
+
+    def test_savgol_boundary_error_matches_monte_carlo(self):
+        # Unequal uncertainties across the edge window expose conv-vs-dot order.
+        x = np.arange(9, dtype=float)
+        vp = 2.0 * x
+        vp_err = np.array([0.1, 0.2, 0.5, 1.0, 1.5, 1.0, 0.5, 0.2, 0.1])
+        ne = np.full_like(x, 1e12)
+        te = np.full_like(x, 3.0)
+        g = radial_profile_gradients(
+            x, ne, te, vp, vp_err=vp_err, smooth_window=5, polyorder=2
+        )
+        from scipy.signal import savgol_filter
+        rng = np.random.default_rng(7)
+        trials = vp[None, :] + rng.normal(0.0, vp_err[None, :], size=(20000, x.size))
+        derivs = savgol_filter(trials, 5, 2, deriv=1, delta=1.0, axis=1)
+        mc_std = np.std(derivs, axis=0)
+        np.testing.assert_allclose(g.er_err_v_per_cm, mc_std, rtol=0.03)
+
 
 class TestJun2026ProfilesAdapter(unittest.TestCase):
     def test_classify_sweeps_and_reference_selection(self):
@@ -159,6 +180,24 @@ class TestJun2026ProfilesAdapter(unittest.TestCase):
             with np.load(out_npz) as d:
                 self.assertEqual(int(d["00__smooth_window"]), 7)
                 self.assertEqual(int(d["01__smooth_window"]), 5)
+
+    def test_primary_flag_frac_excludes_nans_from_denominator(self):
+        x = np.arange(-4.0, 7.0, 1.0)  # centered at x_center=1.0: core|wall is r<=4 (9 pts)
+        n = x.size
+        ne = np.full(n, 1e12)
+        te = np.full(n, 3.0)
+        vp = np.full(n, 20.0)
+        vf = np.full(n, 10.0)
+        # In core|wall (indices 1..9 -> 9 pts): 3 flagged (>6), 3 normal (3.5), 3 NaN
+        lam = np.full(n, 3.5)
+        lam[1:4] = 8.0
+        lam[4:7] = np.nan
+        g = radial_profile_gradients(x, ne, te, vp, x_center_cm=1.0, smooth_window=1)
+        sc = local_drift_scales(ne, te, 800.0, k_perp_cm=0.4, dln_ne_dr_cm=g.dln_ne_dx,
+                                dln_te_dr_cm=g.dln_te_dx, er_v_per_cm=g.er_v_per_cm)
+        s = jpr._inner_wall_summary(x, ne, te, vp, vf, lam, g, sc, x_center_cm=1.0)
+        # 3 flagged out of 6 finite points = 0.5 (not 3/9 = 0.333)
+        self.assertAlmostEqual(s["primary_flag_frac"], 0.5, places=12)
 
 
 if __name__ == "__main__":

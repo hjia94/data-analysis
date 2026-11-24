@@ -215,6 +215,12 @@ def _inner_wall_summary(x_cm, ne, te, vp, vf, lam, grads, scales, x_center_cm):
     te_core = _med(te, core)
     te_ring = _med(te, ring)
 
+    lam_cw = lam[core | wall]
+    lam_fin = lam_cw[np.isfinite(lam_cw)]
+    primary_flag_frac = (
+        float(np.mean(lam_fin > PRIMARY_LAMBDA_THRESH)) if lam_fin.size > 0 else np.nan
+    )
+
     return {
         "x_steep_cm": x_steep,
         "ne_core_cm3": ne_core,
@@ -245,8 +251,7 @@ def _inner_wall_summary(x_cm, ne, te, vp, vf, lam, grads, scales, x_center_cm):
         "f_star_n_wall_hz": _med(scales["omega_star_n_rad_s"], wall) / (2.0 * np.pi),
         "f_star_T_wall_hz": _med(scales["omega_star_T_rad_s"], wall) / (2.0 * np.pi),
         "f_star_p_wall_hz": _med(scales["omega_star_p_rad_s"], wall) / (2.0 * np.pi),
-        "primary_flag_frac": float(np.nanmean(lam[core | wall] > PRIMARY_LAMBDA_THRESH))
-        if np.any(np.isfinite(lam[core | wall])) else np.nan,
+        "primary_flag_frac": primary_flag_frac,
     }
 
 

@@ -131,7 +131,8 @@ def _diff_and_error(x, y, y_err=None, *, smooth_window=1, polyorder=2, axis=0):
     # evaluate savgol_filter on finite slices, while leaving NaN locations NaN.
     dy = np.full_like(ym, np.nan, dtype=float)
     derr = np.full_like(ym, np.nan, dtype=float) if em is not None else None
-    coeffs = savgol_coeffs(smooth_window, polyorder, deriv=1, delta=dx, use="conv")
+    # use="dot" aligns coeffs[k] directly with forward window samples y[i0 + k].
+    coeffs = savgol_coeffs(smooth_window, polyorder, deriv=1, delta=dx, use="dot")
     c2 = coeffs ** 2
     half = smooth_window // 2
 
@@ -160,20 +161,22 @@ def _diff_and_error(x, y, y_err=None, *, smooth_window=1, polyorder=2, axis=0):
         if flat_e is not None:
             ecol = flat_e[:, j]
             e2 = np.where(np.isfinite(ecol), ecol ** 2, np.nan)
-            # Exact convolution of squared weights over interior points; boundary
-            # uses endpoint Savitzky-Golay coefficients at each position.
+            # Exact dot-product variance propagation over interior and boundary
+            # Savitzky-Golay polynomial fits (use="dot" matches forward slices).
             out_var = np.full(nx, np.nan)
             if nx >= smooth_window:
                 # Interior: i in [half, nx - half - 1]
                 win_e2 = np.lib.stride_tricks.sliding_window_view(e2, smooth_window)
                 out_var[half:nx - half] = np.sum(win_e2 * c2[None, :], axis=1)
-                # Left and right boundaries: exact pos-shifted Savitzky-Golay coeffs
+                # Left and right boundaries: exact pos-shifted dot-product coeffs
                 for pos in range(half):
-                    cl = savgol_coeffs(smooth_window, polyorder, deriv=1, delta=dx, pos=pos)
+                    cl = savgol_coeffs(
+                        smooth_window, polyorder, deriv=1, delta=dx, pos=pos, use="dot"
+                    )
                     out_var[pos] = np.sum((cl ** 2) * e2[:smooth_window])
                     cr = savgol_coeffs(
                         smooth_window, polyorder, deriv=1, delta=dx,
-                        pos=smooth_window - 1 - pos,
+                        pos=smooth_window - 1 - pos, use="dot",
                     )
                     out_var[nx - 1 - pos] = np.sum((cr ** 2) * e2[nx - smooth_window:])
             flat_de[:, j] = np.sqrt(out_var)
@@ -411,7 +414,9 @@ def local_drift_scales(ne_cm3, te_ev, b0_g, *, mu=4.0, Z=1,
     B_T = np.asarray(b0_g, dtype=float) * 1e-4  # G -> T
     mi_kg = float(mu) * M_PROTON
 
-    valid = np.isfinite(ne) & np.isfinite(te) & (ne > 0.0) & (te > 0.0) & (B_T > 0.0)
+    B_valid = np.isfinite(B_T) & (B_T > 0.0)
+    B_pos = np.where(B_valid, B_T, 1.0)
+    valid = np.isfinite(ne) & np.isfinite(te) & (ne > 0.0) & (te > 0.0) & B_valid
     ne_safe = np.where(valid, ne, 1.0)
     te_safe = np.where(valid, te, 1.0)
     B_safe = np.where(valid, B_T, 1.0)
@@ -445,8 +450,9 @@ def local_drift_scales(ne_cm3, te_ev, b0_g, *, mu=4.0, Z=1,
 
     if er_v_per_cm is not None:
         er = np.asarray(er_v_per_cm, dtype=float)
-        # E_r [V/m] = er [V/cm] * 1e2; v_ExB = E_r / B [m/s]
-        out["v_ExB_m_s"] = np.where(np.isfinite(er) & (B_T > 0.0), (er * 1e2) / B_safe, np.nan)
+        # E_r [V/m] = er [V/cm] * 1e2; v_ExB = E_r / B [m/s] (depends only on Er & B,
+        # never on ne/Te validity, so use B_pos rather than ne/Te-gated B_safe).
+        out["v_ExB_m_s"] = np.where(np.isfinite(er) & B_valid, (er * 1e2) / B_pos, np.nan)
 
     if k_perp_cm is not None:
         kp_m = np.asarray(k_perp_cm, dtype=float) * 1e2  # cm^-1 -> m^-1
