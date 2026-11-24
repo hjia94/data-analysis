@@ -26,7 +26,7 @@ Always invoke scripts with the repo virtual environment (`.venv\Scripts\python.e
 | `Jun2026_mach_line.py` | `08`–`14` (puff scan 23–45 ms, P33 line) | `08`–`14-mach-flow-line-data.npz` | Calibrated `M_X`, `M_Y` and assumed-`Te` velocities binned to paired IV sweeps (`MACH_TO_IV`). |
 | `Jun2026_mach_flow.py` | `32` (41×41 P33 3D Mach plane) | `32-mach-flow-data.npz`, slider HTML | Calibrated 3D flow map (`v_X`, `v_Y`, `v_Z`, polar `v_r`/`v_theta`). |
 | `Jun2026_xcorr.py` | `26`–`31` (B-dot/LP planes & axial lines) | `26`–`31-xcorr-data.npz` | Ensemble Welch coherence `gamma2(f)` and cross-phase `phase(f)` with per-pair `(pos_x, pos_y)`. |
-| `Jun2026_onset.py` | `00`–`06`, `08`–`14`, `26`–`31` | `onset_summary_jun2026.npz` | Per-shot & onset-aligned instability `t_onset`, exponential growth rate `gamma`, and fine-resolution `f0` (`df <= 330 Hz`). |
+| `Jun2026_onset.py` | `00`–`06`, `08`–`14`, `26`–`31` | `onset_summary_jun2026.npz` | Per-shot & onset-aligned instability `t_onset`, exponential growth rate `gamma`, and post-onset full-window `f0` (Rayleigh `1/T_win ~ 300–770 Hz`). |
 | `Jun2026_plot.py` | Saved `.npz` files | Static PNGs (`Jun2026/`) | Publication/diagnostic figures for IV lines, IV+Isat combined, and xcorr planes. |
 | `Jun2026_slider.py` | Saved `.npz` files | Standalone `.html` sliders | Scrubbable pages for IV lines, Isat FFTs, and multi-pair xcorr scans. |
 

@@ -22,9 +22,10 @@ For every run this computes:
    - onset-aligned ensemble fit on ``median_shot(env(t - t_onset))`` (removes
      shot-to-shot onset-time jitter without smearing the ramp).
 4. High-resolution post-onset dominant frequency ``f_peak_hz``, spectral FWHM,
-   and peak-to-median SNR via zero-padded full-window FFT (``df <= 330 Hz``,
-   parabolically refined to ~30 Hz) -- complementing ``Jun2026_xcorr.py``'s
-   coarser 1.22 kHz Welch bins.
+   Rayleigh resolution ``f_rayleigh_hz = 1 / T_win``, and peak-to-median SNR
+   via zero-padded full-window Hann FFT (``1/T_win ~ 300-770 Hz`` depending on
+   post-onset window length ``1.3-3.3 ms``, parabolically refined around the
+   peak; note ``f_fwhm_hz`` has a Hann window floor of ``~1.44 / T_win``).
 
 Writes ``onset_summary_jun2026.npz`` into ``DATA_DIR`` so downstream profile
 and dispersion modules (e.g. pre- vs. post-onset IV sweep selection) can load
@@ -190,18 +191,34 @@ def analyze_envelope_stack(t_s, stack, *, win_s=WIN_S, step_s=STEP_S,
     )
     t_onset_ms = t_onset_s * 1e3
 
-    # Quiet baseline noise floor per shot from pre-onset / early post-transient window.
-    early = (t_env_ms >= t_min_onset_ms) & (t_env_ms <= t_min_onset_ms + 0.4)
-    if np.any(early):
-        noise_floor = np.nanmedian(env[:, early], axis=1)
-    else:
-        noise_floor = np.nanpercentile(env, 10, axis=1)
+    # Quiet baseline noise floor per shot: strictly pre-onset so early onsets
+    # (e.g. inside 0.4-0.8 ms) cannot contaminate their own noise floor.
+    nshot = stack.shape[0]
+    post_mask = t_env_ms >= t_min_onset_ms
+    noise_floor = np.full(nshot, np.nan, dtype=float)
+    early_default = (t_env_ms >= t_min_onset_ms) & (t_env_ms <= t_min_onset_ms + 0.4)
+    for k in range(nshot):
+        if np.isfinite(t_onset_ms[k]):
+            # Prefer a margin (>= 0.15 ms) before onset so the rising foot of the
+            # Hann window does not lift the baseline estimate.
+            pre_hi = min(t_min_onset_ms + 0.4, t_onset_ms[k] - 0.15)
+            pre = (t_env_ms >= t_min_onset_ms) & (t_env_ms <= pre_hi)
+            if np.sum(pre) >= 3 and np.any(np.isfinite(env[k, pre])):
+                noise_floor[k] = float(np.nanmedian(env[k, pre]))
+            else:
+                strict_pre = (t_env_ms >= t_min_onset_ms) & (t_env_ms < t_onset_ms[k])
+                if np.any(strict_pre) and np.any(np.isfinite(env[k, strict_pre])):
+                    noise_floor[k] = float(np.nanmin(env[k, strict_pre]))
+                elif np.any(post_mask) and np.any(np.isfinite(env[k, post_mask])):
+                    noise_floor[k] = float(np.nanmin(env[k, post_mask]))
+        elif np.any(early_default) and np.any(np.isfinite(env[k, early_default])):
+            noise_floor[k] = float(np.nanmedian(env[k, early_default]))
+        elif np.any(np.isfinite(env[k])):
+            noise_floor[k] = float(np.nanpercentile(env[k], 10))
 
     # Peak relative RMS after t_min_onset_ms (excludes t=0 switching transient).
-    post_mask = t_env_ms >= t_min_onset_ms
     peak_rel_rms = np.nanmax(env[:, post_mask], axis=1) if np.any(post_mask) else np.nanmax(env, axis=1)
 
-    nshot = stack.shape[0]
     gamma_s = np.full(nshot, np.nan, dtype=float)
     gamma_err_s = np.full(nshot, np.nan, dtype=float)
     gamma_r2 = np.full(nshot, np.nan, dtype=float)
@@ -246,6 +263,8 @@ def analyze_envelope_stack(t_s, stack, *, win_s=WIN_S, step_s=STEP_S,
     f_tmin_ms = min(max(t_onset_med_ms, 1.5), 3.5) if np.isfinite(t_onset_med_ms) else 1.5
     f_tmax_ms = min(float(t_s[-1] * 1e3), 4.8)
     f0, f1 = clip_time_window(t_s, f_tmin_ms, f_tmax_ms)
+    f_win_dur_s = float((f1 - f0) * dt_s)
+    f_rayleigh_hz = 1.0 / f_win_dur_s if f_win_dur_s > 0.0 else np.nan
     freq_res = dominant_frequency(
         stack[:, f0:f1], dt_s, fband=fband_hz, pad_factor=freq_pad_factor
     )
@@ -290,6 +309,7 @@ def analyze_envelope_stack(t_s, stack, *, win_s=WIN_S, step_s=STEP_S,
         "gamma_aligned_r2": float(aligned_fit.r2),
         "f_win_tmin_ms": float(f_tmin_ms),
         "f_win_tmax_ms": float(f_tmax_ms),
+        "f_rayleigh_hz": float(f_rayleigh_hz),
         "f_peak_hz": float(freq_res.f_peak_hz),
         "f_fwhm_hz": float(freq_res.f_fwhm_hz),
         "f_peak_snr": float(freq_res.peak_snr),
@@ -316,32 +336,85 @@ def analyze_run(spec, data_dir=DATA_DIR, max_shots=DEFAULT_MAX_SHOTS):
     return res
 
 
+def _run_settings_dict(max_shots):
+    """Per-run analysis settings persisted under ``<run>__*`` for staleness checks."""
+    return {
+        "onset_thresh": float(ONSET_THRESH),
+        "win_ms": float(WIN_S * 1e3),
+        "step_ms": float(STEP_S * 1e3),
+        "t_min_onset_ms": float(T_MIN_ONSET_MS),
+        "sustain_bins": int(SUSTAIN_BINS),
+        "max_shots": -1 if max_shots is None else int(max_shots),
+    }
+
+
+def _run_settings_mismatch(npz_data, run_num, want):
+    """Return human-readable diffs between a stored run and requested settings."""
+    diffs = []
+    for field, val in want.items():
+        k = f"{run_num}__{field}"
+        if k not in npz_data.files:
+            diffs.append(f"{field}: missing in npz (requested {val:g})")
+            continue
+        if isinstance(val, int):
+            got = int(npz_data[k])
+            if got != val:
+                diffs.append(f"{field}: stored {got} != requested {val}")
+        else:
+            got = float(npz_data[k])
+            if not np.isclose(got, val, atol=1e-9, rtol=0.0):
+                diffs.append(f"{field}: stored {got:g} != requested {val:g}")
+    return diffs
+
+
 def batch_all(data_dir=DATA_DIR, runs=None, max_shots=DEFAULT_MAX_SHOTS,
               out_path=None, overwrite=False):
     """Run onset/growth/frequency extraction across :data:`ONSET_RUNS` -> npz path.
 
     ``runs`` may be a subset of run numbers (e.g. ``["06", "00", "02"]``).
-    Existing runs in ``out_path`` are skipped unless ``overwrite=True``.
+    Settings are stored **per run** (``<run>__onset_thresh``, ``<run>__win_ms``,
+    etc.) so merging never mislabels earlier runs. When ``overwrite=False``,
+    already-stored requested runs are validated against the current settings
+    and any mismatch raises :class:`ValueError` up front. When
+    ``overwrite=True``, passing ``runs=None`` rebuilds the whole file while
+    passing a subset replaces only those runs' keys (preserving other runs).
     """
     specs = (ONSET_RUNS if runs is None
              else tuple(ONSET_RUN_MAP[r] for r in runs))
     out_path = out_path or os.path.join(data_dir, OUT_NAME)
-    if overwrite and os.path.isfile(out_path):
+    want = _run_settings_dict(max_shots)
+
+    if overwrite and runs is None and os.path.isfile(out_path):
         os.remove(out_path)
 
     existing_runs = set()
+    drop_keys = []
     if os.path.isfile(out_path):
         with np.load(out_path) as d:
             existing_runs = {
                 k.split("__", 1)[0] for k in d.files if k.endswith("__t_onset_med_ms")
             }
+            if overwrite:
+                # Partial overwrite: drop only the requested runs' old keys (and
+                # legacy top-level settings so they cannot contradict per-run
+                # metadata), preserving all unrequested runs intact.
+                target_prefixes = tuple(f"{s.run_num}__" for s in specs)
+                drop_keys = [k for k in d.files if k.startswith(target_prefixes)]
+                existing_runs -= {s.run_num for s in specs}
+            else:
+                for spec in specs:
+                    if spec.run_num in existing_runs:
+                        diffs = _run_settings_mismatch(d, spec.run_num, want)
+                        if diffs:
+                            raise ValueError(
+                                f"{out_path}: stored run '{spec.run_num}' differs "
+                                f"from requested settings ({'; '.join(diffs)}); "
+                                "pass overwrite=True to regenerate")
+
+    # Drop legacy file-level setting keys if present; settings live per run.
+    drop_keys.extend(["onset_thresh", "win_ms", "step_ms", "t_min_onset_ms", "sustain_bins"])
 
     payload = {
-        "onset_thresh": np.float64(ONSET_THRESH),
-        "win_ms": np.float64(WIN_S * 1e3),
-        "step_ms": np.float64(STEP_S * 1e3),
-        "t_min_onset_ms": np.float64(T_MIN_ONSET_MS),
-        "sustain_bins": np.int64(SUSTAIN_BINS),
         "updated": np.str_(datetime.datetime.now().isoformat(timespec="seconds")),
     }
 
@@ -360,10 +433,14 @@ def batch_all(data_dir=DATA_DIR, runs=None, max_shots=DEFAULT_MAX_SHOTS,
                 payload[f"{p}__{k}"] = np.float64(v)
             else:
                 payload[f"{p}__{k}"] = np.asarray(v)
+        for sk, sv in want.items():
+            payload[f"{p}__{sk}"] = np.int64(sv) if isinstance(sv, int) else np.float64(sv)
         ran_any = True
 
     if ran_any or not os.path.isfile(out_path):
-        merge_save_npz(out_path, payload)
+        # Drop only obsolete keys not rewritten by the fresh payload.
+        stale_keys = [k for k in drop_keys if k not in payload]
+        merge_save_npz(out_path, payload, drop_keys=stale_keys)
         print(f"\nWrote {out_path}")
     return out_path
 
@@ -396,6 +473,10 @@ def load_onset_table(npz_path=None):
                 "gamma_aligned_s": float(d[f"{r}__gamma_aligned_s"]),
                 "gamma_aligned_err_s": float(d[f"{r}__gamma_aligned_err_s"]),
                 "gamma_aligned_r2": float(d[f"{r}__gamma_aligned_r2"]),
+                "f_win_tmin_ms": float(d[f"{r}__f_win_tmin_ms"]),
+                "f_win_tmax_ms": float(d[f"{r}__f_win_tmax_ms"]),
+                "f_rayleigh_hz": (float(d[f"{r}__f_rayleigh_hz"])
+                                  if f"{r}__f_rayleigh_hz" in d.files else np.nan),
                 "f_peak_hz": float(d[f"{r}__f_peak_hz"]),
                 "f_fwhm_hz": float(d[f"{r}__f_fwhm_hz"]),
                 "f_peak_snr": float(d[f"{r}__f_peak_snr"]),

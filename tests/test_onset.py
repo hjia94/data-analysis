@@ -2,7 +2,9 @@
 
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -120,6 +122,77 @@ class TestSignalOnsetHelpers(unittest.TestCase):
         self.assertLess(res["gamma_aligned_s"], 1.10 * gamma_true)
         unaligned_fit = fit_exponential_growth(res["t_env_ms"] * 1e-3, res["env_med"])
         self.assertGreater(res["gamma_aligned_s"], unaligned_fit.gamma)
+        # Rayleigh resolution matches 1 / T_win
+        expected_rayleigh = 1e3 / (res["f_win_tmax_ms"] - res["f_win_tmin_ms"])
+        self.assertAlmostEqual(res["f_rayleigh_hz"], expected_rayleigh, delta=5.0)
+
+    def test_early_onset_inside_0p4_to_0p8ms_still_fits_growth_rate(self):
+        dt = 1e-5
+        t = np.arange(500) * dt  # 0..5 ms
+        gamma_true = 4000.0
+        f_true = 4000.0
+        rng = np.random.default_rng(99)
+        rows = []
+        # Onset right around 0.60 ms (inside [0.4, 0.8] ms)
+        for _ in range(8):
+            g = 0.008 * np.exp(gamma_true * (t - 0.55e-3))
+            amp = 0.16 / np.sqrt(1.0 + (0.16 / g) ** 2)
+            phase = rng.uniform(0, 2 * np.pi)
+            rows.append(1.0 + amp * np.sin(2 * np.pi * f_true * t + phase) + rng.normal(0, 0.001, size=t.size))
+        res = jon.analyze_envelope_stack(t, np.vstack(rows))
+        self.assertLess(res["t_onset_med_ms"], 0.80)
+        self.assertTrue(np.isfinite(res["gamma_med_s"]))
+        self.assertGreater(res["gamma_med_s"], 0.65 * gamma_true)
+
+    def test_batch_all_per_run_settings_validation_and_partial_overwrite(self):
+        dt = 1e-5
+        t = np.arange(500) * dt
+        sig = 1.0 + 0.10 * np.sin(2 * np.pi * 4000.0 * t)[None, :]
+        base_res = jon.analyze_envelope_stack(t, sig)
+
+        def fake_analyze(spec, data_dir=None, max_shots=None):
+            r = dict(base_res)
+            r.update(
+                shot_nums=np.array([1]),
+                source_file=f"{spec.run_num}-fake.hdf5",
+                group=spec.group,
+                scope=spec.scope,
+                chan=spec.chan,
+                probe_label=spec.probe_label,
+                b0_g=spec.b0_g,
+                gas_puff_ms=spec.gas_puff_ms or 35.0,
+            )
+            return r
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_npz = os.path.join(tmp, "onset_summary.npz")
+            with mock.patch.object(jon, "analyze_run", side_effect=fake_analyze) as m_ar:
+                jon.batch_all(data_dir=tmp, runs=["00", "01"], max_shots=60, out_path=out_npz)
+                self.assertEqual(m_ar.call_count, 2)
+
+            # Settings stored per-run, not as top-level globals
+            with np.load(out_npz) as d:
+                self.assertIn("00__onset_thresh", d.files)
+                self.assertIn("01__max_shots", d.files)
+                self.assertNotIn("onset_thresh", d.files)
+
+            # Matching settings with overwrite=False skips without re-running
+            with mock.patch.object(jon, "analyze_run") as m_ar:
+                jon.batch_all(data_dir=tmp, runs=["00", "01"], max_shots=60, out_path=out_npz, overwrite=False)
+                m_ar.assert_not_called()
+
+            # Mismatched settings with overwrite=False fails fast
+            with self.assertRaises(ValueError) as ctx:
+                jon.batch_all(data_dir=tmp, runs=["00"], max_shots=120, out_path=out_npz, overwrite=False)
+            self.assertIn("overwrite=True", str(ctx.exception))
+
+            # Partial overwrite=True replaces ONLY run "00" and preserves run "01"
+            with mock.patch.object(jon, "analyze_run", side_effect=fake_analyze) as m_ar:
+                jon.batch_all(data_dir=tmp, runs=["00"], max_shots=120, out_path=out_npz, overwrite=True)
+                self.assertEqual(m_ar.call_count, 1)
+            with np.load(out_npz) as d:
+                self.assertEqual(int(d["00__max_shots"]), 120)
+                self.assertEqual(int(d["01__max_shots"]), 60)  # untouched!
 
 
 if __name__ == "__main__":
