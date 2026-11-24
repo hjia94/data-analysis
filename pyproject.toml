@@ -39,6 +39,8 @@ bapsflib = ["bapsflib"]
 # Collective Thomson scattering (data_analysis.plasma.cts) imports plasmapy and
 # astropy at module load.
 cts = ["plasmapy", "astropy"]
+# Analytic unit tests under tests/: `pip install -e ".[test]"` then `pytest tests/`.
+test = ["pytest"]
 
 [tool.setuptools.dynamic]
 version = { attr = "data_analysis.__version__" }
