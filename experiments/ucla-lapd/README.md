@@ -128,3 +128,14 @@
 | Mach number, two opposing orientations | [`mach_number`](../../src/data_analysis/plasma/mach.py#L95) | `M = (K/4)·ln(R_a/R_b)` — κ cancels in the ratio; swapping the arguments flips the sign |
 | Mach number, one orientation + known κ | [`mach_single`](../../src/data_analysis/plasma/mach.py#L105) | `M = (K/2)·ln(R/κ)`; limited by κ's systematic error, not shot noise |
 | Mach → velocity via sound speed | [`flow_velocity`](../../src/data_analysis/plasma/mach.py#L114) | `v = M·c_s ∝ sqrt(T_e)`; **`T_e` is an input assumption**, so a wrong `T_e` rescales every velocity without changing any diagnostic |
+
+## 12. B-dot probes and gridded field operators
+
+| Technique | Implementation | Where used |
+|---|---|---|
+| Coil calibration → volts-to-dB/dt (scalar, 3 areas, or 3×3 cross-talk matrix with gain) | [`inverse_area_matrix`](../../src/data_analysis/plasma/bdot.py#L33), [`voltage_to_bdot`](../../src/data_analysis/plasma/bdot.py#L58) | Aug-2026 `Aug2026_bdot` (unit area until C11/C13 are calibrated) |
+| Time integration dB/dt → B with drift baselines (`pretrigger` / `periodic` / `smooth`) | [`integrate_bdot`](../../src/data_analysis/plasma/bdot.py#L92) | Aug-2026: integration weights slow content by 1/f, so analyze the driven wave as a phasor or with `smooth` |
+| Single-frequency phasor (exact-f DFT, windowed, amplitude-normalized) | [`phasor`](../../src/data_analysis/plasma/fields.py#L271) | Aug-2026 188 kHz wave maps, phase-referenced to the record start |
+| Curl / J = curl B/μ₀ on a grid (complex phasor maps OK) | [`curl`](../../src/data_analysis/plasma/fields.py#L64), [`current_density`](../../src/data_analysis/plasma/fields.py#L86) | Aug-2026 run 30 field-aligned current map; div/curl ratio with an axis flipped as a sign check |
+| Per-cycle averages over a drive burst | [`cycle_means`](../../src/data_analysis/plasma/fields.py#L214) | Aug-2026 wave envelope |
+| Poynting, J·E, Faraday E_φ (symmetric about the axis), Biot–Savart A, volume integrals, AC conductivity | [`fields`](../../src/data_analysis/plasma/fields.py) | ported from the 2019 process-plasma B-dot analysis; not yet used by a campaign (needs E data or symmetry about the axis) |

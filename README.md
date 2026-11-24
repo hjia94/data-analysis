@@ -325,7 +325,7 @@ only from `data_analysis` — they never import another experiment. `compute_B/`
 
 | Folder | Campaign / purpose |
 |--------|--------------------|
-| [experiments/ucla-lapd/](experiments/ucla-lapd/) | LAPD campaigns, one folder per campaign (`Jan-2024`, `Nov-2024`, `Aug-2025`, `Mar-2026`, `Jun-2026`), plus campaign-independent tooling: `dump_campaign.py` (run-log phase-1 extractor, driven by `RUN_LOG_PROMPT.md`) and `interf_save.py`. The folder [README](experiments/ucla-lapd/README.md) indexes the DSP/analysis techniques used across campaigns; see also [Aug-2025](experiments/ucla-lapd/Aug-2025/README.md). |
+| [experiments/ucla-lapd/](experiments/ucla-lapd/) | LAPD campaigns, one folder per campaign (`Jan-2024`, `Nov-2024`, `Aug-2025`, `Mar-2026`, `Jun-2026`, `Aug-2026`), plus campaign-independent tooling: `dump_campaign.py` (run-log phase-1 extractor, driven by `RUN_LOG_PROMPT.md`) and `interf_save.py`. The folder [README](experiments/ucla-lapd/README.md) indexes the DSP/analysis techniques used across campaigns; see also [Aug-2025](experiments/ucla-lapd/Aug-2025/README.md). |
 | [experiments/object_tracking/](experiments/object_tracking/) | High-speed-camera ball-tracking notebook (code now lives in `data_analysis.tracking`). |
 | [experiments/cts/](experiments/cts/) | Collective Thomson scattering analysis. |
 | [experiments/epfl/](experiments/epfl/) | EPFL CRDS / power-calibration scripts. |

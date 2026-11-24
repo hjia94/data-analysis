@@ -117,6 +117,17 @@ def integrate_bdot(bdot, dt, baseline="pretrigger", *, pretrigger=None,
     ``None``
         Raw cumulative integral.
 
+    **Choosing a baseline for a driven wave.** Integration weights every
+    component by 1/f, so slow content in dB/dt -- low-frequency plasma modes,
+    and amplifier offsets that shift by a few digitizer counts while a large RF
+    signal is present -- dominates B even when it is invisible in dB/dt. In the
+    Aug-2026 LAPD Alfven-wave runs (188 kHz drive) slow B was 10-100x the wave
+    after ``'pretrigger'`` integration. The wave itself is unaffected: its
+    phasor at the drive frequency (:func:`data_analysis.plasma.fields.phasor`)
+    agreed between all three baselines to <= 2e-5. So for wave analysis use
+    phasors, or ``'smooth'`` (a high-pass at ~f_drive / smooth_periods) when the
+    waveform is needed; use ``'pretrigger'`` when the slow field is the signal.
+
     ``bdot`` may have any leading shape, e.g. ``(npos, nt)`` or the
     ``(3, npos, nt)`` output of :func:`voltage_to_bdot`; every trace is
     treated independently.
