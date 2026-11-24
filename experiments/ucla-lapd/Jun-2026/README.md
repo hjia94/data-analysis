@@ -27,6 +27,7 @@ Always invoke scripts with the repo virtual environment (`.venv\Scripts\python.e
 | `Jun2026_mach_flow.py` | `32` (41×41 P33 3D Mach plane) | `32-mach-flow-data.npz`, slider HTML | Calibrated 3D flow map (`v_X`, `v_Y`, `v_Z`, polar `v_r`/`v_theta`). |
 | `Jun2026_xcorr.py` | `26`–`31` (B-dot/LP planes & axial lines) | `26`–`31-xcorr-data.npz` | Ensemble Welch coherence `gamma2(f)` and cross-phase `phase(f)` with per-pair `(pos_x, pos_y)`. |
 | `Jun2026_onset.py` | `00`–`06`, `08`–`14`, `26`–`31` | `onset_summary_jun2026.npz` | Per-shot & onset-aligned instability `t_onset`, exponential growth rate `gamma`, and post-onset full-window `f0` (Rayleigh `1/T_win ~ 300–770 Hz`). |
+| `Jun2026_profiles.py` | `00`–`06` (calibrated `P29-R`) | `profiles_summary_jun2026.npz` | Pre- vs. post-onset sweep classification, `pe`, signed radial gradients (`dln ne/dr`, `dln Te/dr`, `dln pe/dr`, `eta_e`), `Vf`/`Lambda` validation, and local scales (`rho_s`, `nu_ei`, `beta_e`, `v_ExB`, `omega_*`). |
 | `Jun2026_plot.py` | Saved `.npz` files | Static PNGs (`Jun2026/`) | Publication/diagnostic figures for IV lines, IV+Isat combined, and xcorr planes. |
 | `Jun2026_slider.py` | Saved `.npz` files | Standalone `.html` sliders | Scrubbable pages for IV lines, Isat FFTs, and multi-pair xcorr scans. |
 
@@ -110,10 +111,10 @@ Documented directly from the raw HDF5 files and run logs so downstream scripts d
 ### Completed
 - Fixed zero-width and tail-bleed edge bugs in `binned_face_ratio` (`src/data_analysis/plasma/mach.py`, `Jun2026_mach_line.py`).
 - Fixed per-pair coordinates, moving-vs-stationary drive resolution, and optional `t_offset_b_ms` cross-scope alignment in `Jun2026_xcorr.py` / `Jun2026_plot.py`.
-- Generated and verified `08`–`14-mach-flow-line-data.npz`, `26`–`31-xcorr-data.npz`, and `onset_summary_jun2026.npz`.
-- Added generic onset/growth-rate/dominant-frequency DSP helpers (`src/data_analysis/signal/core.py`) and `Jun2026_onset.py`, plus `tests/` unit tests (`python -m unittest discover -s tests`).
+- Generated and verified `08`–`14-mach-flow-line-data.npz`, `26`–`31-xcorr-data.npz`, `onset_summary_jun2026.npz`, and `profiles_summary_jun2026.npz`.
+- Added generic onset/growth-rate/dominant-frequency DSP helpers (`src/data_analysis/signal/core.py`) and `Jun2026_onset.py`.
+- Added generic radial profile, electron pressure, signed gradient, `Vf`/sheath-factor, and local scale helpers (`src/data_analysis/plasma/profiles.py`) and `Jun2026_profiles.py`, plus `tests/` unit tests (`python -m unittest discover -s tests`).
 
 ### Planned Next
-1. Pre-onset profile, electron pressure `pe`, signed logarithmic gradients (`d ln pe / dr = d ln ne / dr + d ln Te / dr`), and `Vf` / sheath-factor validation module (consuming `t_onset` from `onset_summary_jun2026.npz`).
-2. Measured-`Te` rescaling of Mach line flows (`Jun2026_mach_line.py` joined on `iv_sweep_index`) and `E x B` shear comparison.
-3. Azimuthal/axial mode decomposition (`m`, `k_par`), B-dot calibration, and plasma-frame dispersion comparison (`omega' = omega - k_theta v_ExB` vs. `omega_*n`, `omega_*T`).
+1. Measured-`Te` rescaling of Mach line flows (`Jun2026_mach_line.py` joined on `iv_sweep_index`) and `E x B` shear comparison.
+2. Azimuthal/axial mode decomposition (`m`, `k_par`), B-dot calibration, and plasma-frame dispersion comparison (`omega' = omega - k_theta v_ExB` vs. `omega_*n`, `omega_*T`).
