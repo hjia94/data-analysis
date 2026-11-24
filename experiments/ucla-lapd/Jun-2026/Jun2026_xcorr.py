@@ -581,6 +581,7 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
     out_path = xcorr_npz_path(ifn)
     key = _pair_key(ch_a, ch_b)
     coords_uniform = True
+    backfill_pos = {}
     if os.path.isfile(out_path):
         with np.load(out_path) as d:
             if "freq" in d.files and not np.array_equal(freq, d["freq"]):
@@ -590,15 +591,35 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
                 k[:-len("__gamma2")] for k in d.files
                 if k.endswith("__gamma2") and k[:-len("__gamma2")] != key
             })
+            legacy_keys = [
+                ok for ok in other_keys
+                if f"{ok}__pos_x" not in d.files or f"{ok}__pos_y" not in d.files
+            ]
+            top_px = d["pos_x"] if "pos_x" in d.files else None
+            top_py = d["pos_y"] if "pos_y" in d.files else None
             for ok in other_keys:
-                ox = d[f"{ok}__pos_x"] if f"{ok}__pos_x" in d.files else d.get("pos_x")
-                oy = d[f"{ok}__pos_y"] if f"{ok}__pos_y" in d.files else d.get("pos_y")
+                ox = d[f"{ok}__pos_x"] if f"{ok}__pos_x" in d.files else top_px
+                oy = d[f"{ok}__pos_y"] if f"{ok}__pos_y" in d.files else top_py
                 if (ox is None or oy is None
                         or ox.shape != pos_x.shape or oy.shape != pos_y.shape
                         or not np.allclose(ox, pos_x, atol=_POS_MATCH_TOL_CM, equal_nan=True)
                         or not np.allclose(oy, pos_y, atol=_POS_MATCH_TOL_CM, equal_nan=True)):
                     coords_uniform = False
                     break
+            if not coords_uniform and legacy_keys:
+                # Dropping top-level pos_x/pos_y would orphan pre-fix pairs that
+                # lack per-pair coordinates. One legacy pair's coordinates are
+                # unambiguously top_px/top_py and can be backfilled; multiple
+                # legacy pairs cannot be disambiguated safely.
+                if len(legacy_keys) == 1 and top_px is not None and top_py is not None:
+                    ok = legacy_keys[0]
+                    backfill_pos[f"{ok}__pos_x"] = top_px
+                    backfill_pos[f"{ok}__pos_y"] = top_py
+                else:
+                    raise ValueError(
+                        f"{out_path}: pre-fix file has multiple pairs without "
+                        f"per-pair coordinates ({legacy_keys}); regenerate with "
+                        "overwrite=True before merging a pair on a different grid")
     payload = {
         "freq": freq,
         # Per-pair coordinates: co-moving probes in a two-drive run can scan in
@@ -618,6 +639,7 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
         f"{key}__gamma2": gamma2, f"{key}__phase": phase,
         f"{key}__nshots": nshots,
     }
+    payload.update(backfill_pos)
     if coords_uniform:
         # Back-compat for single-grid / legacy readers: written only while all
         # pairs in the file agree on (pos_x, pos_y).
