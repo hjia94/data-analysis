@@ -16,7 +16,10 @@ scripts/notebooks under `experiments/`, which import only from `data_analysis`.
 - **Langmuir probe (LP)** — plasma parameters from I–V sweeps (`data_analysis.plasma.langmuir`).
 - **Mach probe** — area-ratio calibration and flow velocity (`data_analysis.plasma.mach`), with
   diagnostic-agnostic in-plane flow geometry in `data_analysis.plasma.flow`.
-- **Bdot** — magnetic-fluctuation processing and STFT spectrograms (`data_analysis.signal`).
+- **Bdot** — probe calibration and time integration to B (`data_analysis.plasma.bdot`);
+  magnetic-fluctuation processing and STFT spectrograms (`data_analysis.signal`); gridded
+  field maths — J = ∇×B/μ₀, Poynting, J·E, Faraday E_φ, vector potential, AC conductivity
+  (`data_analysis.plasma.fields`).
 - **Interferometer** — line-averaged density traces merged into pydaq dataruns
   (`data_analysis.io.interferometer`); used to absolutely calibrate probe `n_e`.
 - **X-ray / photon counting** — pulse detection for bremsstrahlung diagnostics (`data_analysis.plasma.photons`).
@@ -38,7 +41,7 @@ Modules are grouped by **what they do**, not by which experiment produced them:
 |---------|----------|
 | `data_analysis.io` | File readers, grouped by data shape — the unified LAPD HDF5 reader (`open_lapd`), interferometer traces, probe↔channel mapping, oscilloscope traces, `.cine` movies, network-analyzer CSV, and the output-path resolver. The *only* place a file format is parsed. See [src/data_analysis/io/README.md](src/data_analysis/io/README.md). |
 | `data_analysis.signal` | Generic digital signal processing — filters, STFT, envelopes, cross-spectra, zero-crossing detection, and downsampling helpers. |
-| `data_analysis.plasma` | Plasma-physics analysis — Langmuir probes (`langmuir`), Mach probes (`mach`), in-plane flow geometry (`flow`), photon/X-ray pulse detection (`photons`), CTS / Sheffield Thomson scattering, and `formulas`. |
+| `data_analysis.plasma` | Plasma-physics analysis — Langmuir probes (`langmuir`), Mach probes (`mach`), in-plane flow geometry (`flow`), B-dot calibration/integration (`bdot`), gridded E/B/J field operators (`fields`), photon/X-ray pulse detection (`photons`), CTS / Sheffield Thomson scattering, and `formulas`. |
 | `data_analysis.tracking` | High-speed-camera object tracking and trajectory fitting. |
 | `data_analysis.viz` | Plotting helpers — shared plot utilities, flow-field maps, and the standalone HTML slider renderer. |
 | `data_analysis.utils` | Cross-cutting utilities (a single module, not a subpackage) — file discovery and `.npy` I/O. |
