@@ -18,6 +18,7 @@ the coherence/phase is what matters, not absolute current scaling.
 
 import glob
 import os
+from typing import NamedTuple
 import numpy as np
 from tqdm import tqdm
 
@@ -44,36 +45,50 @@ CH_B        = ("lpscope", "C3")
 TMIN_MS, TMAX_MS = 1.5, 4.5            # analysis time window (ms)
 NPERSEG     = 4096                     # Welch segment length (freq res vs variance)
 
-# Campaign pair manifest for ``batch_all()``: run_num -> list of
-# ``(ch_a, ch_b, motion_group_name)``.
+class PairSpec(NamedTuple):
+    """One channel-pair entry in :data:`XCORR_RUNS`.
+
+    ``t_offset_b_ms`` defaults to ``0.0`` (shared trigger); set it when
+    ``ch_a`` and ``ch_b`` live on scopes with different trigger delays
+    (e.g., ``+12.0`` for ``machscope`` vs. ``biasscope``).
+    """
+    ch_a: tuple[str, str]
+    ch_b: tuple[str, str]
+    motion_group_name: str | None = None
+    t_offset_b_ms: float = 0.0
+
+
+# Campaign pair manifest for ``batch_all()``: run_num -> list of PairSpec.
 #   * Runs 26 (800G) and 31 (filename says 800G; run description is 600G):
-#     B-dot channels are UNMAPPED in the run description, so they pass the
-#     explicit ``<Athena>    p28_Bdot`` motion group; LP pairs auto-resolve to
-#     ``<Hermes>    p29_LP`` against stationary P25-L (``lpscope/C3``).
+#     ``lpscope`` and ``bdotscope`` share the same trigger (both span
+#     ``[-2.0, +8.0] ms`` within 42 ns, verified from HDF5 ``time_array``), so
+#     ``t_offset_b_ms=0.0``. B-dot channels are UNMAPPED in the run description,
+#     so they pass ``motion_group_name="<Athena>    p28_Bdot"``; LP pairs
+#     auto-resolve to ``<Hermes>    p29_LP`` against stationary P25-L.
 #   * Runs 27 (800G), 28 (600G), 30 (1kG): co-moving P29 + P25 axial lines plus
 #     stationary P33 reference (``scope/C5``).
 #   * Run 29 (800G): two-phase 31x31 plane (P29 shots 1-4805, P25 shots
 #     4806-9610), so only moving-vs-stationary-P33 pairs are physically valid.
 _BDOT_LP_PLANE_PAIRS = [
-    (("lpscope", "C1"), ("lpscope", "C3"), None),
-    (("lpscope", "C2"), ("lpscope", "C3"), None),
-    (("lpscope", "C3"), ("bdotscope", "C1"), "<Athena>    p28_Bdot"),
-    (("lpscope", "C3"), ("bdotscope", "C2"), "<Athena>    p28_Bdot"),
-    (("lpscope", "C3"), ("bdotscope", "C3"), "<Athena>    p28_Bdot"),
+    PairSpec(("lpscope", "C1"), ("lpscope", "C3")),
+    PairSpec(("lpscope", "C2"), ("lpscope", "C3")),
+    PairSpec(("lpscope", "C3"), ("bdotscope", "C1"), "<Athena>    p28_Bdot"),
+    PairSpec(("lpscope", "C3"), ("bdotscope", "C2"), "<Athena>    p28_Bdot"),
+    PairSpec(("lpscope", "C3"), ("bdotscope", "C3"), "<Athena>    p28_Bdot"),
 ]
 _AXIAL_LP_LINE_PAIRS = [
-    (("scope", "C1"), ("scope", "C3"), None),  # P29-L vs P25-L (axial phase)
-    (("scope", "C2"), ("scope", "C4"), None),  # P29-R vs P25-R (axial phase)
-    (("scope", "C1"), ("scope", "C5"), None),  # P29-L vs P33 ref
-    (("scope", "C2"), ("scope", "C5"), None),  # P29-R vs P33 ref
-    (("scope", "C3"), ("scope", "C5"), None),  # P25-L vs P33 ref
-    (("scope", "C4"), ("scope", "C5"), None),  # P25-R vs P33 ref
+    PairSpec(("scope", "C1"), ("scope", "C3")),  # P29-L vs P25-L (axial phase)
+    PairSpec(("scope", "C2"), ("scope", "C4")),  # P29-R vs P25-R (axial phase)
+    PairSpec(("scope", "C1"), ("scope", "C5")),  # P29-L vs P33 ref
+    PairSpec(("scope", "C2"), ("scope", "C5")),  # P29-R vs P33 ref
+    PairSpec(("scope", "C3"), ("scope", "C5")),  # P25-L vs P33 ref
+    PairSpec(("scope", "C4"), ("scope", "C5")),  # P25-R vs P33 ref
 ]
 _TWOPHASE_LP_PLANE_PAIRS = [
-    (("scope", "C1"), ("scope", "C5"), None),  # P29-L vs P33 ref (phase 1)
-    (("scope", "C2"), ("scope", "C5"), None),  # P29-R vs P33 ref (phase 1)
-    (("scope", "C3"), ("scope", "C5"), None),  # P25-L vs P33 ref (phase 2)
-    (("scope", "C4"), ("scope", "C5"), None),  # P25-R vs P33 ref (phase 2)
+    PairSpec(("scope", "C1"), ("scope", "C5")),  # P29-L vs P33 ref (phase 1)
+    PairSpec(("scope", "C2"), ("scope", "C5")),  # P29-R vs P33 ref (phase 1)
+    PairSpec(("scope", "C3"), ("scope", "C5")),  # P25-L vs P33 ref (phase 2)
+    PairSpec(("scope", "C4"), ("scope", "C5")),  # P25-R vs P33 ref (phase 2)
 ]
 XCORR_RUNS = {
     "26": _BDOT_LP_PLANE_PAIRS,
@@ -83,6 +98,13 @@ XCORR_RUNS = {
     "30": _AXIAL_LP_LINE_PAIRS,
     "31": _BDOT_LP_PLANE_PAIRS,
 }
+
+# Tolerance [cm] for treating two pairs' probe coordinates as the same grid
+# when deciding whether top-level ``pos_x``/``pos_y`` is unambiguous.
+# 0.01 cm (0.1 mm) absorbs ~5 um live-encoder jitter between drives on the same
+# scan (runs 27-29) while rejecting real grid offsets (>= 0.5 cm, e.g. run 30)
+# and opposite-order scans (runs 26 & 31).
+_POS_MATCH_TOL_CM = 1e-2
 
 
 # =========================================================================== #
@@ -517,12 +539,15 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
     channel pair (:func:`_pair_key`): ``freq`` (shared axis),
     ``<pair>__pos_x`` / ``<pair>__pos_y`` (the (x, y) of this pair's moving
     probe -- stored **per pair** because co-moving probes in a two-drive run can
-    scan in opposite order or sit on offset grids, as in runs 26/31),
+    scan in opposite order or sit on offset grids, as in runs 26, 30, 31),
     ``<pair>__gamma2`` ``(npos, nf)``, ``<pair>__phase`` ``(npos, nf)``,
-    ``<pair>__nshots`` ``(npos,)``. File-level ``pos_x`` / ``pos_y`` are written
-    only when absent (for back-compat readers) and never overwritten by later
-    pairs. An existing npz for the run is **merged** (its other pairs are kept),
-    so several pairs accumulate in one file. Returns the npz path.
+    ``<pair>__nshots`` ``(npos,)``. Top-level ``pos_x`` / ``pos_y`` are written
+    only while every stored pair in the file shares the same grid (within
+    :data:`_POS_MATCH_TOL_CM`); once a merged pair disagrees, top-level
+    ``pos_x`` / ``pos_y`` are dropped so legacy readers cannot silently read
+    another drive's coordinates. An existing npz for the run is **merged** (its
+    other pairs are kept), so several pairs accumulate in one file. Returns the
+    npz path.
     """
     pos_x, pos_y, npos, positions, motion_group = _iter_run_positions(
         ifn, ch_a, ch_b, tmin_ms, tmax_ms, "xcorr", motion_group_name,
@@ -554,19 +579,31 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
     # Merge into the run's co-located npz (keep any other pairs already stored).
     # Guard the shared freq axis first: pairs in one file must share it.
     out_path = xcorr_npz_path(ifn)
-    has_top_pos = False
+    key = _pair_key(ch_a, ch_b)
+    coords_uniform = True
     if os.path.isfile(out_path):
         with np.load(out_path) as d:
             if "freq" in d.files and not np.array_equal(freq, d["freq"]):
                 raise ValueError(f"{out_path}: freq axis differs from stored pairs "
                                  "(different window / sampling rate)")
-            has_top_pos = "pos_x" in d.files and "pos_y" in d.files
-    key = _pair_key(ch_a, ch_b)
+            other_keys = sorted({
+                k[:-len("__gamma2")] for k in d.files
+                if k.endswith("__gamma2") and k[:-len("__gamma2")] != key
+            })
+            for ok in other_keys:
+                ox = d[f"{ok}__pos_x"] if f"{ok}__pos_x" in d.files else d.get("pos_x")
+                oy = d[f"{ok}__pos_y"] if f"{ok}__pos_y" in d.files else d.get("pos_y")
+                if (ox is None or oy is None
+                        or ox.shape != pos_x.shape or oy.shape != pos_y.shape
+                        or not np.allclose(ox, pos_x, atol=_POS_MATCH_TOL_CM, equal_nan=True)
+                        or not np.allclose(oy, pos_y, atol=_POS_MATCH_TOL_CM, equal_nan=True)):
+                    coords_uniform = False
+                    break
     payload = {
         "freq": freq,
         # Per-pair coordinates: co-moving probes in a two-drive run can scan in
-        # opposite order (runs 26 & 31) or disjoint phases (run 29), so a single
-        # shared pos_x/pos_y clobbers earlier pairs on merge.
+        # opposite order (runs 26 & 31) or sit on offset grids (run 30), so
+        # every pair carries its own (pos_x, pos_y).
         f"{key}__pos_x": pos_x, f"{key}__pos_y": pos_y,
         f"{key}__motion_group": np.str_(motion_group or ""),
         # Per pair, not per file: these are arguments, so two pairs in one npz
@@ -581,15 +618,61 @@ def batch_xcorr(ifn, ch_a=CH_A, ch_b=CH_B, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
         f"{key}__gamma2": gamma2, f"{key}__phase": phase,
         f"{key}__nshots": nshots,
     }
-    if not has_top_pos:
-        # Back-compat for single-drive / legacy readers; never clobbered on merge.
+    if coords_uniform:
+        # Back-compat for single-grid / legacy readers: written only while all
+        # pairs in the file agree on (pos_x, pos_y).
         payload["pos_x"] = pos_x
         payload["pos_y"] = pos_y
-    merge_save_npz(out_path, payload)
+        drop_keys = ()
+    else:
+        # Multi-grid file: drop top-level pos_x/pos_y so legacy readers fail
+        # loudly rather than silently mislabeling another drive's pair.
+        drop_keys = ("pos_x", "pos_y")
+    merge_save_npz(out_path, payload, drop_keys=drop_keys)
     print(f"\nWrote {out_path}: pair '{key}', {npos} positions "
           f"({int(nshots.sum())} shots total), {freq.size} freq bins, "
           f"window {tmin_ms}-{tmax_ms} ms")
     return out_path
+
+
+def _as_pair_spec(spec):
+    """Normalize a :class:`PairSpec` or 2/3/4-tuple into a :class:`PairSpec`."""
+    if isinstance(spec, PairSpec):
+        return spec
+    return PairSpec(*spec)
+
+
+def _pair_settings_mismatch(npz_data, key, tmin_ms, tmax_ms, nperseg,
+                            t_offset_b_ms, motion_group_name=None):
+    """Return human-readable diffs between a stored pair and requested settings."""
+    diffs = []
+    checks = [
+        ("tmin_ms", float(tmin_ms), 1e-9),
+        ("tmax_ms", float(tmax_ms), 1e-9),
+        ("t_offset_b_ms", float(t_offset_b_ms), 1e-9),
+    ]
+    for field, want, tol in checks:
+        k = f"{key}__{field}"
+        if k not in npz_data.files:
+            diffs.append(f"{field}: missing in npz (requested {want:g})")
+        else:
+            got = float(npz_data[k])
+            if not np.isclose(got, want, atol=tol, rtol=0.0):
+                diffs.append(f"{field}: stored {got:g} != requested {want:g}")
+    kn = f"{key}__nperseg"
+    if kn not in npz_data.files:
+        diffs.append(f"nperseg: missing in npz (requested {int(nperseg)})")
+    elif int(npz_data[kn]) != int(nperseg):
+        diffs.append(f"nperseg: stored {int(npz_data[kn])} != requested {int(nperseg)}")
+    if motion_group_name is not None:
+        km = f"{key}__motion_group"
+        if km not in npz_data.files:
+            diffs.append(f"motion_group: missing in npz (requested {motion_group_name!r})")
+        else:
+            got_mg = str(npz_data[km])
+            if got_mg != motion_group_name:
+                diffs.append(f"motion_group: stored {got_mg!r} != requested {motion_group_name!r}")
+    return diffs
 
 
 def xcorr_ifn(data_dir, run_num):
@@ -607,9 +690,13 @@ def batch_all(data_dir=DATA_DIR, runs=None, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
     """Batch every run/pair in :data:`XCORR_RUNS` -> written npz paths.
 
     ``runs`` may be a subset of run numbers (e.g. ``["26", "31"]``) or a
-    custom ``{run_num: [(ch_a, ch_b, motion_group_name), ...]}`` mapping.
-    Pairs already stored in a run's npz are skipped unless ``overwrite=True``,
-    which removes the existing npz first so no stale keys remain.
+    custom ``{run_num: [PairSpec(...), ...]}`` mapping.
+    When ``overwrite=False``, pairs already stored in a run's npz are skipped
+    only after verifying their stored ``tmin_ms``, ``tmax_ms``, ``nperseg``,
+    ``t_offset_b_ms``, and (when given) ``motion_group_name`` match the
+    request; any mismatch raises :class:`ValueError` up front instead of
+    silently keeping stale pairs or failing partway on the ``freq`` guard.
+    Pass ``overwrite=True`` to remove an existing npz and regenerate cleanly.
     """
     if runs is None:
         manifest = XCORR_RUNS
@@ -619,20 +706,50 @@ def batch_all(data_dir=DATA_DIR, runs=None, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,
         manifest = {r: XCORR_RUNS[r] for r in runs}
 
     written = []
-    for run_num, pair_specs in sorted(manifest.items()):
+    for run_num, raw_specs in sorted(manifest.items()):
+        specs = [_as_pair_spec(s) for s in raw_specs]
         ifn = xcorr_ifn(data_dir, run_num)
         out_path = xcorr_npz_path(ifn)
         if overwrite and os.path.isfile(out_path):
             os.remove(out_path)
-        existing = (set(stored_pair_tuples(out_path))
-                    if os.path.isfile(out_path) else set())
-        for ch_a, ch_b, mg in pair_specs:
-            if (ch_a, ch_b) in existing:
-                print(f"  run {run_num}: pair {_pair_key(ch_a, ch_b)} exists, skipping")
+
+        existing = set()
+        if os.path.isfile(out_path):
+            existing = set(stored_pair_tuples(out_path))
+            with np.load(out_path) as d:
+                # Validate every already-stored requested pair BEFORE doing any
+                # HDF5 reads, and also guard against adding a new pair whose
+                # nperseg disagrees with the existing file's stored pairs.
+                for spec in specs:
+                    key = _pair_key(spec.ch_a, spec.ch_b)
+                    if (spec.ch_a, spec.ch_b) in existing:
+                        diffs = _pair_settings_mismatch(
+                            d, key, tmin_ms, tmax_ms, nperseg,
+                            spec.t_offset_b_ms, spec.motion_group_name)
+                        if diffs:
+                            raise ValueError(
+                                f"{out_path}: stored pair '{key}' differs from "
+                                f"requested settings ({'; '.join(diffs)}); "
+                                "pass overwrite=True to regenerate")
+                if any((s.ch_a, s.ch_b) not in existing for s in specs):
+                    stored_np = {
+                        int(d[k]) for k in d.files if k.endswith("__nperseg")
+                    }
+                    if stored_np and stored_np != {int(nperseg)}:
+                        raise ValueError(
+                            f"{out_path}: existing pairs use nperseg={sorted(stored_np)} "
+                            f"but requested nperseg={int(nperseg)} (freq axis would mismatch); "
+                            "pass overwrite=True to regenerate")
+
+        for spec in specs:
+            if (spec.ch_a, spec.ch_b) in existing:
+                print(f"  run {run_num}: pair {_pair_key(spec.ch_a, spec.ch_b)} exists, skipping")
                 continue
-            batch_xcorr(ifn, ch_a=ch_a, ch_b=ch_b,
+            batch_xcorr(ifn, ch_a=spec.ch_a, ch_b=spec.ch_b,
                         tmin_ms=tmin_ms, tmax_ms=tmax_ms,
-                        nperseg=nperseg, motion_group_name=mg)
+                        nperseg=nperseg,
+                        motion_group_name=spec.motion_group_name,
+                        t_offset_b_ms=spec.t_offset_b_ms)
         written.append(out_path)
     return written
 

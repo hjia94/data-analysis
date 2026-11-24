@@ -126,20 +126,25 @@ def read_from_npy(npy_file_path):
     return data
 
 
-def merge_save_npz(out_path, new_arrays):
+def merge_save_npz(out_path, new_arrays, drop_keys=()):
     """Merge ``new_arrays`` into an existing ``.npz`` and rewrite it.
 
     Loads any arrays already stored at ``out_path`` (so entries written by
-    earlier passes are kept) and overwrites/adds the keys in ``new_arrays``.
+    earlier passes are kept), overwrites/adds the keys in ``new_arrays``, and
+    removes any keys listed in ``drop_keys``.
     Lets several results accumulate in one file instead of one file per pass.
 
     Args:
         out_path (str): The ``.npz`` file to update (created if missing).
         new_arrays (dict): Mapping of key -> array to add or overwrite.
+        drop_keys (iterable of str, optional): Keys to delete from the merged
+            archive if present.
     """
     arrays = {}
     if os.path.isfile(out_path):
         with np.load(out_path) as d:
             arrays = {k: d[k] for k in d.files}
     arrays.update(new_arrays)
+    for key in drop_keys:
+        arrays.pop(key, None)
     np.savez(out_path, **arrays)

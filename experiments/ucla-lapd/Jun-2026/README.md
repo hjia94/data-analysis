@@ -70,9 +70,9 @@ Force full regeneration (e.g., after a binning or calibration update):
 
 ### Cross-Correlation / Coherence (`26`–`31`)
 
-`Jun2026_xcorr.XCORR_RUNS` defines the full pair manifest for Runs `26`–`31` (`tmin_ms=1.5`, `tmax_ms=4.5`, `nperseg=4096`), including the explicit `<Athena>    p28_Bdot` motion-group override for unmapped B-dot channels in Runs `26` and `31`, and the stationary-reference-only pairs for the two-phase Run `29`.
+`Jun2026_xcorr.XCORR_RUNS` defines the full `PairSpec` manifest for Runs `26`–`31` (`tmin_ms=1.5`, `tmax_ms=4.5`, `nperseg=4096`, optional `t_offset_b_ms`), including the explicit `<Athena>    p28_Bdot` motion-group override for unmapped B-dot channels in Runs `26` and `31` (`lpscope` and `bdotscope` share a trigger within `42 ns`, so `t_offset_b_ms=0.0`), and the stationary-reference-only pairs for the two-phase Run `29`.
 
-Generate missing pairs (resumable):
+Generate missing pairs (resumable; validates stored `tmin_ms`/`tmax_ms`/`nperseg`/`t_offset_b_ms` and raises `ValueError` on mismatch instead of silently keeping stale pairs):
 
 ```powershell
 .venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'experiments/ucla-lapd/Jun-2026'); import Jun2026_xcorr as x; x.batch_all()"
@@ -97,7 +97,7 @@ Documented directly from the raw HDF5 files and run logs so downstream scripts d
    - LeCroy `biasscope` headers already fold the `×200` HV divider attenuation into `vertical_gain` — do **not** multiply by `200` again.
    - `biasscope` triggers `12.0 ms` offset relative to `machscope`; pass `t_offset_b_ms=+12.0` (or `-12.0` depending on channel order) when cross-correlating across those two scopes in `Jun2026_xcorr`.
 5. **Multi-drive coordinate quirks:**
-   - **Runs `26` & `31`:** `<Hermes> p29_LP` and `<Athena> p28_Bdot` scan in opposite directions; `Jun2026_xcorr` stores coordinates **per pair** (`<pair>__pos_x`, `<pair>__pos_y`).
+   - **Runs `26` & `31`:** `<Hermes> p29_LP` and `<Athena> p28_Bdot` scan in opposite directions (`lpscope` and `bdotscope` share a trigger: `[-2.0, +8.0] ms` within `42 ns`, so `t_offset_b_ms=0.0`). `Jun2026_xcorr` stores coordinates **per pair** (`<pair>__pos_x`, `<pair>__pos_y`) and drops top-level `pos_x`/`pos_y` whenever pairs in one file sit on different grids (Runs `26`, `30`, `31`), so readers must use per-pair coordinates.
    - **Run `29`:** Two-phase 31×31 plane (`<Hermes> p29_LP` on shots 1–4805, `<Hades> p25_LP` on shots 4806–9610). Do not cross-correlate P29 directly against P25; correlate each against stationary P33 (`scope/C5`). Also, `<Hades>` live encoder positions jitter by ~5 µm (`31×34` unique values at 3 decimals vs. `31×31` at 2 decimals), so 2D gridding should snap to the planned 0.5 cm grid.
    - **Run `30` (1 kG axial line):** P25 (`Hades`) and P29 (`Hermes`) sit `1.0 cm` apart in `y` (`+0.5 cm` vs. `-0.5 cm`).
 6. **`xcorr` frequency resolution:** At the 5 MHz scope sampling rate, the default `NPERSEG = 4096` gives `df = 1220.7 Hz` (adequate for 2D coherence/phase maps, where the ~4.2 kHz mode spans the `3.66` and `4.88 kHz` bins). Use longer segments / full-window FFTs (`df <= 330 Hz`) for fine dispersion or `f(B0)` tracking.
