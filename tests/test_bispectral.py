@@ -121,8 +121,10 @@ def test_axes_nyquist_and_inputs(rng):
     r = bicoherence(x, DT, NSEG)
     np.testing.assert_allclose(r.f1, np.arange(1, NSEG // 2 + 1) * DF)
     assert r.b2.shape == r.bispectrum.shape == (NSEG // 2, NSEG // 2)
-    over = (r.f1[:, None] + r.f2[None, :]) > NSEG // 2 * DF
-    assert np.isnan(r.b2[over]).all() and np.isfinite(r.b2[~over]).all()
+    k1, k2 = np.meshgrid(np.rint(r.f1 / DF), np.rint(r.f2 / DF), indexing="ij")
+    over = k1 + k2 > NSEG // 2
+    unresolved = (k1 <= 2) | (k2 <= 2)                            # Hann main lobe: 2 bins
+    assert np.isnan(r.b2[over | unresolved]).all() and np.isfinite(r.b2[~(over | unresolved)]).all()
 
     x[3, 5] = np.nan                                              # bad shot is dropped
     assert bicoherence(x, DT, NSEG).n_avg == 9
@@ -147,3 +149,53 @@ def test_block_accumulation_matches_single_block(rng, monkeypatch):
     r = bicoherence(x, DT, NSEG, **kw)
     np.testing.assert_allclose(r.b2, ref.b2, rtol=1e-10)
     np.testing.assert_allclose(r.bispectrum, ref.bispectrum, rtol=1e-10, atol=1e-14)
+
+
+def test_block_memory_is_bounded_by_nperseg(rng, monkeypatch):
+    """A tiny band grid must not put every segment into one block."""
+    from data_analysis.signal import bispectral
+    monkeypatch.setattr(bispectral, "_BLOCK_ELEMENTS", 4096)
+    seen = []
+    rfft = np.fft.rfft
+    monkeypatch.setattr(np.fft, "rfft", lambda a, *k, **kw: (seen.append(a.size), rfft(a, *k, **kw))[1])
+    x = rng.standard_normal((20, 1024 * 4)).astype(np.float32)
+    r = bicoherence(x, DT, 1024, f1_band=(20 * DF / 4, 20 * DF / 4), f2_band=(33 * DF / 4, 33 * DF / 4))
+    assert r.b2.shape == (1, 1) and r.n_avg == 80
+    assert max(seen) <= 4096
+
+
+@pytest.mark.parametrize("window, lobe", [("hann", 2), ("boxcar", 0), ("blackman", 2)])
+def test_unresolved_triads_are_masked(rng, window, lobe):
+    """f2 = 0 and f1 + f2 = 0 are power spectra times the mean, not triads; bins
+    inside the window's main lobe of 0 or of each other share leakage
+    (bin correlation > 0.1: Hann and Blackman 2 bins, boxcar 0)."""
+    x = rng.standard_normal((200, NSEG)) + 3.0                    # DC offset, no detrend
+    r = bicoherence(x, DT, NSEG, f1_band=(0, 20 * DF), f2_band=(-30 * DF, 10 * DF),
+                    detrend=None, window=window)
+    k1, k2 = np.meshgrid(np.rint(r.f1 / DF), np.rint(r.f2 / DF), indexing="ij")
+    a1, a2, a3 = abs(k1), abs(k2), abs(k1 + k2)
+    bad = ((a1 <= lobe) | (a2 <= lobe) | (a3 <= lobe)
+           | (abs(a3 - a1) <= lobe) | (abs(a3 - a2) <= lobe))
+    assert np.isnan(r.b2[bad]).all() and np.isfinite(r.b2[~bad]).all()
+    assert (k2 == 0).any() and (k1 + k2 == 0).any()               # the exact cases are in the band
+    if window != "boxcar":                                        # boxcar leaks the offset everywhere
+        assert np.nanmax(r.b2) < 3 * r.threshold                  # noise everywhere else
+
+
+def test_nyquist_bin_amplitude(rng):
+    """A triad whose sum lands on the Nyquist bin keeps |B| = a1 a2 a3."""
+    n = 50
+    p1 = rng.uniform(0, 2 * np.pi, n)
+    fny = NSEG // 2 * DF
+    t = np.arange(NSEG) * DT
+    x = (tone(F1, p1, a=1.0) + tone(fny - F1, -p1, a=0.8)
+         + 0.5 * np.cos(np.pi * np.arange(NSEG))[None, :])         # real-valued Nyquist tone
+    r = bicoherence(x, DT, NSEG, f1_band=(F1, F1), f2_band=(fny - F1, fny - F1))
+    assert t.size == NSEG
+    assert abs(r.bispectrum[0, 0]) == pytest.approx(1.0 * 0.8 * 0.5, rel=1e-10)
+    assert r.b2[0, 0] == pytest.approx(1, abs=1e-10)
+
+
+def test_complex_input_rejected():
+    with pytest.raises(ValueError, match="real"):
+        bicoherence(np.ones((4, NSEG), complex), DT, NSEG)

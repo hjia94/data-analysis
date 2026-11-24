@@ -59,7 +59,11 @@ from scipy import signal as sps
 
 from data_analysis.signal.core import finite_row_mask
 
-# Elements in one (segments x n1 x n2) complex temporary; bounds memory per block.
+# Bins closer than this window correlation are treated as not independent.
+_RHO_MIN = 0.1
+
+# Elements in one block's temporaries -- (segments x nperseg) samples and
+# (segments x n1 x n2) products -- which bounds memory per block (~64 MB each).
 _BLOCK_ELEMENTS = 1 << 22
 
 
@@ -67,7 +71,13 @@ class BicoherenceResult(NamedTuple):
     """Output of :func:`bicoherence` / :func:`cross_bicoherence`.
 
     ``b2`` and ``bispectrum`` have shape ``(len(f1), len(f2))``; points where
-    ``|f1 + f2|`` exceeds the Nyquist frequency are ``nan``. ``angle(bispectrum)``
+    ``|f1 + f2|`` exceeds the Nyquist frequency are ``nan``. So are points
+    where the three frequencies are not resolved from each other or from 0.
+    That is, any of ``|f1|``, ``|f2|``, ``|f1+f2|``, ``||f1+f2| - |f1||`` or
+    ``||f1+f2| - |f2||`` is within the window's main lobe (2 bins for Hann, 0
+    for boxcar). There the "triad" is degenerate -- at ``f2 = 0`` it is a power
+    spectrum times the mean -- or its bins share leakage, and ``b2`` loses its
+    meaning and its chance level. ``angle(bispectrum)``
     is the biphase. ``bispectrum`` is in units of the input cubed: each
     segment spectrum is scaled so a bin-centred sinusoid of amplitude ``a`` has
     ``|X| = a``, hence ``|B| = a1 a2 a3`` for a fully coupled triad.
@@ -93,7 +103,10 @@ def bicoherence_threshold(n_avg, p=0.05):
     ``1 - p**(1/(N - 1))`` (about ``-ln(p) / N`` for large ``N``; mean ``1/N``).
     It holds per ``(f1, f2)`` point: over a grid of ``M`` points about ``p*M``
     exceed it by chance. Overlapping segments are not independent, so with
-    ``noverlap > 0`` the threshold is optimistic (too low).
+    ``noverlap > 0`` the chance rate is no longer ``p``: for ``p = 0.05`` and
+    50 % overlap, Gaussian noise exceeded it 3-5 % of the time with a Hann
+    window and 9 % with a boxcar, depending on the band. Use ``noverlap=0``
+    when the threshold matters.
     """
     n = int(n_avg)
     if n < 2:
@@ -113,6 +126,14 @@ def _band_bins(band, df, nyq, name, allow_negative):
     return np.arange(k0, k1 + 1)
 
 
+def _lobe_bins(win):
+    """Largest bin offset at which ``win`` still correlates two bins of white noise > _RHO_MIN."""
+    w2 = win ** 2
+    rho = np.abs(np.fft.fft(w2)) / w2.sum()                   # |corr(X(k), X(k + dk))|, dk = 0..
+    near = np.flatnonzero(rho[1:win.size // 2] > _RHO_MIN)
+    return int(near[-1] + 1) if near.size else 0
+
+
 def _at(F, k):
     """Spectrum at signed bins ``k`` from one-sided ``F`` (real input): X(-f) = X*(f)."""
     v = F[..., np.abs(k)]
@@ -122,15 +143,18 @@ def _at(F, k):
 def _bispec(stacks, dt, nperseg, noverlap, window, detrend, f1_band, f2_band, p):
     arrs = []
     for s in stacks:
-        a = np.asarray(s, dtype=float)
-        arrs.append(a[None, :] if a.ndim == 1 else a)
+        a = np.asarray(s)
+        if np.iscomplexobj(a):
+            raise ValueError("inputs must be real signals")
+        if not np.issubdtype(a.dtype, np.floating):
+            a = a.astype(float)
+        arrs.append(a[None, :] if a.ndim == 1 else a)     # no copy: blocks are cast to float64
     if any(a.ndim != 2 for a in arrs):
         raise ValueError("inputs must be 1-D records or 2-D (nshot, nt) stacks")
     if any(a.shape != arrs[0].shape for a in arrs):
         raise ValueError(f"input shapes differ: {[a.shape for a in arrs]}")
-    good = finite_row_mask(*arrs)
-    arrs = [a[good] for a in arrs]
-    nshot, nt = arrs[0].shape
+    rows_ok = np.flatnonzero(finite_row_mask(*arrs))       # index, don't copy, the good shots
+    nshot, nt = rows_ok.size, arrs[0].shape[1]
     if nshot == 0:
         raise ValueError("no shot is finite in every input")
 
@@ -142,7 +166,7 @@ def _bispec(stacks, dt, nperseg, noverlap, window, detrend, f1_band, f2_band, p)
         raise ValueError(f"noverlap must be in [0, nperseg); got {noverlap}")
     step = nperseg - noverlap
     starts = np.arange(0, nt - nperseg + 1, step)
-    seg_shot = np.repeat(np.arange(nshot), starts.size)
+    seg_shot = np.repeat(rows_ok, starts.size)
     seg_start = np.tile(starts, nshot)
     n_avg = seg_shot.size
     if n_avg < 2:
@@ -152,25 +176,36 @@ def _bispec(stacks, dt, nperseg, noverlap, window, detrend, f1_band, f2_band, p)
     nyq = nperseg // 2
     k1 = _band_bins(f1_band if f1_band is not None else (df, nyq * df), df, nyq, "f1_band", False)
     k2 = _band_bins(f2_band if f2_band is not None else (df, nyq * df), df, nyq, "f2_band", True)
+    win = sps.get_window(window, nperseg)
+    # The null distribution needs Z(f1+f2) independent of X(f1) Y(f2). A bin
+    # within the window's main lobe of 0 (it leaks the mean) or of another
+    # triad member breaks that. f2 = 0 and f1 + f2 = 0 are the exact cases.
+    lobe = _lobe_bins(win)
+    a1, a2 = np.abs(k1)[:, None], np.abs(k2)[None, :]
     k3 = k1[:, None] + k2[None, :]
-    valid = np.abs(k3) <= nyq
+    a3 = np.abs(k3)
+    valid = ((a3 <= nyq) & (a1 > lobe) & (a2 > lobe) & (a3 > lobe)
+             & (np.abs(a3 - a1) > lobe) & (np.abs(a3 - a2) > lobe))
     k3 = np.where(valid, k3, 0)
 
-    win = sps.get_window(window, nperseg)
-    scale = 2.0 / win.sum()           # bin-centred sinusoid of amplitude a -> |X| = a
+    # bin-centred sinusoid of amplitude a -> |X| = a; DC and Nyquist bins are not doubled
+    scale = np.full(nyq + 1, 2.0 / win.sum())
+    scale[0] = 1.0 / win.sum()
+    if nperseg % 2 == 0:
+        scale[nyq] = 1.0 / win.sum()
     idx = np.arange(nperseg)
     auto = len(arrs) == 1
 
     num = np.zeros(k3.shape, complex)
     pp = np.zeros(k3.shape)
     zz = np.zeros(k3.shape)
-    block = max(1, _BLOCK_ELEMENTS // k3.size)
+    block = max(1, min(_BLOCK_ELEMENTS // k3.size, _BLOCK_ELEMENTS // nperseg))
     for b0 in range(0, n_avg, block):
         rows = seg_shot[b0:b0 + block, None]
         cols = seg_start[b0:b0 + block, None] + idx
         spec = []
         for a in arrs:
-            seg = a[rows, cols]
+            seg = a[rows, cols].astype(float)
             if detrend:
                 seg = sps.detrend(seg, axis=-1, type=detrend)
             spec.append(np.fft.rfft(seg * win, axis=-1) * scale)
@@ -203,7 +238,9 @@ def bicoherence(stack, dt, nperseg=1024, noverlap=None, *, f1_band=None,
     ``(df, Nyquist)`` for both, ``df = 1/(nperseg*dt)``. Only bins inside the
     bands are evaluated, so for long records give the bands (and choose
     ``nperseg`` for the resolution ``df`` you need) instead of computing the
-    full grid. ``f2`` may be negative. For the auto-bispectrum
+    full grid. ``f2`` may be negative. Points not resolved from 0 or from
+    each other (within the window's main lobe, e.g. the lowest 2 bins for
+    Hann) come back ``nan``; see :class:`BicoherenceResult`. For the auto-bispectrum
     ``B(f1, f2) = B(f2, f1)``, so ``f2 <= f1`` holds all the information.
 
     Returns a :class:`BicoherenceResult` ``(f1, f2, b2, bispectrum, n_avg,
