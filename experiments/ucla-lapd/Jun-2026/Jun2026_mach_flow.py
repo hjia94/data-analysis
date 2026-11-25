@@ -70,9 +70,12 @@ WINDOW_MS = (-2.0, 8.0)
 TE_EV = 5.0
 ION_MU = 4.0
 
-#: Probe axes, in npz/array order. X (+x West) and Y (+y Up) span the scan
-#: plane (drawn as the quiver); Z (+z_probe toward South cathode, opposite to
-#: B0 pointing North, so v_Z < 0 is flow North along +B0) gets its own map.
+#: Probe axes, in npz/array order. Confirmed P33 6-tip probe face geometry:
+#: X+ faces +x (West), Y+ faces +y (Up), Z+ faces +z_probe (South cathode,
+#: opposite to B0 pointing North) -- independently verified by bias-off
+#: South->North plasma flow striking Z+ head-on (j_Z+ > j_Z- on Cal 17/19 and
+#: Run 32 pre-bias). With FLOW_SIGN_PLUS_FACING_AXIS = -1, X/Y give lab-frame
+#: in-plane velocities and v_Z < 0 denotes flow North along +B0.
 AXES = ("X", "Y", "Z")
 
 #: Arrows are drawn every Nth cell in each direction. 41x41 arrows overlap into

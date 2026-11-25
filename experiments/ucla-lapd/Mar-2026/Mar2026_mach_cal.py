@@ -202,8 +202,11 @@ def main():
             f"this script deliberately does not make.")
 
     # --- kappa and flow from the pairing ------------------------------------
-    # Mar-2026 P29 probe empirical sign: flow_sign=+1 yields clockwise E x B
-    # rotation in Run 054 (opposite to Jun-2026 P33's FLOW_SIGN_PLUS_FACING_AXIS=-1).
+    # UNVERIFIED HARDWARE ORIENTATION: flow_sign=+1 is pinned solely to preserve
+    # the sign of Mar-2026's previously saved 054-mach-flow-data.npz archive
+    # (whose raw arrows rotated clockwise); confirm P29 tip normals / port side
+    # from hardware records before treating Mar-2026 flow sign as an independent
+    # check against E x B.
     kappa = np.array([area_ratio(np.exp(lnR[i, 0]), np.exp(lnR[i, 1]))
                       for i in range(len(AXES))])
     mach = np.array([mach_number(np.exp(lnR[i, 0]), np.exp(lnR[i, 1]), flow_sign=+1)

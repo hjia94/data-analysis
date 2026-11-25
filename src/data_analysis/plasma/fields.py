@@ -3,13 +3,15 @@
 Operators for E, B and J sampled on a regular spatial grid (B-dot probe planes
 and volumes, simulations, ...):
 
-- :func:`curl`, :func:`current_density` (J = curl B / mu_0), :func:`poynting`
+- :func:`curl`, :func:`current_density` (J = curl B / mu_0), :func:`divergence_2d`,
+  :func:`circular_polarization` (B_L / B_R / ellipticity), :func:`poynting`
   (S = E x B / mu_0), :func:`power_density` (J . E);
 - :func:`faraday_ephi` -- azimuthal E from dBz/dt, assuming the field is symmetric about its axis;
 - :func:`vector_potential` -- A from J by Biot-Savart (FFT convolution);
 - :func:`cycle_average`, :func:`cycle_means`, :func:`axisymmetric_integral`
   -- averages over drive cycles and integrals over volumes symmetric about the axis;
-- :func:`phasor`, :func:`ac_conductivity` -- complex sigma = J/E at a drive frequency.
+- :func:`phasor`, :func:`reference_locked_phasor`, :func:`ac_conductivity`
+  -- complex phasor response and sigma = J/E at a target frequency.
 
 **Units are SI throughout**: positions in m, B in T, E in V/m, J in A/m^2.
 Convert cm grids (x 0.01) and gauss (x 1e-4) before calling. The linear
@@ -86,6 +88,109 @@ def curl(Fx, Fy, Fz, dx, dy, dz, axes=(-1, -2, -3)):
 def current_density(Bx, By, Bz, dx, dy, dz, axes=(-1, -2, -3)):
     """J = curl(B) / mu_0 (A/m^2) from B in tesla on a grid in m; see :func:`curl`."""
     return tuple(c / mu_0 for c in curl(Bx, By, Bz, dx, dy, dz, axes))
+
+
+def divergence_2d(Fx, Fy, dx, dy, axes=(-1, -2)):
+    """In-plane 2-D divergence ``dFx/dx + dFy/dy`` on a grid (real or complex).
+
+    Uses the same second-order central/edge finite differences and ``axes=(x_axis, y_axis)``
+    layout as :func:`curl` (default ``(-1, -2)`` for ``(..., ny, nx)`` arrays).
+    Useful alongside ``curl(...)[2]`` as a coil-polarity and calibration diagnostic
+    (``|div B_perp| / |curl B|_z << 1`` for a shear-Alfvén mode with right-handed
+    ``(Bx, By)`` coils).
+    """
+    ax, ay = axes
+    shape = np.broadcast_shapes(np.shape(Fx), np.shape(Fy))
+    Fx = np.broadcast_to(_inexact(Fx), shape)
+    Fy = np.broadcast_to(_inexact(Fy), shape)
+    return _ddx(Fx, dx, ax) + _ddx(Fy, dy, ay)
+
+
+def circular_polarization(Bx, By, *, convention="exp_minus_iwt", b_sign_z=+1):
+    """Decompose complex transverse phasors ``(Bx, By)`` into ``(B_L, B_R, ellipticity)``.
+
+    In a right-handed ``(x, y, z)`` frame with guide field ``B_0`` along
+    ``b_sign_z * z_hat``:
+    - ``B_L`` is the **left-hand** circular component (ion-cyclotron sense:
+      clockwise in ``(x, y)`` when ``b_sign_z = +1``).
+    - ``B_R`` is the **right-hand** circular component (electron-cyclotron /
+      whistler sense: counter-clockwise in ``(x, y)`` when ``b_sign_z = +1``).
+    - ``ellipticity = (|B_R|^2 - |B_L|^2) / (|B_R|^2 + |B_L|^2)`` in ``[-1, +1]``
+      (``-1`` pure LHCP, ``+1`` pure RHCP, ``0`` linear polarization; ``NaN``
+      where ``|B_x|^2 + |B_y|^2 == 0``).
+
+    ``convention`` selects the phasor time-dependence:
+    - ``"exp_minus_iwt"`` (physics convention, ``B(t) = Re[B_tilde exp(-i w t)]``):
+      ``B_L = (Bx + i * s * By) / sqrt(2)``, ``B_R = (Bx - i * s * By) / sqrt(2)``
+      with ``s = sign(b_sign_z)``.
+    - ``"exp_plus_iwt"`` (:func:`phasor` convention, ``B(t) = Re[B_tilde exp(+i w t)]``):
+      replaces ``i`` by ``-i``.
+
+    Satisfies Parseval's identity ``|B_L|^2 + |B_R|^2 == |Bx|^2 + |By|^2``.
+    """
+    if convention not in ("exp_minus_iwt", "exp_plus_iwt"):
+        raise ValueError(
+            f"convention must be 'exp_minus_iwt' or 'exp_plus_iwt', got {convention!r}"
+        )
+    s = float(np.sign(b_sign_z or 1))
+    if convention == "exp_plus_iwt":
+        s = -s
+    bx = _inexact(Bx)
+    by = _inexact(By)
+    inv_s2 = 1.0 / np.sqrt(2.0)
+    B_L = (bx + 1j * s * by) * inv_s2
+    B_R = (bx - 1j * s * by) * inv_s2
+    pL = np.abs(B_L) ** 2
+    pR = np.abs(B_R) ** 2
+    tot = pL + pR
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ellip = np.where(tot > 0.0, (pR - pL) / tot, np.nan)
+    return B_L, B_R, ellip
+
+
+def reference_locked_phasor(sig, ref, dt, freq, *, dt_ref=None, axis=-1,
+                            shot_axis=0, window="hann", convention="exp_minus_iwt"):
+    """Coherent reference-locked complex phasor and coherence across shots -> ``(X_coh, gamma2)``.
+
+    For a self-excited instability with random shot-to-shot phase, averaging raw
+    phasors across shots cancels the mode. Multiplying each shot's phasor
+    ``X_s`` by a simultaneous stationary reference ``conj(R_s)`` removes the
+    arbitrary shot phase and projects out incoherent noise::
+
+        X_coh  = <X_s * conj(R_s)>_s / sqrt(<|R_s|^2>_s)
+        gamma2 = |<X_s * conj(R_s)>_s|^2 / (<|X_s|^2>_s * <|R_s|^2>_s)
+
+    Magnitude satisfies ``|X_coh| = sqrt(gamma2) * sqrt(<|X_s|^2>_s)`` and
+    phase equals ``arg(X) - arg(R)`` in the chosen ``convention``
+    (``"exp_minus_iwt"`` conjugates :func:`phasor` so spatial phase ``+m*theta``
+    matches ``cos(m*theta - w*t)``). Pass ``dt_ref`` if ``ref`` was sampled on
+    a different timebase than ``sig`` (both records should still start at the
+    same physical time ``t0``).
+    """
+    if convention not in ("exp_minus_iwt", "exp_plus_iwt"):
+        raise ValueError(
+            f"convention must be 'exp_minus_iwt' or 'exp_plus_iwt', got {convention!r}"
+        )
+    X_s = phasor(sig, dt, freq, axis=axis, window=window)
+    R_s = phasor(ref, dt if dt_ref is None else dt_ref, freq, axis=axis, window=window)
+    if convention == "exp_minus_iwt":
+        X_s = np.conj(X_s)
+        R_s = np.conj(R_s)
+    # Adjust shot_axis after `axis` has been reduced by phasor()
+    ndim_in = np.ndim(sig)
+    ax_norm = axis % ndim_in
+    sh_norm = shot_axis % ndim_in
+    if sh_norm == ax_norm:
+        raise ValueError("shot_axis and time axis must be distinct")
+    red_shot_axis = sh_norm - (1 if sh_norm > ax_norm else 0)
+
+    cross = np.mean(X_s * np.conj(R_s), axis=red_shot_axis)
+    pxx = np.mean(np.abs(X_s) ** 2, axis=red_shot_axis)
+    prr = np.mean(np.abs(R_s) ** 2, axis=red_shot_axis)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        X_coh = np.where(prr > 0.0, cross / np.sqrt(prr), np.nan + 0j)
+        gamma2 = np.where((pxx > 0.0) & (prr > 0.0), (np.abs(cross) ** 2) / (pxx * prr), np.nan)
+    return X_coh, gamma2
 
 
 def poynting(Ex, Ey, Ez, Bx, By, Bz):

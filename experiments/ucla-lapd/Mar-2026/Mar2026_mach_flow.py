@@ -215,8 +215,10 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, bin_ms=BIN_MS, te_ev=TE_EV,
                 R, counts, amplitude = binned_face_ratio(stacks[0], stacks[1],
                                                          edges)
                 n_valid[i, p] = counts
-                # Mar-2026 P29 empirical sign: flow_sign=+1 gives clockwise E x B
-                # rotation matching Run 054's saved archive (opposite to Jun-2026 P33).
+                # UNVERIFIED HARDWARE ORIENTATION: flow_sign=+1 preserves the
+                # previously saved Run 054 archive sign; verify P29 tip normals
+                # / port insertion side from hardware notes before citing
+                # Mar-2026 flow direction as an independent check of E x B.
                 mach[axis][p] = mach_single(R, kappa[axis], flow_sign=+1)
                 signal[p] += amplitude
                 n_axes_read[p] += 1

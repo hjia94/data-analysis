@@ -31,6 +31,7 @@ Always invoke scripts with the repo virtual environment (`.venv\Scripts\python.e
 | `Jun2026_modes.py` | `00`–`06`, `26`–`32` | `modes_dispersion_jun2026.npz` | 2-D azimuthal mode `m`, B-dot rotating-filament dipole & uncalibrated `V_perp`/flux amplitude, axial `k_par`, `biasscope` disc-current coherence, and plasma-frame dispersion (`f_plasma` vs. `f_*n`, `f_*T`, `f_A`). |
 | `Jun2026_bicoherence.py` | `00`–`06`, `08`–`14`, `26`–`31` | `bicoherence_jun2026.npz` | Late-bias-window (`2.24–4.80 ms`, per-run `window_post_onset` flag) auto- & cross-bicoherence (`Isat`, `I_2"`, `I_4"`), shot-to-shot phase consistency `R(f)`, and Sattolo shot-shuffled surrogate controls. |
 | `Jun2026_stability.py` | `06`, `00`–`05` (+ `600–1000 G`) | `stability_linear_jun2026.npz` | Linear stability benchmarks: pure cylindrical KH, 1-D axial 5-field Braginskii BVP (insulating vs. conducting Port-35 sheath closure + centrifugal stabilization), and 1-D radial `E x B`-sheared CWM. |
+| `Jun2026_bdot_2d.py` | `26` (`800 G`), `31` (`600 G`) | `bdot_2d_jun2026.npz` | 2-D reference-locked B-dot phasors (`f_0`, `2f_0`), Maxwell div/curl polarity check, `J_par = (curl B_perp)_z`, `|Bz|/|B_perp|`, and `B_L/B_R` circular polarization maps. |
 | `Jun2026_plot.py` | Saved `.npz` files | Static PNGs (`Jun2026/`) | Publication/diagnostic figures for IV lines, IV+Isat combined, and xcorr planes. |
 | `Jun2026_slider.py` | Saved `.npz` files | Standalone `.html` sliders | Scrubbable pages for IV lines, Isat FFTs, and multi-pair xcorr scans. |
 
@@ -121,7 +122,8 @@ Documented directly from the raw HDF5 files and run logs so downstream scripts d
 - Added measured-`Te` Mach velocity rescaling (`data_analysis.plasma.mach.rescale_mach_velocity`), antisymmetric rotation & cylindrical flow shear (`data_analysis.plasma.flow`), and paired IV/`E x B` shear comparison in `Jun2026_mach_line.py`.
 - Added azimuthal/axial mode decomposition, B-dot dipole check, and plasma-frame dispersion helpers (`src/data_analysis/plasma/modes.py`) and `Jun2026_modes.py`.
 - Added bispectral trigger-locking & surrogate controls (`shot_phase_consistency`, `bicoherence_surrogate`, `summed_bicoherence` in `src/data_analysis/signal/bispectral.py`) and `Jun2026_bicoherence.py`.
-- Added linear stability solvers (`src/data_analysis/plasma/stability.py`: local CWM, local & 1-D axial Chebyshev 5-field Braginskii BVP, and 1-D cylindrical radial KH/CWM) and `Jun2026_stability.py` (`stability_linear_jun2026.npz`), plus `tests/` unit tests (`59/59` unittest passing).
+- Added linear stability solvers (`src/data_analysis/plasma/stability.py`: local CWM, local & 1-D axial Chebyshev 5-field Braginskii BVP, and 1-D cylindrical radial KH/CWM) and `Jun2026_stability.py` (`stability_linear_jun2026.npz`).
+- Added 2-D electromagnetic field helpers (`divergence_2d`, `circular_polarization`, `reference_locked_phasor` in `src/data_analysis/plasma/fields.py`) and `Jun2026_bdot_2d.py` (`bdot_2d_jun2026.npz`), plus `tests/` unit tests (`63/63` unittest passing).
 
 ### Planned Next
 1. Publication/diagnostic figures in `Jun2026_plot.py` summarizing the onset mechanism, dispersion, and nonlinear harmonic coupling across gas puffs and `B0`.
