@@ -40,7 +40,8 @@ from data_analysis.io.probe_map import channel_wiring
 from data_analysis.plasma.flow import (antisymmetric_rotation_profile,
                                        radial_flow_shear)
 from data_analysis.plasma.langmuir import load_plasma_data, load_sweep_axes
-from data_analysis.plasma.mach import (K_HUTCHINSON, binned_face_ratio,
+from data_analysis.plasma.mach import (FLOW_SIGN_PLUS_FACING_AXIS,
+                                       K_HUTCHINSON, binned_face_ratio,
                                        flow_velocity, mach_single,
                                        rescale_mach_velocity)
 from data_analysis.plasma.profiles import (local_drift_scales,
@@ -294,6 +295,7 @@ def batch_line(ifn, iv_run, cal_path=CAL_NPZ, te_ev=TE_EV, out_path=None):
                                   for a in axes for s in "+-"]),
         "te_ev": np.float64(te_ev), "ion_mu": np.float64(ION_MU),
         "K_hutchinson": np.float64(K_HUTCHINSON),
+        "flow_sign": np.int64(FLOW_SIGN_PLUS_FACING_AXIS),
         "nshot": np.int32(pos.nshot),
         "source_file": np.str_(os.path.basename(ifn)),
         "calibration_file": np.str_(os.path.basename(cal_path)),
@@ -432,6 +434,12 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
     ifn = line_ifn(data_dir, mach_run)
     npz_path = line_npz_path(ifn)
     with np.load(npz_path) as m:
+        if "flow_sign" not in m.files or int(m["flow_sign"]) != int(FLOW_SIGN_PLUS_FACING_AXIS):
+            got = int(m["flow_sign"]) if "flow_sign" in m.files else "missing"
+            raise ValueError(
+                f"{npz_path}: stored flow_sign={got!r} != {FLOW_SIGN_PLUS_FACING_AXIS} "
+                "(unified lab-axis Mach convention); regenerate or migrate the line archive."
+            )
         iv_run = str(m["iv_run"])
         x_mach = np.asarray(m["pos"], dtype=float)
         t_ms = np.asarray(m["t_ms"], dtype=float)

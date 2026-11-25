@@ -38,7 +38,8 @@ from data_analysis.io import open_lapd, parse_shunts, position_shots
 from data_analysis.io.probe_map import channel_wiring
 from data_analysis.plasma.flow import (find_flow_centre as _fit_centre,
                                        polar_components)
-from data_analysis.plasma.mach import (K_HUTCHINSON, binned_face_ratio,
+from data_analysis.plasma.mach import (FLOW_SIGN_PLUS_FACING_AXIS,
+                                       K_HUTCHINSON, binned_face_ratio,
                                        flow_velocity, mach_single,
                                        time_bin_edges)
 from data_analysis.utils import run_num_of
@@ -69,8 +70,9 @@ WINDOW_MS = (-2.0, 8.0)
 TE_EV = 5.0
 ION_MU = 4.0
 
-#: Probe axes, in npz/array order. X and Y span the scan plane (drawn as the
-#: quiver); Z is along the machine axis (B) and gets its own map.
+#: Probe axes, in npz/array order. X (+x West) and Y (+y Up) span the scan
+#: plane (drawn as the quiver); Z (+z_probe toward South cathode, opposite to
+#: B0 pointing North, so v_Z < 0 is flow North along +B0) gets its own map.
 AXES = ("X", "Y", "Z")
 
 #: Arrows are drawn every Nth cell in each direction. 41x41 arrows overlap into
@@ -235,6 +237,7 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, window_ms=WINDOW_MS, bin_ms=BIN_MS,
         "te_ev": np.float64(te_ev), "ion_mu": np.float64(ION_MU),
         "bin_ms": np.float64(bin_ms), "window_ms": np.array(window_ms),
         "K_hutchinson": np.float64(K_HUTCHINSON),
+        "flow_sign": np.int64(FLOW_SIGN_PLUS_FACING_AXIS),
         "nshot": np.int32(pos.nshot),
         "source_file": np.str_(os.path.basename(ifn)),
         "calibration_file": np.str_(os.path.basename(cal_path)),
@@ -252,8 +255,19 @@ def batch_flow(ifn=IFN, cal_path=CAL_NPZ, window_ms=WINDOW_MS, bin_ms=BIN_MS,
 
 
 def load_flow(npz_path=None):
-    """The batched arrays as a plain dict, npz handle closed."""
-    with np.load(npz_path or flow_npz_path()) as d:
+    """The batched arrays as a plain dict, npz handle closed.
+
+    Validates that ``flow_sign`` matches :data:`FLOW_SIGN_PLUS_FACING_AXIS` so
+    legacy unflipped Mach archives cannot silently invert the flow direction.
+    """
+    path = npz_path or flow_npz_path()
+    with np.load(path) as d:
+        if "flow_sign" not in d.files or int(d["flow_sign"]) != int(FLOW_SIGN_PLUS_FACING_AXIS):
+            got = int(d["flow_sign"]) if "flow_sign" in d.files else "missing"
+            raise ValueError(
+                f"{path}: stored flow_sign={got!r} != {FLOW_SIGN_PLUS_FACING_AXIS} "
+                "(unified lab-axis Mach convention); regenerate or migrate the archive."
+            )
         return {k: d[k] for k in d.files}
 
 
@@ -297,7 +311,7 @@ def emit_flow_slider(npz_path=None, out=None, quiver_step=QUIVER_STEP,
     v_r, v_th = polar_components(vx, vy, data["pos_x"], data["pos_y"], (cx, cy))
 
     fz = grid_frames(data["pos_x"], data["pos_y"], vz)[0]
-    extra = [{"name": "axial flow (v_Z, along B)", "unit": "km/s",
+    extra = [{"name": "axial flow (v_Z, +South / -B0)", "unit": "km/s",
               "frames": fz, "cmap": "RdBu_r",
               "vmin": -vmax if vmax is not None else None, "vmax": vmax}]
 
@@ -337,7 +351,7 @@ def plot_flow_frame(t_ms, npz_path=None, quiver_step=QUIVER_STEP, vmax=None,
         f"Run {run_num}  -  t = {data['t_ms'][k]:+.2f} ms (t=0 bias start)  -  "
         f"{_te_note(data)}  -  polar centre ({cx:+.2f}, {cy:+.2f}) cm",
         quiver_step=quiver_step, vmax=vmax,
-        extra_panels=[(data["v_Z"][:, k], "axial  ($v_Z$, along B)",
+        extra_panels=[(data["v_Z"][:, k], "axial  ($v_Z$, +South / $-B_0$)",
                        r"$v_Z$ [km/s]")])
     name = f"{run_num}-mach-flow-{data['t_ms'][k]:+.2f}ms"
     finalize_figure(fig, save_fig=resolve_save(save_fig, name, jpl.FIG_SUBDIR))

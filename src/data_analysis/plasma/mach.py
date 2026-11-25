@@ -1,20 +1,24 @@
 """Mach-probe estimator maths -- campaign-agnostic.
 
 A Mach probe reads ion saturation current on two opposed faces of one axis. In
-the magnetised fluid model the faces see
+the magnetised fluid model, the upstream-facing tip collects enhanced current:
 
-    j_pm = j_sat * kappa_pm * exp(pm M / K)
+    j_pm = j_sat * kappa_pm * exp(pm * s * M_lab / K)
 
-so their ratio ``R = j_+ / j_-`` carries the flow *and* the unknown ratio of
-collecting areas ``kappa = A_+/A_-``. Separating the two needs a second
-measurement with the probe rotated 180 deg about its shaft.
+where ``s = flow_sign`` maps face orientation to the lab axis: when the
+hardware ``+`` tip physically faces ``+axis`` (e.g. ``X+`` faces ``+x``,
+``Y+`` faces ``+y``, ``Z+`` faces ``+z``), plasma flowing *toward* ``+axis``
+strikes the ``-`` face (``j_- > j_+``), so ``s = FLOW_SIGN_PLUS_FACING_AXIS = -1``
+and ``M_lab = -(K/2) ln(R/kappa)`` is positive for flow along ``+axis``.
+If a probe's ``+`` tip instead faces ``-axis`` (looking upstream into
+``+axis`` flow), pass ``flow_sign=+1``.
 
 **Every current here is hardware-labelled.** ``j_plus`` is a fixed physical tip
 on a fixed DAQ channel -- *not* "the face pointing upstream". Under that
 convention a 180 deg rotation inverts the flow exponent while leaving kappa
 alone::
 
-    R_a = kappa * exp(+2M/K)        R_b = kappa * exp(-2M/K)
+    R_a = kappa * exp(+2 s M_lab / K)        R_b = kappa * exp(-2 s M_lab / K)
 
 so the **product** isolates the area ratio and the **ratio** isolates the flow.
 Flow-referenced treatments (where ``J_+`` means the upstream face by definition)
@@ -41,6 +45,13 @@ from data_analysis.plasma.formulas import ion_sound_speed
 # calibration constant relating ln(j_+/j_-) to the Mach number; unmagnetised and
 # kinetic models give other values, so it is a parameter everywhere below.
 K_HUTCHINSON = 0.45
+
+#: Authoritative lab-axis sign convention when the ``+`` tip faces ``+axis``
+#: (e.g. ``X+`` faces ``+x``, ``Y+`` faces ``+y``, ``Z+`` faces ``+z``):
+#: flow moving along ``+axis`` strikes the ``-`` face (``j_- > j_+``), so
+#: ``M_lab = FLOW_SIGN_PLUS_FACING_AXIS * (K/2) * ln(R/kappa)`` is positive for
+#: flow along ``+axis``. Pass ``flow_sign=+1`` only if ``+`` faces ``-axis``.
+FLOW_SIGN_PLUS_FACING_AXIS = -1
 
 
 def valid_current_mask(*currents):
@@ -92,23 +103,29 @@ def area_ratio(R_a, R_b):
     return np.sqrt(np.asarray(R_a, dtype=float) * np.asarray(R_b, dtype=float))
 
 
-def mach_number(R_a, R_b, K=K_HUTCHINSON):
-    """Mach number from two opposing orientations -> ``M = (K/4) ln(R_a/R_b)``.
+def mach_number(R_a, R_b, K=K_HUTCHINSON, flow_sign=FLOW_SIGN_PLUS_FACING_AXIS):
+    """Lab-axis Mach number from two opposing orientations -> ``flow_sign * (K/4) ln(R_a/R_b)``.
 
-    The **ratio**: kappa cancels, leaving the flow along the lab axis this face
-    pair faced in orientation ``a``. Swapping the arguments flips the sign.
+    The **ratio**: kappa cancels, leaving the flow along the lab axis of
+    orientation ``a`` (positive along ``+axis`` when ``flow_sign=-1`` and the
+    ``+`` face points toward ``+axis``). Swapping ``R_a``/``R_b`` flips sign.
     """
-    return (K / 4.0) * np.log(np.asarray(R_a, dtype=float)
-                              / np.asarray(R_b, dtype=float))
+    return float(flow_sign) * (K / 4.0) * np.log(
+        np.asarray(R_a, dtype=float) / np.asarray(R_b, dtype=float)
+    )
 
 
-def mach_single(R, kappa, K=K_HUTCHINSON):
-    """Mach number from one orientation given a known kappa -> ``(K/2) ln(R/kappa)``.
+def mach_single(R, kappa, K=K_HUTCHINSON, flow_sign=FLOW_SIGN_PLUS_FACING_AXIS):
+    """Lab-axis Mach number from one orientation given kappa -> ``flow_sign * (K/2) ln(R/kappa)``.
 
+    With ``flow_sign=FLOW_SIGN_PLUS_FACING_AXIS`` (``-1``), positive ``M``
+    denotes plasma flowing toward ``+axis`` when the ``+`` tip physically faces
+    ``+axis`` (upstream-collecting ``-`` tip sees higher current).
     Accuracy is limited by kappa's systematic error, not by shot noise.
     """
-    return (K / 2.0) * np.log(np.asarray(R, dtype=float)
-                              / np.asarray(kappa, dtype=float))
+    return float(flow_sign) * (K / 2.0) * np.log(
+        np.asarray(R, dtype=float) / np.asarray(kappa, dtype=float)
+    )
 
 
 def flow_velocity(M, T_e_eV, mu, gamma=5 / 3, Z=1):

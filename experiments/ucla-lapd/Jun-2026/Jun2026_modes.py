@@ -449,8 +449,7 @@ def analyze_biasscope_coherence(data_dir=DATA_DIR, runs=("06", "00", "01", "02",
 
 def build_dispersion_table(data_dir=DATA_DIR, *, r_cm=DISPERSION_R_CM,
                            r_half_cm=DISPERSION_R_HALF_CM,
-                           m=DEFAULT_M, b_sign_z=B_SIGN_Z,
-                           mach_theta_sign=-1, k_par_m=0.65):
+                           m=DEFAULT_M, b_sign_z=B_SIGN_Z, k_par_m=0.65):
     """Combine Modules #1-#3 into plasma-frame dispersion on a **matched** radial band.
 
     Evaluates ``ne``, ``Te``, ``dln_ne_dr``, ``dln_te_dr``, ``v_ExB``, and
@@ -458,15 +457,14 @@ def build_dispersion_table(data_dir=DATA_DIR, *, r_cm=DISPERSION_R_CM,
     ``r in [r_cm - r_half_cm, r_cm + r_half_cm]`` so Doppler shifts from
     Langmuir ``E x B`` and P33 Mach are compared at identical radii.
 
-    Uses the **signed** measured velocities (no ``abs`` magnitude forcing):
+    Uses the **signed** measured velocities under one shared lab convention
+    (``v_theta > 0`` CCW, ``v_theta < 0`` CW):
     - ``v_ExB_r`` stores signed outward ``E_r / B_0``, so azimuthal
       ``v_theta = -b_sign_z * (E_r / B_0)`` (clockwise ``< 0`` when ``E_r > 0``
       and ``B_0`` points along ``+z``).
-    - Mach ``dv_rot = 0.5 * (dv_Y(x_c + r) - dv_Y(x_c - r))`` uses the
-      upstream-looking tip convention of :mod:`Jun2026_mach_cal` (``Y+`` faces
-      ``+y``, so ``M_Y > 0`` means flow along ``-y``); thus ``dv_rot > 0``
-      corresponds to clockwise rotation ``v_theta = mach_theta_sign * dv_rot``
-      with ``mach_theta_sign = -1``.
+    - Mach ``dv_rot = 0.5 * (dv_Y(x_c + r) - dv_Y(x_c - r))`` is already
+      signed lab-frame ``v_theta`` using the unified :mod:`data_analysis.plasma.mach`
+      lab-axis sign convention (``FLOW_SIGN_PLUS_FACING_AXIS = -1``).
     """
     onset = jon.load_onset_table(os.path.join(data_dir, jon.OUT_NAME))
     prof_p = os.path.join(data_dir, jpr.OUT_NAME)
@@ -505,11 +503,11 @@ def build_dispersion_table(data_dir=DATA_DIR, *, r_cm=DISPERSION_R_CM,
 
             # Signed azimuthal velocities on the exact same matched radial band [r_cm +- r_half_cm]:
             # v_ExB_r = Er / B0 -> v_theta = -b_sign_z * (Er / B0)
-            # dv_rot  = 0.5*(dv_Y(+r) - dv_Y(-r)) -> v_theta = mach_theta_sign * dv_rot
+            # dv_rot  = 0.5*(dv_Y(+r) - dv_Y(-r)) is already signed lab-frame v_theta
             v_exb_band = md[f"{mr}__v_ExB_r_km_s"][band_m, ref_bin] * 1e3  # m/s
             v_mach_band = md[f"{mr}__dv_rot_km_s"][band_m, ref_bin] * 1e3  # m/s
             v_rot_exb = -int(np.sign(b_sign_z or 1)) * float(np.nanmedian(v_exb_band))
-            v_rot_mach = int(np.sign(mach_theta_sign or -1)) * float(np.nanmedian(v_mach_band))
+            v_rot_mach = float(np.nanmedian(v_mach_band))
 
             d_exb = plasma_frame_dispersion(
                 f_lab_eval, m=m, r_cm=r_cm, v_rot_m_s=v_rot_exb,

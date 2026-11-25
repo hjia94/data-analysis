@@ -121,7 +121,7 @@ Documented directly from the raw HDF5 files and run logs so downstream scripts d
 - Added measured-`Te` Mach velocity rescaling (`data_analysis.plasma.mach.rescale_mach_velocity`), antisymmetric rotation & cylindrical flow shear (`data_analysis.plasma.flow`), and paired IV/`E x B` shear comparison in `Jun2026_mach_line.py`.
 - Added azimuthal/axial mode decomposition, B-dot dipole check, and plasma-frame dispersion helpers (`src/data_analysis/plasma/modes.py`) and `Jun2026_modes.py`.
 - Added bispectral trigger-locking & surrogate controls (`shot_phase_consistency`, `bicoherence_surrogate`, `summed_bicoherence` in `src/data_analysis/signal/bispectral.py`) and `Jun2026_bicoherence.py`.
-- Added linear stability solvers (`src/data_analysis/plasma/stability.py`: local CWM, local & 1-D axial Chebyshev 5-field Braginskii BVP, and 1-D cylindrical radial KH/CWM) and `Jun2026_stability.py` (`stability_linear_jun2026.npz`), plus `tests/` unit tests (`58/58` unittest passing).
+- Added linear stability solvers (`src/data_analysis/plasma/stability.py`: local CWM, local & 1-D axial Chebyshev 5-field Braginskii BVP, and 1-D cylindrical radial KH/CWM) and `Jun2026_stability.py` (`stability_linear_jun2026.npz`), plus `tests/` unit tests (`59/59` unittest passing).
 
 ### Planned Next
 1. Publication/diagnostic figures in `Jun2026_plot.py` summarizing the onset mechanism, dispersion, and nonlinear harmonic coupling across gas puffs and `B0`.

@@ -596,12 +596,12 @@ def solve_radial_cylindrical_modes(r_cm, ne_cm3, te_ev, vp_v, *,
       ``-(1/(r n_0)) d/dr(r n_0 dphi/dr) + (m^2/r^2) phi``, radial ``E x B``
       shear ``Omega_E(r)``, optional Kelvin-Helmholtz vorticity-gradient term,
       optional centrifugal stabilization ``omega_g(r)``, series column
-      resistivity, and parallel thermal conduction ``(2/3) chi_par k_par^2``.
-      Simplification: the sheath current sink in the continuity equation uses
-      the floating-sheath form ``nu_sh_eff * (phi/T_e - Lambda * T_hat)`` and
-      omits the ``n_hat`` ion-saturation perturbation term (which vanishes
-      identically at zero DC net current ``J_0 = 0``, but adds
-      ``J_0 * (n_hat + 0.5 * T_hat)`` under finite DC bias current).
+      resistivity, parallel thermal conduction ``(2/3) chi_par k_par^2``, and
+      ambipolar Bohm end-plate particle loss ``nu_sh * (n_hat + 0.5 * T_hat)``
+      in the continuity equation alongside the sheath current closure
+      ``nu_sh_eff * (phi / T_e - Lambda * T_hat)`` (floating-sheath ``J_0 = 0``
+      linearization for the current difference; finite DC bias current would
+      add a ``J_0 * (n_hat + 0.5 * T_hat)`` contribution to vorticity).
 
     Returns a dict with ``f_lab_hz``, ``f_plasma_at_peak_hz``, ``gamma_s``,
     ``r_peak_cm``, ``omega_rad_s``, ``phi_r``, and ``r_cm``.
@@ -724,11 +724,13 @@ def solve_radial_cylindrical_modes(r_cm, ne_cm3, te_ev, vp_v, *,
     Bm = np.zeros((3 * Nr, 3 * Nr), dtype=complex)
     s0, s1, s2 = slice(0, Nr), slice(Nr, 2 * Nr), slice(2 * Nr, 3 * Nr)
 
-    # 1) Continuity (with sheath electron current sink)
+    # 1) Electron continuity with ambipolar Bohm end-loss + sheath current closure:
+    #    -i*(w - m*Om)*n + i*w_*n*phi + nu_sh*(n + 0.5*T) - nu_sh_eff*(phi/Te - Lambda*T) = 0
+    #    => w*n = m*Om*n + w_*n*phi - i*nu_sh*(n + 0.5*T) + i*nu_sh_eff*(phi/Te - Lambda*T)
     Bm[s0, s0] = I
-    Am[s0, s0] = D_mOm
+    Am[s0, s0] = D_mOm - 1j * np.diag(nu_sh)
     Am[s0, s1] = np.diag(-sgn * (m_int / (r * B)) * dln_n * phi_scale) + 1j * np.diag(nu_sh_eff * phi_scale / te)
-    Am[s0, s2] = -1j * np.diag(nu_sh_eff * float(sheath_lambda))
+    Am[s0, s2] = -1j * np.diag(nu_sh_eff * float(sheath_lambda) + 0.5 * nu_sh)
 
     # 2) Vorticity
     Bm[s1, s1] = L_n

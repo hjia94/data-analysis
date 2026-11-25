@@ -31,7 +31,8 @@ import numpy as np
 from data_analysis.io import open_lapd, parse_shunts
 from data_analysis.io.paths import output_path
 from data_analysis.io.probe_map import channel_wiring
-from data_analysis.plasma.mach import (K_HUTCHINSON, area_ratio, combine_log,
+from data_analysis.plasma.mach import (FLOW_SIGN_PLUS_FACING_AXIS,
+                                       K_HUTCHINSON, area_ratio, combine_log,
                                        face_ratio, fit_calibration,
                                        mach_number, valid_current_mask)
 from data_analysis.signal import clip_time_window
@@ -160,7 +161,7 @@ def main():
             comp, sign = ORIENTATION[run][axis]
             row = np.zeros(len(param_names))
             row[FIT_AXES.index(axis)] = 1.0
-            row[len(FIT_AXES) + comp] = (2.0 / K_HUTCHINSON) * sign
+            row[len(FIT_AXES) + comp] = FLOW_SIGN_PLUS_FACING_AXIS * (2.0 / K_HUTCHINSON) * sign
             rows.append(row)
             y.append(lnR[AXES.index(axis), j])
             s.append(sig[AXES.index(axis), j])

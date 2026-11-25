@@ -19,8 +19,11 @@ from data_analysis.plasma.flow import (
     radial_flow_shear,
 )
 from data_analysis.plasma.mach import (
+    FLOW_SIGN_PLUS_FACING_AXIS,
     binned_face_ratio,
     flow_velocity,
+    mach_number,
+    mach_single,
     rescale_mach_velocity,
 )
 import Jun2026_mach_line as jml
@@ -93,6 +96,24 @@ class TestBinnedFaceRatio(unittest.TestCase):
 
 
 class TestMachRescalingAndFlowShear(unittest.TestCase):
+    def test_mach_lab_axis_sign_convention(self):
+        # When the '+' tip faces +axis (FLOW_SIGN_PLUS_FACING_AXIS = -1), plasma
+        # flowing along +axis strikes the '-' face so R = j_+/j_- < kappa -> M_lab > 0.
+        self.assertEqual(FLOW_SIGN_PLUS_FACING_AXIS, -1)
+        self.assertGreater(mach_single(R=0.5, kappa=1.0), 0.0)
+        self.assertLess(mach_single(R=2.0, kappa=1.0), 0.0)
+        # Reversing orientation swaps R_a and R_b -> M_lab > 0 when R_a < R_b
+        self.assertGreater(mach_number(R_a=0.5, R_b=2.0), 0.0)
+        self.assertAlmostEqual(
+            mach_number(R_a=0.5, R_b=2.0), mach_single(R=0.5, kappa=1.0), places=12
+        )
+        # Explicit flow_sign=+1 overrides for probes whose '+' tip faces -axis
+        self.assertAlmostEqual(
+            mach_single(R=2.0, kappa=1.0, flow_sign=+1),
+            -mach_single(R=2.0, kappa=1.0),
+            places=12,
+        )
+
     def test_rescale_mach_velocity_errors_and_invalid_te(self):
         M = np.array([0.0, 0.25, -0.5])
         Te = np.array([4.0, 4.0, -1.0])
@@ -172,6 +193,7 @@ class TestMachRescalingAndFlowShear(unittest.TestCase):
                 axes=np.array(["X", "Y"]),
                 ion_mu=np.float64(4.0),
                 K_hutchinson=np.float64(0.45),
+                flow_sign=np.int64(FLOW_SIGN_PLUS_FACING_AXIS),
                 kappa=np.array([1.0, 1.0]),
                 kappa_err_sys=np.array([0.05, 0.05]),
                 M_X=np.zeros((x.size, 2)),

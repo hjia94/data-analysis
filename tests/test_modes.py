@@ -174,8 +174,9 @@ class TestModesAndDispersion(unittest.TestCase):
                 for mr in ("08", "09", "10", "11", "12", "13", "14"):
                     mach_d[f"{mr}__ref_bin_idx"] = np.int64(0)
                     mach_d[f"{mr}__r_cm"] = r
+                    # sign_v > 0 -> outward Er > 0 (CW v_theta < 0) and lab-frame Mach dv_rot < 0 (CW)
                     mach_d[f"{mr}__v_ExB_r_km_s"] = np.full((r.size, 1), sign_v * 1.5)
-                    mach_d[f"{mr}__dv_rot_km_s"] = np.full((r.size, 1), sign_v * 1.2)
+                    mach_d[f"{mr}__dv_rot_km_s"] = np.full((r.size, 1), -sign_v * 1.2)
 
                 np.savez(os.path.join(tmp, "profiles_summary_jun2026.npz"), **prof_d)
                 np.savez(os.path.join(tmp, "mach_line_rescaled_jun2026.npz"), **mach_d)
