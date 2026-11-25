@@ -150,6 +150,43 @@ class TestModesAndDispersion(unittest.TestCase):
         self.assertGreater(err_raw, 5.0)
         self.assertLess(err_aa, 0.05 * err_raw)
 
+    def test_build_dispersion_table_preserves_measured_velocity_signs(self):
+        # Flipping the sign of v_ExB_r or Mach dv_rot must flip the Doppler shift
+        # rather than forcing clockwise via abs().
+        with tempfile.TemporaryDirectory() as tmp:
+            x = np.arange(-6.0, 7.0, 1.0)
+            r = np.arange(1.0, 7.0, 1.0)
+            fake_onset = {
+                ir: {"f_peak_hz": 4000.0, "gamma_med_s": 3000.0, "t_onset_med_ms": 2.0}
+                for ir in ("06", "00", "01", "02", "03", "04", "05")
+            }
+            for sign_v in (+1.0, -1.0):
+                prof_d = {}
+                mach_d = {}
+                for ir in ("06", "00", "01", "02", "03", "04", "05"):
+                    prof_d[f"{ir}__ref_sweep_idx"] = np.int64(0)
+                    prof_d[f"{ir}__x_cm"] = x
+                    prof_d[f"{ir}__x_center_cm"] = np.float64(0.0)
+                    prof_d[f"{ir}__ne"] = np.full((x.size, 1), 5e12)
+                    prof_d[f"{ir}__Te"] = np.full((x.size, 1), 2.0)
+                    prof_d[f"{ir}__dln_ne_dr"] = np.full((x.size, 1), +0.3)
+                    prof_d[f"{ir}__dln_te_dr"] = np.full((x.size, 1), -0.3)
+                for mr in ("08", "09", "10", "11", "12", "13", "14"):
+                    mach_d[f"{mr}__ref_bin_idx"] = np.int64(0)
+                    mach_d[f"{mr}__r_cm"] = r
+                    mach_d[f"{mr}__v_ExB_r_km_s"] = np.full((r.size, 1), sign_v * 1.5)
+                    mach_d[f"{mr}__dv_rot_km_s"] = np.full((r.size, 1), sign_v * 1.2)
+
+                np.savez(os.path.join(tmp, "profiles_summary_jun2026.npz"), **prof_d)
+                np.savez(os.path.join(tmp, "mach_line_rescaled_jun2026.npz"), **mach_d)
+
+                with mock.patch.object(jmo.jon, "load_onset_table", return_value=fake_onset):
+                    rows = jmo.build_dispersion_table(data_dir=tmp, m=-1, b_sign_z=+1)
+                # sign_v > 0 -> CW rotation -> m=-1 has positive Doppler shift;
+                # sign_v < 0 -> CCW rotation -> m=-1 has negative Doppler shift!
+                self.assertGreater(rows["02"]["f_doppler_exb_hz"] * sign_v, 0.0)
+                self.assertGreater(rows["02"]["f_doppler_mach_hz"] * sign_v, 0.0)
+
     def test_require_xcorr_raises_keyerror_and_batch_all_skips_by_default(self):
         with mock.patch.object(jpl, "_load_xcorr_run", return_value=None):
             with self.assertRaises(KeyError):

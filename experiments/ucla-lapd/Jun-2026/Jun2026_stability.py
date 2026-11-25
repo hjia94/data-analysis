@@ -28,6 +28,7 @@ import datetime
 import os
 
 import numpy as np
+from scipy.interpolate import UnivariateSpline
 
 from data_analysis.plasma.stability import (
     fit_smooth_radial_profile,
@@ -56,18 +57,61 @@ DEFAULT_B_SIGN_Z = +1
 DEFAULT_N_NODES = 24
 DEFAULT_R_GRID_CM = np.linspace(0.5, 12.0, 24)
 DEFAULT_MIN_WIDTH_CM = 2.4        # smooth radial fit lower bound (prevents r->0 spikes)
+KH_SENSITIVITY_MIN_WIDTHS_CM = (1.5, 2.0, 2.4, 3.0)
+KH_SPLINE_SMOOTHING = 0.5         # quartic spline smoothing factor s on symmetrized Vp(r)
 
-# Sweeps closest to instability onset (includes straddling sweeps at t=1.60 ms
-# for Run 02 and t=2.10 ms for Run 01 where gradients have finished developing).
-NEAR_ONSET_SWEEP = {
-    "06": 14,   # 23 ms, t = 2.10 ms (stable)
-    "00": 9,    # 24 ms, t = 2.10 ms (pre_onset, t_on = 2.88 ms)
-    "01": 9,    # 25 ms, t = 2.10 ms (straddling, t_on = 2.50 ms)
-    "02": 8,    # 30 ms, t = 1.60 ms (straddling, t_on = 1.65 ms)
-    "03": 8,    # 35 ms, t = 0.90 ms (pre_onset, t_on = 1.15 ms)
-    "04": 8,    # 40 ms, t = 1.10 ms (pre_onset, t_on = 1.57 ms)
-    "05": 8,    # 45 ms, t = 1.10 ms (pre_onset, t_on = 2.35 ms)
-}
+
+def select_near_onset_sweep(t_start_ms, t_mid_ms, regimes, t_onset_med_ms, ref_sweep_idx):
+    """Derive the sweep closest to instability onset from sweep timestamps and ``t_onset``.
+
+    For stable runs (``t_onset_med_ms`` non-finite), returns ``ref_sweep_idx``.
+    For unstable runs, selects the latest bias-on sweep (``t_mid_ms > 0``) that
+    starts and has its midpoint before ``t_onset_med_ms`` (allowing ``"straddling"``
+    sweeps such as Run 01 at 2.10 ms and Run 02 at 1.60 ms where gradients have
+    finished developing, while returning the regime label explicitly so callers
+    can distinguish strictly ``"pre_onset"`` from ``"straddling"``).
+    """
+    t0 = np.asarray(t_start_ms, dtype=float)
+    tm = np.asarray(t_mid_ms, dtype=float)
+    regs = [str(r) for r in regimes]
+    ref_idx = int(ref_sweep_idx)
+    if not np.isfinite(t_onset_med_ms):
+        return ref_idx, regs[ref_idx]
+
+    cands = [
+        i for i in range(tm.size)
+        if tm[i] > 0.0
+        and t0[i] < float(t_onset_med_ms)
+        and tm[i] <= float(t_onset_med_ms)
+        and regs[i] in ("pre_onset", "straddling")
+    ]
+    if not cands:
+        return ref_idx, regs[ref_idx]
+    best = max(cands, key=lambda i: float(tm[i]))
+    return int(best), regs[best]
+
+
+def _kh_spline_sensitivity(x_cm, x_center_cm, vp_x, r_grid_cm, ne_g, te_g, *,
+                           b0_g=800.0, m=DEFAULT_M, smoothing=KH_SPLINE_SMOOTHING):
+    """Evaluate pure-KH growth on an even-mirrored quartic smoothing spline of ``Vp(r)``."""
+    r_abs = np.round(np.abs(np.asarray(x_cm, dtype=float) - float(x_center_cm)), 3)
+    ru = np.unique(r_abs[r_abs <= 15.0 + 1e-6])
+    vp_sym = np.array([
+        np.nanmean(vp_x[r_abs == rv]) if np.any(np.isfinite(vp_x[r_abs == rv])) else np.nan
+        for rv in ru
+    ], dtype=float)
+    fin = np.isfinite(vp_sym)
+    ru, vp_sym = ru[fin], vp_sym[fin]
+    # Even mirror across r = 0 so spline enforces Vp'(0) = 0 cleanly
+    pos = ru > 0.0
+    r_mir = np.concatenate((-ru[pos][::-1], ru))
+    v_mir = np.concatenate((vp_sym[pos][::-1], vp_sym))
+    spl = UnivariateSpline(r_mir, v_mir, k=4, s=float(smoothing))
+    vp_sp = spl(r_grid_cm)
+    res = solve_radial_cylindrical_modes(
+        r_grid_cm, ne_g, te_g, vp_sp, b0_g=b0_g, m=m, model="pure_kh",
+    )
+    return float(res["gamma_s"])
 
 
 def _extract_wall_state(pf, run_num, swp_idx, *, b0_g=800.0,
@@ -131,8 +175,13 @@ def analyze_puff_scan(data_dir=DATA_DIR, *, l_par_m=DEFAULT_L_PAR_M,
         for spec in jpr.PROFILE_RUNS:
             rnum = spec.run_num
             ref_swp = int(pf[f"{rnum}__ref_sweep_idx"])
-            near_swp = int(NEAR_ONSET_SWEEP.get(rnum, ref_swp))
             t_mid = pf[f"{rnum}__t_mid_ms"]
+            t_start = pf[f"{rnum}__t_start_ms"]
+            regs = pf[f"{rnum}__regimes"]
+            t_on_med = float(of[f"{rnum}__t_onset_med_ms"])
+            near_swp, near_regime = select_near_onset_sweep(
+                t_start, t_mid, regs, t_on_med, ref_swp
+            )
 
             st_ref, lam_ref = _extract_wall_state(pf, rnum, ref_swp, b0_g=spec.b0_g)
             st_near, lam_near = _extract_wall_state(pf, rnum, near_swp, b0_g=spec.b0_g)
@@ -196,6 +245,21 @@ def analyze_puff_scan(data_dir=DATA_DIR, *, l_par_m=DEFAULT_L_PAR_M,
                 r_grid_cm, ne_g, te_g, vp_g, b0_g=spec.b0_g, m=DEFAULT_M,
                 model="pure_kh",
             )
+            # KH profile-fit sensitivity (varying 2-Gaussian min_width_cm + quartic smoothing spline)
+            kh_sens_gammas = []
+            for mw in KH_SENSITIVITY_MIN_WIDTHS_CM:
+                vp_mw, _ = fit_smooth_radial_profile(
+                    x, xc, pf[f"{rnum}__Vp"][:, near_swp], r_grid_cm, min_width_cm=mw,
+                )
+                kh_mw = solve_radial_cylindrical_modes(
+                    r_grid_cm, ne_g, te_g, vp_mw, b0_g=spec.b0_g, m=DEFAULT_M, model="pure_kh",
+                )
+                kh_sens_gammas.append(float(kh_mw["gamma_s"]))
+            kh_spline_gamma = _kh_spline_sensitivity(
+                x, xc, pf[f"{rnum}__Vp"][:, near_swp], r_grid_cm, ne_g, te_g,
+                b0_g=spec.b0_g, m=DEFAULT_M,
+            )
+            kh_max_gamma = float(max(kh_sens_gammas + [kh_spline_gamma]))
             rad_cwm_nosh = solve_radial_cylindrical_modes(
                 r_grid_cm, ne_g, te_g, vp_g, b0_g=spec.b0_g, m=DEFAULT_M,
                 model="cwm_sheath", l_par_m=l_par_m, sheath_lambda=lam_near,
@@ -225,6 +289,7 @@ def analyze_puff_scan(data_dir=DATA_DIR, *, l_par_m=DEFAULT_L_PAR_M,
                 "ref_sweep_t_ms": float(t_mid[ref_swp]),
                 "near_sweep_idx": near_swp,
                 "near_sweep_t_ms": float(t_mid[near_swp]),
+                "near_sweep_regime": str(near_regime),
                 "k_perp_m": k_perp,
                 "lambda_ref": lam_ref,
                 "lambda_near": lam_near,
@@ -236,6 +301,8 @@ def analyze_puff_scan(data_dir=DATA_DIR, *, l_par_m=DEFAULT_L_PAR_M,
                 "local_cwm_gamma_s": float(w_loc_cwm.imag),
                 "rad_kh_f_lab_hz": rad_kh["f_lab_hz"],
                 "rad_kh_gamma_s": rad_kh["gamma_s"],
+                "rad_kh_spline_gamma_s": kh_spline_gamma,
+                "rad_kh_sens_max_gamma_s": kh_max_gamma,
                 "rad_cwm_nosh_f_lab_hz": rad_cwm_nosh["f_lab_hz"],
                 "rad_cwm_nosh_gamma_s": rad_cwm_nosh["gamma_s"],
                 "rad_cwm_nosh_r_pk_cm": rad_cwm_nosh["r_peak_cm"],
@@ -275,10 +342,15 @@ def analyze_b0_scaling(data_dir=DATA_DIR, *, ref_run="02", b0_list=(600.0, 800.0
                        n_nodes=DEFAULT_N_NODES):
     """Evaluate 1-D Axial CWM BVP across ``B0 = 600, 800, 1000 G`` using Run 02 profile."""
     prof_p = os.path.join(data_dir, jpr.OUT_NAME)
+    onset_p = os.path.join(data_dir, jon.OUT_NAME)
     k_r = np.pi / (float(wall_width_cm) * 1e-2)
     out = {}
-    with np.load(prof_p, allow_pickle=True) as pf:
-        swp = int(NEAR_ONSET_SWEEP.get(ref_run, int(pf[f"{ref_run}__ref_sweep_idx"])))
+    with np.load(prof_p, allow_pickle=True) as pf, np.load(onset_p, allow_pickle=True) as of:
+        swp, _ = select_near_onset_sweep(
+            pf[f"{ref_run}__t_start_ms"], pf[f"{ref_run}__t_mid_ms"],
+            pf[f"{ref_run}__regimes"], float(of[f"{ref_run}__t_onset_med_ms"]),
+            int(pf[f"{ref_run}__ref_sweep_idx"]),
+        )
         for b0_g in b0_list:
             st, lam = _extract_wall_state(pf, ref_run, swp, b0_g=b0_g)
             k_perp = float(np.hypot(st.k_theta_m, k_r))
@@ -355,13 +427,18 @@ def print_summary(npz_path=None):
     """Print the linear stability model comparison across the Jun-2026 puff & B0 scans."""
     npz_path = npz_path or os.path.join(DATA_DIR, OUT_NAME)
     with np.load(npz_path, allow_pickle=True) as d:
+        def _fmt_cwm(f_hz, g_s, dp_deg, width=22):
+            if not np.isfinite(g_s):
+                return f"{'no unstable CWM':>{width}}"
+            return f"{f_hz*1e-3:+6.2f} {g_s*1e-3:+6.2f} {dp_deg:+7.1f}d".rjust(width)
+
         print(
             f"\n=== 1. Linear Stability Model Comparison Across 23–45 ms Puff Scan "
             f"(L_par={float(d['l_par_m']):.0f} m, wall_w={float(d['wall_width_cm']):.0f} cm) ==="
         )
         print(
-            f"{'Run':>3} {'Puff':>4} | {'EXP f_pl':>8} {'EXP g':>6} | "
-            f"{'PureKH g':>8} | {'Insul-BVP (f, g)':>16} | "
+            f"{'Run':>3} {'Puff':>4} {'Near':>10} | {'EXP f_pl':>8} {'EXP g':>6} | "
+            f"{'KH max':>7} | {'Insul-BVP (f, g)':>16} | "
             f"{'CWM-BVP ref (f, g, dp)':>22} | {'CWM-BVP near (f, g, dp)':>23}"
         )
         for spec in jpr.PROFILE_RUNS:
@@ -370,19 +447,32 @@ def print_summary(npz_path=None):
                 continue
             g_exp = float(d[f"puff__{r}__exp_gamma_s"]) * 1e-3
             g_s = f"{g_exp:6.2f}" if bool(d[f"puff__{r}__exp_unstable"]) else "  stbl"
+            n_t = float(d[f"puff__{r}__near_sweep_t_ms"])
+            n_reg = str(d[f"puff__{r}__near_sweep_regime"])
+            n_tag = f"{n_t:4.2f}({'S' if n_reg == 'straddling' else 'P'})"
+            kh_max = float(d[f"puff__{r}__rad_kh_sens_max_gamma_s"]) * 1e-3
+            c_ref = _fmt_cwm(
+                float(d[f"puff__{r}__ax_cwm_ref_f_hz"]),
+                float(d[f"puff__{r}__ax_cwm_ref_gamma_s"]),
+                float(d[f"puff__{r}__ax_cwm_ref_dphi_ab_deg"]),
+                width=22,
+            )
+            c_near = _fmt_cwm(
+                float(d[f"puff__{r}__ax_cwm_near_f_hz"]),
+                float(d[f"puff__{r}__ax_cwm_near_gamma_s"]),
+                float(d[f"puff__{r}__ax_cwm_near_dphi_ab_deg"]),
+                width=23,
+            )
             print(
-                f"{r:>3} {float(d[f'puff__{r}__gas_puff_ms']):4.0f} | "
+                f"{r:>3} {float(d[f'puff__{r}__gas_puff_ms']):4.0f} {n_tag:>10} | "
                 f"{float(d[f'puff__{r}__exp_f_plasma_exb_hz'])*1e-3:+8.2f} {g_s} | "
-                f"{float(d[f'puff__{r}__rad_kh_gamma_s'])*1e-3:+8.3f} | "
+                f"{kh_max:+7.3f} | "
                 f"{float(d[f'puff__{r}__ax_ins_top_f_hz'])*1e-3:+6.2f} "
                 f"{float(d[f'puff__{r}__ax_ins_top_gamma_s'])*1e-3:+9.2f} | "
-                f"{float(d[f'puff__{r}__ax_cwm_ref_f_hz'])*1e-3:+6.2f} "
-                f"{float(d[f'puff__{r}__ax_cwm_ref_gamma_s'])*1e-3:+6.2f} "
-                f"{float(d[f'puff__{r}__ax_cwm_ref_dphi_ab_deg']):+7.1f}d | "
-                f"{float(d[f'puff__{r}__ax_cwm_near_f_hz'])*1e-3:+6.2f} "
-                f"{float(d[f'puff__{r}__ax_cwm_near_gamma_s'])*1e-3:+6.2f} "
-                f"{float(d[f'puff__{r}__ax_cwm_near_dphi_ab_deg']):+8.1f}d"
+                f"{c_ref} | {c_near}"
             )
+        print("  Near tag: (P)=pre_onset, (S)=straddling; KH max = max gamma over min_width=1.5..3.0 cm & spline(s=0.5)")
+        print("  Note: KH depends on Vp'''(r) and cannot exclude unresolved shear layers narrower than the 1 cm scan spacing.")
 
         print("\n=== 2. Damping & Radial E x B Flow-Shear Stabilization ===")
         print(
@@ -396,11 +486,14 @@ def print_summary(npz_path=None):
                 continue
             g_exp = float(d[f"puff__{r}__exp_gamma_s"]) * 1e-3
             g_s = f"{g_exp:6.2f}" if bool(d[f"puff__{r}__exp_unstable"]) else "  stbl"
+            g_gsh = float(d[f"puff__{r}__ax_cwm_near_gsh1_gamma_s"]) * 1e-3
+            g_nu = float(d[f"puff__{r}__ax_cwm_near_nu15_gamma_s"]) * 1e-3
+            s_gsh = f"{g_gsh:+13.2f}" if np.isfinite(g_gsh) else f"{'no CWM':>13}"
+            s_nu = f"{g_nu:+13.2f}" if np.isfinite(g_nu) else f"{'no CWM':>13}"
             print(
                 f"{r:>3} {float(d[f'puff__{r}__gas_puff_ms']):4.0f} | "
                 f"{float(d[f'puff__{r}__exp_f_lab_hz'])*1e-3:9.2f} {g_s} | "
-                f"{float(d[f'puff__{r}__ax_cwm_near_gsh1_gamma_s'])*1e-3:+13.2f} | "
-                f"{float(d[f'puff__{r}__ax_cwm_near_nu15_gamma_s'])*1e-3:+13.2f} | "
+                f"{s_gsh} | {s_nu} | "
                 f"{float(d[f'puff__{r}__rad_cwm_nosh_f_lab_hz'])*1e-3:+6.2f} "
                 f"{float(d[f'puff__{r}__rad_cwm_nosh_gamma_s'])*1e-3:+7.2f} | "
                 f"{float(d[f'puff__{r}__rad_cwm_sh_f_lab_hz'])*1e-3:+6.2f} "

@@ -202,6 +202,63 @@ class TestLinearStabilitySolvers(unittest.TestCase):
         self.assertLess(resid, 1e-6)
         self.assertLess(float(np.max(np.abs(y_fit - (20.0 + 6.0 * np.exp(-(r_grid / 4.0) ** 2))))), 1e-6)
 
+    def test_axial_cwm_classifier_sign_agnostic_and_requires_positive_gamma(self):
+        # Repro with outward-rising Te (d ln T/dr > 0 -> omega_*T > 0 for m = -1):
+        # CWM propagates at positive frequency (+9.66 kHz, gamma ~ +3.86 ms^-1),
+        # while the bulk drift mode sits at +16.3 kHz (j_end ~ 0.15). Must select
+        # the positive-f unstable CWM consistently across N = 24, 32, 48 (not a
+        # damped negative-f numerical mode).
+        st = local_braginskii_state(
+            ne_cm3=1e12, te_ev=5.0, b0_g=800.0,
+            dln_ne_dr_cm=+0.5, dln_te_dr_cm=+0.3,
+            er_v_per_cm=3.0, r_cm=3.0, m=-1,
+        )
+        kp = float(np.hypot(st.k_theta_m, np.pi / 0.04))
+        cwm_freqs, cwm_gammas = [], []
+        for n_nodes in (24, 32, 48):
+            res = solve_axial_braginskii_bvp(st, kp, bc="conducting_1", n_nodes=n_nodes)
+            self.assertIsNotNone(res["cwm"])
+            self.assertGreater(res["cwm"].gamma_s, 1e3)
+            self.assertGreater(res["cwm"].f_hz, 0.0)
+            self.assertGreaterEqual(res["cwm"].j_end_rel, 0.85)
+            self.assertGreaterEqual(res["cwm"].phi_end_rel, 0.65)
+            cwm_freqs.append(res["cwm"].f_hz)
+            cwm_gammas.append(res["cwm"].gamma_s)
+        # Converged across node counts (within 1%)
+        self.assertLess(np.ptp(cwm_freqs) / np.mean(cwm_freqs), 0.01)
+        self.assertLess(np.ptp(cwm_gammas) / np.mean(cwm_gammas), 0.02)
+
+        # Insulating ends must never report a CWM
+        res_ins = solve_axial_braginskii_bvp(st, kp, bc="insulating", n_nodes=24)
+        self.assertIsNone(res_ins["cwm"])
+
+        # Damped plasma (zero gradients, finite nu_in): no unstable CWM -> None
+        st_flat = local_braginskii_state(
+            ne_cm3=5e12, te_ev=1.5, b0_g=800.0,
+            dln_ne_dr_cm=0.0, dln_te_dr_cm=0.0, er_v_per_cm=0.0,
+        )
+        res_damped = solve_axial_braginskii_bvp(
+            st_flat, kp, bc="conducting_1", nu_in_s=500.0, n_nodes=24,
+        )
+        self.assertIsNone(res_damped["cwm"])
+
+    def test_select_near_onset_sweep_derives_from_timestamps_and_flags_straddling(self):
+        t_start = np.array([-0.5, 0.0, 0.5, 1.0, 1.5, 2.0])
+        t_mid = np.array([-0.25, 0.25, 0.75, 1.25, 1.60, 2.25])
+        regs = np.array(["pre_bias", "pre_onset", "pre_onset", "pre_onset", "straddling", "post_onset"])
+
+        # Stable run -> uses ref_sweep_idx
+        idx_s, reg_s = jst.select_near_onset_sweep(t_start, t_mid, regs, np.nan, ref_sweep_idx=3)
+        self.assertEqual((idx_s, reg_s), (3, "pre_onset"))
+
+        # Unstable run with t_onset = 1.65 ms -> picks straddling sweep at 1.60 ms (idx 4)
+        idx_u, reg_u = jst.select_near_onset_sweep(t_start, t_mid, regs, 1.65, ref_sweep_idx=3)
+        self.assertEqual((idx_u, reg_u), (4, "straddling"))
+
+        # Unstable run with t_onset = 1.40 ms -> picks pre_onset sweep at 1.25 ms (idx 3)
+        idx_p, reg_p = jst.select_near_onset_sweep(t_start, t_mid, regs, 1.40, ref_sweep_idx=3)
+        self.assertEqual((idx_p, reg_p), (3, "pre_onset"))
+
     def test_jun2026_stability_batch_all_respects_overwrite_false(self):
         with tempfile.TemporaryDirectory() as tmp:
             out_npz = os.path.join(tmp, "stability_linear_jun2026.npz")

@@ -306,18 +306,32 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
                                n_nodes: int = 24,
                                z_probe_a_m: float | None = None,
                                z_probe_b_m: float | None = None,
-                               cwm_f_max_hz: float = -400.0,
-                               cwm_j_end_min: float = 0.85) -> dict:
+                               cwm_j_end_min: float = 0.85,
+                               cwm_phi_end_min: float = 0.65,
+                               cwm_gamma_min_s: float = 0.0) -> dict:
     """Solve the 1-D axial 5-field Braginskii BVP on ``z in [0, l_par_m]``.
 
-    Uses Chebyshev Gauss-Lobatto collocation (``n_nodes + 1`` nodes).
+    Uses Chebyshev Gauss-Lobatto collocation (``n_nodes + 1`` nodes) in the
+    **plasma frame** with **axially uniform** equilibrium coefficients along
+    ``z`` (no axial profile gradients or axial ``E x B`` shear).
+
     Boundary conditions at ``z = 0`` (cathode/far end) and ``z = l_par_m``
     (biased conducting end plate):
 
     - ``"conducting_1"``: insulating ``j = 0, v_i = 0`` at ``z = 0``;
       conducting sheath ``j = +(phi - Lambda * T)``, ``v_i = +0.5 * T`` at ``z = L``.
     - ``"conducting_2"``: conducting sheath at both ``z = 0`` and ``z = L``.
-    - ``"insulating"``: ``j = 0, v_i = 0`` at both ends (pure bulk drift-Alfvén).
+    - ``"insulating"``: ``j = 0, v_i = 0`` at both ends (zero axial particle
+      flux / reflecting ends; note that physical insulating end plates still
+      draw ions at the Bohm speed with only ``j = 0`` forced).
+
+    Unstable Conducting Wall Mode classification (``out["cwm"]``) is based on
+    conducting-end sheath anchoring rather than a hard-coded frequency sign:
+    when ``bc != "insulating"``, selects the fastest-growing mode with
+    ``gamma_s > cwm_gamma_min_s`` (default ``> 0``), ``j_end_rel >= cwm_j_end_min``
+    (normalized ``|j|`` at the active conducting end(s)), and
+    ``phi_end_rel >= cwm_phi_end_min``. Returns ``None`` when no unstable
+    sheath-anchored CWM exists (or for ``bc == "insulating"``).
 
     When ``z_probe_a_m`` and ``z_probe_b_m`` are given (defaulting to
     ``l_par_m - 1.92`` and ``l_par_m - 3.20``, corresponding to LAPD Ports 29
@@ -325,10 +339,10 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
     ``angle(n(z_a) / n(z_b))`` in degrees.
 
     Returns a dict with ``"top"`` (:class:`AxialModeSummary`), ``"cwm"`` (most
-    unstable sheath-anchored ``f < cwm_f_max_hz`` mode, or ``None``), ``"bulk_pos"``
-    (most unstable ``f > 0`` drift mode, or ``None``), ``"modes"`` (list of top
-    summaries), and axial profiles (``z_m``, ``n_z``, ``phi_z``, ``T_z``, ``j_z``)
-    for the primary CWM (or top) mode.
+    unstable sheath-anchored CWM or ``None``), ``"bulk_pos"`` (most unstable
+    ``f > 0`` mode, or ``None``), ``"modes"`` (list of top summaries), and
+    axial profiles (``z_m``, ``n_z``, ``phi_z``, ``T_z``, ``j_z``) for the
+    primary CWM (or top) mode.
     """
     if bc not in ("conducting_1", "conducting_2", "insulating"):
         raise ValueError(f"bc must be 'conducting_1', 'conducting_2', or 'insulating', got {bc!r}")
@@ -450,8 +464,17 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
         if float(np.max(np.abs(np.diff(phi_z)))) / float(np.max(np.abs(phi_z))) > 1.8:
             continue
         k_rms = float(np.linalg.norm(Dz @ phi_z) / p_norm)
-        j_end = float(abs(j_z[-1]) / max(float(np.max(np.abs(j_z))), 1e-30))
-        phi_end = float(abs(phi_z[-1]) / max(float(np.max(np.abs(phi_z))), 1e-30))
+        j_max = max(float(np.max(np.abs(j_z))), 1e-30)
+        phi_max = max(float(np.max(np.abs(phi_z))), 1e-30)
+        if bc == "conducting_2":
+            j_end = float(max(abs(j_z[0]), abs(j_z[-1])) / j_max)
+            phi_end = float(max(abs(phi_z[0]), abs(phi_z[-1])) / phi_max)
+        elif bc == "conducting_1":
+            j_end = float(abs(j_z[-1]) / j_max)
+            phi_end = float(abs(phi_z[-1]) / phi_max)
+        else:
+            j_end = 0.0
+            phi_end = 0.0
         if use_probes:
             na = np.interp(za, z, n_z.real) + 1j * np.interp(za, z, n_z.imag)
             nb = np.interp(zb, z, n_z.real) + 1j * np.interp(zb, z, n_z.imag)
@@ -478,7 +501,13 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
     cwm_vec = None
     bulk_pos = None
     for s, vec in zip(summaries, vectors):
-        if cwm is None and s.f_hz < cwm_f_max_hz and s.j_end_rel >= cwm_j_end_min:
+        if (
+            cwm is None
+            and bc != "insulating"
+            and s.gamma_s > float(cwm_gamma_min_s)
+            and s.j_end_rel >= float(cwm_j_end_min)
+            and s.phi_end_rel >= float(cwm_phi_end_min)
+        ):
             cwm = s
             cwm_vec = vec
         if bulk_pos is None and s.f_hz > 200.0:
@@ -504,7 +533,12 @@ def fit_smooth_radial_profile(x_cm, x_center_cm, y_x, r_grid_cm, *,
 
     Enforcing ``min_width_cm >= 2.2`` guarantees smooth 1st/2nd/3rd radial
     derivatives near ``r = 0`` without overfitting grid-scale noise on 1 cm
-    probe scans. Returns ``(y_fit_on_r_grid, rms_residual)``.
+    probe scans. Note that inviscid Kelvin-Helmholtz growth depends on the
+    third derivative ``V_p'''(r)``, so imposing a minimum width can smooth away
+    unresolved narrow shear layers; pair with a ``min_width_cm`` / smoothing-
+    spline sensitivity check when evaluating KH stability.
+
+    Returns ``(y_fit_on_r_grid, rms_residual)``.
     """
     x_cm = np.asarray(x_cm, dtype=float)
     y_x = np.asarray(y_x, dtype=float)
@@ -553,13 +587,21 @@ def solve_radial_cylindrical_modes(r_cm, ne_cm3, te_ev, vp_v, *,
     Supports:
     - ``model="pure_kh"``: 2-D incompressible cylindrical Rayleigh equation
       ``(w - m*Omega_E + i*nu_in) (-nabla_perp^2 phi) = (m/r) (dW_0/dr) phi``
-      with ``W_0 = (1/r) d/dr(r v_E0)``.
+      with ``W_0 = (1/r) d/dr(r v_E0)``. Because ``dW_0/dr`` uses the third
+      radial derivative ``V_p'''(r)``, KH results are sensitive to profile
+      smoothing/fitting and cannot exclude shear layers narrower than the
+      probe scan spacing.
     - ``model="cwm_sheath"``: 3-field ``(n_hat, phi, T_hat)`` radial Conducting
       Wall Mode with exact non-uniform-density polarization operator
       ``-(1/(r n_0)) d/dr(r n_0 dphi/dr) + (m^2/r^2) phi``, radial ``E x B``
       shear ``Omega_E(r)``, optional Kelvin-Helmholtz vorticity-gradient term,
       optional centrifugal stabilization ``omega_g(r)``, series column
       resistivity, and parallel thermal conduction ``(2/3) chi_par k_par^2``.
+      Simplification: the sheath current sink in the continuity equation uses
+      the floating-sheath form ``nu_sh_eff * (phi/T_e - Lambda * T_hat)`` and
+      omits the ``n_hat`` ion-saturation perturbation term (which vanishes
+      identically at zero DC net current ``J_0 = 0``, but adds
+      ``J_0 * (n_hat + 0.5 * T_hat)`` under finite DC bias current).
 
     Returns a dict with ``f_lab_hz``, ``f_plasma_at_peak_hz``, ``gamma_s``,
     ``r_peak_cm``, ``omega_rad_s``, ``phi_r``, and ``r_cm``.
