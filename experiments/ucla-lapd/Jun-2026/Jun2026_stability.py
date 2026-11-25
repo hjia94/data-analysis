@@ -459,22 +459,50 @@ def extract_biasscope_dc_impedance(data_dir=DATA_DIR, runs=None, onset_table=Non
     return out
 
 
-def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=None,
-                          l_par_m=DEFAULT_L_PAR_M, wall_width_cm=DEFAULT_WALL_WIDTH_CM,
-                          n_nodes=DEFAULT_N_NODES, max_shots=60, biasscope_data=None):
-    """Benchmark biased-sheath, external-impedance, electron-saturation, and current-convective BVPs.
+def _disc_mode_coupling(bdot_2d_npz=None):
+    """Compute off-center ``m = -1`` disc current overlap ``c_m = |int Jz dA| / int |Jz| dA``.
 
-    Compares six 1-D axial 5-field Braginskii BVP variants on each puff-scan run:
-    1. ``flt``: floating ideal conducting wall (``j0=0, R_ext=0``).
-    2. ``flt_rext``: floating sheath + measured external pulser resistance (``R_ext_2in`` scaling).
-    3. ``bsh_rext``: biased electron-collecting retarding sheath (``j0_4in, g_sh, lam_eff``) + ``R_ext``.
-    4. ``bsh_cc``: biased sheath + Kadomtsev-Nedospasov current-convective bulk term (``+1.5j*nu_res*j0*T``).
-    5. ``esat_cc``: flat electron-saturation sheath (``g_sh=0, lam_eff=0``) + current-convective term.
-    6. ``ins_cc``: insulating ends + current-convective term.
+    For a centered ``m != 0`` mode on a continuous disc/annulus, ``c_m = 0`` and
+    an external series resistor ``R_ext`` does not see the mode. When the mode
+    is off-center (``~2 cm`` in Jun-2026), ``c_m > 0`` and the mode-projected
+    effective external impedance scales as ``c_m**2 * R_ext / R_sh``.
+    Reads Run 26 ``h1`` 2-D ``Jz`` from ``bdot_2d_jun2026.npz`` when available;
+    otherwise falls back to the measured 800 G values (``0.561`` / ``0.297``).
+    """
+    if bdot_2d_npz and os.path.isfile(bdot_2d_npz):
+        with np.load(bdot_2d_npz) as bd:
+            if "26__h1__Jz" in bd.files:
+                x_cm = bd["26__x_cm"]
+                y_cm = bd["26__y_cm"]
+                Jz = bd["26__h1__Jz"]
+                X, Y = np.meshgrid(x_cm, y_cm)
+                R = np.hypot(X, Y)
+                out = {}
+                for lbl, mask in (("2in", R <= 2.54), ("4in", (R > 2.54) & (R <= 5.08))):
+                    denom = float(np.nansum(np.abs(Jz[mask])))
+                    out[lbl] = float(abs(np.nansum(Jz[mask])) / denom) if denom > 0.0 else 0.0
+                return out["2in"], out["4in"], "bdot_2d_run26_h1"
+    return 0.561, 0.297, "fallback_run26_h1"
+
+
+def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=None,
+                          bdot_2d_npz=None, l_par_m=DEFAULT_L_PAR_M,
+                          wall_width_cm=DEFAULT_WALL_WIDTH_CM,
+                          n_nodes=DEFAULT_N_NODES, max_shots=60, biasscope_data=None):
+    """Benchmark biased-sheath, mode-coupled external-impedance, electron-saturation, and CC BVPs.
+
+    All BVP inputs are matched to the **4" annulus** (``r = 2.54-5.08 cm``,
+    covering the steep inner wall ``r = 3.0 +- 1.0 cm``), using baseline-corrected
+    ``I_delta = I_dc - I_pre`` (verified against ``V_bias > V_p``) and the
+    off-center ``m = -1`` disc overlap ``c_4in`` from ``bdot_2d_jun2026.npz``
+    (``r_ext_eff_4in = c_4in**2 * R_ext_4in / R_sh_4in``). Matched 2" disc
+    parameters (``r = 0-2.54 cm``) are stored alongside without mixing.
     """
     prof_path = profiles_npz or os.path.join(data_dir, jpr.OUT_NAME)
     onset_path = onset_npz or os.path.join(data_dir, jon.OUT_NAME)
+    bdot_path = bdot_2d_npz or os.path.join(data_dir, "bdot_2d_jun2026.npz")
     onset_table = jon.load_onset_table(onset_path) if os.path.isfile(onset_path) else {}
+    c_2in, c_4in, c_src = _disc_mode_coupling(bdot_path)
 
     if biasscope_data is None:
         biasscope_data = extract_biasscope_dc_impedance(
@@ -493,37 +521,61 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
             st, lam = _extract_wall_state(pf, r, ref_idx, b0_g=800.0)
             k_perp = float(np.hypot(st.k_theta_m, k_r))
 
-            # Fallback R_ext (when Run 06 is stable and g2_VI is low) uses 0.15 / 0.18 ohm typical pulser sag
+            # Matched footprint Vp on 2" disc (0-2.54 cm) and 4" annulus (2.54-5.08 cm)
+            x_cm = pf[f"{r}__x_cm"]
+            xc = float(pf[f"{r}__x_center_cm"])
+            rr = np.abs(x_cm - xc)
+            vp_prof = pf[f"{r}__Vp"][:, ref_idx]
+            m2 = (rr < 2.54) & np.isfinite(vp_prof)
+            m4 = (rr >= 2.54) & (rr < 5.08) & np.isfinite(vp_prof)
+            vp_2in = float(np.nanmedian(vp_prof[m2])) if np.any(m2) else float(pf[f"{r}__ref_vp_core_v"])
+            vp_4in = float(np.nanmedian(vp_prof[m4])) if np.any(m4) else float(pf[f"{r}__ref_vp_ring_v"])
+
+            # Use baseline-corrected currents (I_dc - I_pre) and verify shunt sign against V_bias > V_p
+            i2_net = float(bs["I_2in_delta"])
+            i4_net = float(bs["I_4in_delta"])
+            for lbl, vb, vp_d, inet in (
+                ("2in", float(bs["V_2in_dc"]), vp_2in, i2_net),
+                ("4in", float(bs["V_4in_dc"]), vp_4in, i4_net),
+            ):
+                if (vb > vp_d + 1.0) and (inet <= 0.0):
+                    raise ValueError(
+                        f"Run {r} {lbl}: V_bias={vb:.1f} V > V_p={vp_d:.1f} V expects positive "
+                        f"electron-collection shunt reading, got I_delta={inet:+.2f} A; check shunt polarity"
+                    )
+
+            # Fallback R_ext (when Run 06/05 has low AC g2_VI) uses typical passive pulser sag 0.15 / 0.18 Ohm
             r_ext_2 = float(bs["R_ext_2in_ohm"]) if (bs["g2_VI_2in"] >= 0.5 and bs["R_ext_2in_ohm"] > 0.0) else 0.15
             r_ext_4 = float(bs["R_ext_4in_ohm"]) if (bs["g2_VI_4in"] >= 0.5 and bs["R_ext_4in_ohm"] > 0.0) else 0.18
             p2 = biased_sheath_parameters(
-                bs["I_2in_dc"], DISC_AREAS_M2["2in"], r_ext_2,
+                i2_net, DISC_AREAS_M2["2in"], r_ext_2,
                 st.ne_m3, st.te_ev, sheath_lambda=lam, l_ohm_m=L_P29_TO_P35_M,
+                mode_coupling=c_2in,
             )
             p4 = biased_sheath_parameters(
-                bs["I_4in_dc"], DISC_AREAS_M2["4in"], r_ext_4,
+                i4_net, DISC_AREAS_M2["4in"], r_ext_4,
                 st.ne_m3, st.te_ev, sheath_lambda=lam, l_ohm_m=L_P29_TO_P35_M,
+                mode_coupling=c_4in,
             )
 
-            # Use 4" annulus DC current density (spans r=2.54-5.08 cm over the inner wall)
-            # and representative finite-lobe external impedance r_ext_hat = p2["r_ext_hat"].
+            # Matched 4" annulus parameters (spans r=2.54-5.08 cm over the inner wall)
             j0_w = p4["j0_norm"]
-            r_hat = p2["r_ext_hat"]
+            r_eff_4 = p4["r_ext_eff_hat"]
 
             res_flt = solve_axial_braginskii_bvp(
                 st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1", n_nodes=n_nodes,
             )
             res_flt_r = solve_axial_braginskii_bvp(
                 st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1",
-                r_ext_hat=r_hat, n_nodes=n_nodes,
+                r_ext_hat=r_eff_4, n_nodes=n_nodes,
             )
             res_bsh_r = solve_axial_braginskii_bvp(
                 st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1",
-                j0_norm=j0_w, r_ext_hat=r_hat, n_nodes=n_nodes,
+                j0_norm=j0_w, r_ext_hat=r_eff_4, n_nodes=n_nodes,
             )
             res_bsh_cc = solve_axial_braginskii_bvp(
                 st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1",
-                j0_norm=j0_w, r_ext_hat=0.0, include_current_convective=True, n_nodes=n_nodes,
+                j0_norm=j0_w, r_ext_hat=r_eff_4, include_current_convective=True, n_nodes=n_nodes,
             )
             res_esat_cc = solve_axial_braginskii_bvp(
                 st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1",
@@ -535,26 +587,30 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
                 j0_norm=j0_w, include_current_convective=True, n_nodes=n_nodes,
             )
 
-            # Measured core/ring plasma potentials for V_bias - V_p sheath-regime diagnostics
-            vp_core = float(pf[f"{r}__ref_vp_core_v"])
-            vp_ring = float(pf[f"{r}__ref_vp_ring_v"])
-
             row = {
                 **bs,
-                "vp_core_v": vp_core,
-                "vp_ring_v": vp_ring,
-                "vp_minus_v2_v": vp_core - float(bs["V_2in_dc"]),
-                "vp_minus_v4_v": vp_ring - float(bs["V_4in_dc"]),
+                "disc_coupling_source": c_src,
+                "mode_coupling_2in": float(c_2in),
+                "mode_coupling_4in": float(c_4in),
+                "vp_2in_v": vp_2in,
+                "vp_4in_v": vp_4in,
+                "vp_minus_v2_v": vp_2in - float(bs["V_2in_dc"]),
+                "vp_minus_v4_v": vp_4in - float(bs["V_4in_dc"]),
+                "shunt_sign_verified": True,
                 "j0_2in_a_m2": p2["j0_a_m2"],
                 "j0_2in_norm": p2["j0_norm"],
                 "r_sh_2in_ohm": p2["r_sh_ohm"],
                 "r_ext_hat_2in": p2["r_ext_hat"],
+                "r_ext_eff_hat_2in": p2["r_ext_eff_hat"],
+                "electron_sat_2in": p2["electron_saturated"],
                 "dv_ohm_2in_v": p2["dv_ohm_v"],
                 "j0_4in_a_m2": p4["j0_a_m2"],
                 "j0_4in_norm": p4["j0_norm"],
                 "r_sh_4in_ohm": p4["r_sh_ohm"],
                 "r_ext_hat_4in": p4["r_ext_hat"],
+                "r_ext_eff_hat_4in": p4["r_ext_eff_hat"],
                 "lambda_eff_4in": p4["lambda_eff"],
+                "electron_sat_4in": p4["electron_saturated"],
                 "dv_ohm_4in_v": p4["dv_ohm_v"],
             }
             for tag, res, use_cwm in (
@@ -726,11 +782,11 @@ def print_summary(npz_path=None):
             )
 
         if any(k.startswith("biased__") for k in d.files):
-            print("\n=== 4. Port-35 Biased-Sheath, External Impedance & Current-Convective Benchmark ===")
+            print("\n=== 4. Port-35 Biased-Sheath, Mode-Coupled External Impedance & CC Benchmark (Matched 4\" Annulus) ===")
             print(
-                f"{'Run':>3} {'Puff':>4} | {'I2/I4[A]':>9} {'R2/R4[Ohm]':>11} {'dV_ohm':>6} "
-                f"{'j0_4':>6} {'Rhat2':>5} | {'Flt(0R)':>11} | {'Flt+Rext':>11} | "
-                f"{'BiasSh+R':>11} | {'Bsh+CC':>11} | {'ESat+CC(t)':>11} | {'Ins+CC(t)':>11}"
+                f"{'Run':>3} {'Puff':>4} | {'dI2/4[A]':>9} {'R2/R4[Ohm]':>11} {'dV_ohm':>6} "
+                f"{'j0_4':>6} {'Reff4':>5} | {'Flt(0R)':>11} | {'Flt+Reff4':>11} | "
+                f"{'BiasSh+R4':>11} | {'Bsh+R4+CC':>11} | {'ESat+CC(t)':>11} | {'Ins+CC(t)':>11}"
             )
             def _fg(pfx, tag):
                 fk, gk = f"{pfx}{tag}_f_hz", f"{pfx}{tag}_gamma_s"
@@ -741,14 +797,14 @@ def print_summary(npz_path=None):
             for spec in jpr.PROFILE_RUNS:
                 r = spec.run_num
                 pfx = f"biased__{r}__"
-                if f"{pfx}I_2in_dc" not in d.files:
+                if f"{pfx}I_2in_delta" not in d.files:
                     continue
                 print(
                     f"{r:>3} {float(d[pfx+'gas_puff_ms']):4.0f} | "
-                    f"{float(d[pfx+'I_2in_dc']):4.1f}/{float(d[pfx+'I_4in_dc']):4.1f} "
+                    f"{float(d[pfx+'I_2in_delta']):4.1f}/{float(d[pfx+'I_4in_delta']):4.1f} "
                     f"{float(d[pfx+'R_ext_2in_ohm']):5.2f}/{float(d[pfx+'R_ext_4in_ohm']):5.2f} "
                     f"{float(d[pfx+'dv_ohm_2in_v']):5.1f}V "
-                    f"{float(d[pfx+'j0_4in_norm']):+6.2f} {float(d[pfx+'r_ext_hat_2in']):5.2f} | "
+                    f"{float(d[pfx+'j0_4in_norm']):+6.2f} {float(d[pfx+'r_ext_eff_hat_4in']):5.2f} | "
                     f"{_fg(pfx, 'flt')} | {_fg(pfx, 'flt_rext')} | "
                     f"{_fg(pfx, 'bsh_rext')} | {_fg(pfx, 'bsh_cc')} | "
                     f"{_fg(pfx, 'esat_cc_top')} | {_fg(pfx, 'ins_cc_top')}"

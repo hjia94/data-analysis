@@ -261,17 +261,36 @@ class TestLinearStabilitySolvers(unittest.TestCase):
         self.assertEqual((idx_p, reg_p), (3, "pre_onset"))
 
     def test_biased_sheath_parameters_and_generalized_axial_bvp(self):
-        # 1. Exact biased_sheath_parameters scaling
+        # 1. Exact biased_sheath_parameters scaling, mode_coupling, and electron saturation auto-clamp
         area = np.pi * (0.0254 ** 2)
         p = biased_sheath_parameters(
             i_disc_a=20.0, area_m2=area, r_ext_ohm=0.20,
             ne_m3=5e18, te_ev=2.0, sheath_lambda=3.7, l_ohm_m=1.92,
+            mode_coupling=0.3,
         )
         self.assertLess(p["j0_norm"], 0.0)
         self.assertGreater(p["g_sh"], 1.0)
         self.assertLess(p["lambda_eff"], 3.7)
+        self.assertFalse(p["electron_saturated"])
         self.assertAlmostEqual(p["r_ext_hat"], 0.20 / p["r_sh_ohm"], places=12)
+        self.assertAlmostEqual(p["r_ext_eff_hat"], 0.09 * p["r_ext_hat"], places=12)
         self.assertGreater(p["dv_ohm_v"], 0.0)
+
+        # Centered m != 0 mode (mode_coupling=0) sees zero external impedance
+        p_ctr = biased_sheath_parameters(
+            i_disc_a=20.0, area_m2=area, r_ext_ohm=0.20,
+            ne_m3=5e18, te_ev=2.0, mode_coupling=0.0,
+        )
+        self.assertEqual(p_ctr["r_ext_eff_hat"], 0.0)
+
+        # Electron saturation (1 - j0 >= exp(Lambda)): BOTH lambda_eff and g_sh auto-clamp to 0
+        p_esat = biased_sheath_parameters(
+            i_disc_a=2000.0, area_m2=area, r_ext_ohm=0.20,
+            ne_m3=5e18, te_ev=2.0, sheath_lambda=3.5,
+        )
+        self.assertTrue(p_esat["electron_saturated"])
+        self.assertEqual(p_esat["lambda_eff"], 0.0)
+        self.assertEqual(p_esat["g_sh"], 0.0)
 
         # 2. High external resistance r_ext_hat -> inf approaches insulating BC
         st = local_braginskii_state(
@@ -287,18 +306,32 @@ class TestLinearStabilitySolvers(unittest.TestCase):
         self.assertAlmostEqual(res_hi_r["top"].f_hz, res_ins["top"].f_hz, delta=50.0)
         self.assertAlmostEqual(res_hi_r["top"].gamma_s, res_ins["top"].gamma_s, delta=100.0)
 
-        # 3. Pure flat electron-saturation (g_sh=0, lam_eff=0, no CC) removes negative-f CWM
+        # 3. Automatic electron-saturation clamp in solve_axial_braginskii_bvp
+        # (j0_norm <= 1 - exp(Lambda)) removes the negative-f CWM without manual overrides
         res_flt = solve_axial_braginskii_bvp(st, kp, bc="conducting_1", n_nodes=24)
         self.assertIsNotNone(res_flt["cwm"])
         self.assertLess(res_flt["cwm"].f_hz, -1e3)
-        res_esat = solve_axial_braginskii_bvp(
-            st, kp, bc="conducting_1", j0_norm=-0.5,
-            sheath_conductance=0.0, sheath_lambda_eff=0.0,
+        res_esat_auto = solve_axial_braginskii_bvp(
+            st, kp, bc="conducting_1", sheath_lambda=3.5,
+            j0_norm=1.0 - np.exp(3.5) - 1.0,
             include_current_convective=False, n_nodes=24,
         )
-        self.assertTrue(res_esat["cwm"] is None or res_esat["cwm"].f_hz > 0.0)
+        self.assertTrue(res_esat_auto["cwm"] is None or res_esat_auto["cwm"].f_hz > 0.0)
 
-        # 4. Kadomtsev-Nedospasov current-convective drive with j0_norm < 0 excites
+        # 4. conducting_2 uses opposite outward DC current at z=0 (-j0) vs z=L (+j0):
+        # flipping j0 -> -j0 must preserve the eigenvalue spectrum by z <-> L-z symmetry
+        res_c2_pos = solve_axial_braginskii_bvp(
+            st, kp, bc="conducting_2", j0_norm=-0.4, n_nodes=24,
+        )
+        res_c2_neg = solve_axial_braginskii_bvp(
+            st, kp, bc="conducting_2", j0_norm=+0.4, n_nodes=24,
+        )
+        self.assertIsNotNone(res_c2_pos["cwm"])
+        self.assertIsNotNone(res_c2_neg["cwm"])
+        self.assertAlmostEqual(res_c2_pos["cwm"].f_hz, res_c2_neg["cwm"].f_hz, delta=1e-3)
+        self.assertAlmostEqual(res_c2_pos["cwm"].gamma_s, res_c2_neg["cwm"].gamma_s, delta=1e-3)
+
+        # 5. Kadomtsev-Nedospasov current-convective drive with j0_norm < 0 excites
         # a negative-f resistive mode on a collisional d(ln T)/dr < 0 column even
         # with insulating ends (absent at j0_norm = 0)
         st_res = local_braginskii_state(

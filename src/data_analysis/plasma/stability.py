@@ -296,11 +296,39 @@ def solve_local_braginskii(state: LocalPlasmaState, k_perp_m: float, k_par_m: fl
     return complex(evals[idx]), evecs[:, idx], evals
 
 
+def _sheath_linearization(j0_out: float, lam: float,
+                          g_sh_override: float | None = None,
+                          lam_eff_override: float | None = None) -> tuple[float, float, bool]:
+    """Linearized sheath conductance ``g_sh`` and potential drop ``lam_eff`` for outward DC current ``j0_out``.
+
+    ``j0_out = J_par,out / (e * n_0 * c_s)`` is positive for net ion collection
+    into the wall and negative for net electron collection.
+
+    - Retarding-electron sheath (``1 - exp(lam) < j0_out < 1``):
+      ``g_sh = 1 - j0_out``, ``lam_eff = lam - ln(1 - j0_out)``.
+    - Electron saturation (``j0_out <= 1 - exp(lam)``): Boltzmann barrier vanishes
+      (``lam_eff = 0``) and differential conductance drops to ``g_sh = 0``.
+    - Ion saturation (``j0_out >= 1``): flat ion current gives ``g_sh = 0, lam_eff = 0``.
+    """
+    e_lam = float(np.exp(lam))
+    electron_sat = (1.0 - j0_out) >= e_lam
+    ion_sat = j0_out >= 1.0
+    if electron_sat or ion_sat:
+        g_auto, lam_auto = 0.0, 0.0
+    else:
+        g_auto = float(1.0 - j0_out)
+        lam_auto = float(lam) if j0_out == 0.0 else float(lam - np.log(1.0 - j0_out))
+    g_sh = g_auto if g_sh_override is None else float(g_sh_override)
+    lam_eff = lam_auto if lam_eff_override is None else float(lam_eff_override)
+    return g_sh, lam_eff, bool(electron_sat)
+
+
 def biased_sheath_parameters(i_disc_a: float, area_m2: float, r_ext_ohm: float,
                              ne_m3: float, te_ev: float, *,
                              mu: float = 4.0, Z: int = 1,
                              sheath_lambda: float = 3.7,
-                             l_ohm_m: float = 1.92) -> dict:
+                             l_ohm_m: float = 1.92,
+                             mode_coupling: float = 1.0) -> dict:
     """Compute dimensionless biased-sheath, external-impedance, and Spitzer-drop parameters.
 
     Follows the convention ``j0_norm = J_par0 / (e * n_e * c_s)`` where a
@@ -308,15 +336,26 @@ def biased_sheath_parameters(i_disc_a: float, area_m2: float, r_ext_ohm: float,
     has ``J_par0 = -i_disc_a / area_m2 < 0`` (electrons flowing in ``+z``
     toward the plate at ``z = L``).
 
+    ``mode_coupling`` (``c_m in [0, 1]``) is the off-center disc current overlap
+    ``|int_disc J_par dA| / int_disc |J_par| dA``: ``0`` for a centered ``m != 0``
+    mode (shorted by a continuous disc so ``r_ext_eff_hat = 0``), ``1`` for
+    ``m = 0``. The mode-projected effective external impedance is
+    ``r_ext_eff_hat = mode_coupling**2 * r_ext_hat``.
+
     Returns a dict with:
     - ``j_sat_a_m2``, ``j0_a_m2``, ``j0_norm`` (``< 0`` for electron collection)
-    - ``r_sh_ohm = T_e[eV] / (J_sat * area_m2)`` and ``r_ext_hat = r_ext_ohm / r_sh_ohm``
-    - ``g_sh = max(1 - j0_norm, 0)`` and ``lambda_eff = max(Lambda - ln(max(1 - j0_norm, 1e-6)), 0)``
+    - ``r_sh_ohm = T_e[eV] / (J_sat * area_m2)``, raw ``r_ext_hat = r_ext_ohm / r_sh_ohm``,
+      and mode-projected ``r_ext_eff_hat = mode_coupling**2 * r_ext_hat``
+    - ``g_sh``, ``lambda_eff``, ``electron_saturated`` (auto-clamps both
+      ``lambda_eff = 0`` and ``g_sh = 0`` at or beyond electron saturation
+      ``1 - j0_norm >= exp(sheath_lambda)``)
     - ``eta_par_ohm_m`` (Spitzer parallel resistivity ``0.51 m_e nu_ei / (n_e e^2)``)
       and ``dv_ohm_v = eta_par_ohm_m * |j0_a_m2| * l_ohm_m``.
     """
     if area_m2 <= 0.0 or ne_m3 <= 0.0 or te_ev <= 0.0:
         raise ValueError("area_m2, ne_m3, and te_ev must be strictly positive")
+    if not (0.0 <= float(mode_coupling) <= 1.0):
+        raise ValueError(f"mode_coupling must be in [0, 1], got {mode_coupling}")
     scales = local_drift_scales(ne_m3 * 1e-6, te_ev, 800.0, mu=mu, Z=Z)
     cs = float(scales["cs_m_s"])
     nu_ei = float(scales["nu_ei_s"])
@@ -325,8 +364,8 @@ def biased_sheath_parameters(i_disc_a: float, area_m2: float, r_ext_ohm: float,
     j0_norm = j0_a_m2 / j_sat
     r_sh_ohm = float(te_ev) / (j_sat * float(area_m2))
     r_ext_hat = max(float(r_ext_ohm), 0.0) / r_sh_ohm
-    g_sh = max(1.0 - j0_norm, 0.0)
-    lam_eff = max(float(sheath_lambda) - float(np.log(max(1.0 - j0_norm, 1e-6))), 0.0)
+    r_ext_eff_hat = (float(mode_coupling) ** 2) * r_ext_hat
+    g_sh, lam_eff, e_sat = _sheath_linearization(j0_norm, float(sheath_lambda))
     eta_par = 0.51 * M_ELECTRON * nu_ei / (float(ne_m3) * E_CHARGE ** 2)
     dv_ohm = eta_par * abs(j0_a_m2) * float(l_ohm_m)
     return {
@@ -335,8 +374,11 @@ def biased_sheath_parameters(i_disc_a: float, area_m2: float, r_ext_ohm: float,
         "j0_norm": float(j0_norm),
         "r_sh_ohm": float(r_sh_ohm),
         "r_ext_hat": float(r_ext_hat),
+        "mode_coupling": float(mode_coupling),
+        "r_ext_eff_hat": float(r_ext_eff_hat),
         "g_sh": float(g_sh),
         "lambda_eff": float(lam_eff),
+        "electron_saturated": bool(e_sat),
         "eta_par_ohm_m": float(eta_par),
         "dv_ohm_v": float(dv_ohm),
     }
@@ -494,34 +536,36 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
                 A[row, sl(f_j)] = val
 
     lam = float(sheath_lambda)
-    g_sh = max(1.0 - j0, 0.0) if sheath_conductance is None else float(sheath_conductance)
-    if sheath_lambda_eff is None:
-        lam_eff = lam if j0 == 0.0 else max(lam - float(np.log(max(1.0 - j0, 1e-6))), 0.0)
-    else:
-        lam_eff = float(sheath_lambda_eff)
+    # Outward DC current is +j0 at z = L (+z normal) and -j0 at z = 0 (-z normal).
+    # Both ends automatically clamp g_sh -> 0, lam_eff -> 0 at electron or ion saturation.
+    g_sh_L, lam_eff_L, _ = _sheath_linearization(+j0, lam, sheath_conductance, sheath_lambda_eff)
+    g_sh_0, lam_eff_0, _ = _sheath_linearization(-j0, lam, sheath_conductance, sheath_lambda_eff)
 
     if bc == "conducting_2":
+        # At z = 0 (outward normal -z, j_out = -j):
+        # (1 + g_sh_0 * r_ext) * (-j) = (-j0)*(n + 0.5*T) + g_sh_0*(phi - lam_eff_0*T)
+        # -> (1 + g_sh_0 * r_ext) * j - j0*n + g_sh_0*phi - (0.5*j0 + g_sh_0*lam_eff_0)*T = 0
         set_bc_row(3, 0, {
-            3: 1.0 + g_sh * r_ext,
-            0: +j0,
-            1: +g_sh,
-            2: 0.5 * j0 - g_sh * lam_eff,
+            3: 1.0 + g_sh_0 * r_ext,
+            0: -j0,
+            1: +g_sh_0,
+            2: -(0.5 * j0 + g_sh_0 * lam_eff_0),
         })
         set_bc_row(3, n_nodes, {
-            3: 1.0 + g_sh * r_ext,
+            3: 1.0 + g_sh_L * r_ext,
             0: -j0,
-            1: -g_sh,
-            2: g_sh * lam_eff - 0.5 * j0,
+            1: -g_sh_L,
+            2: g_sh_L * lam_eff_L - 0.5 * j0,
         })
         set_bc_row(4, 0, {4: 1.0, 2: +0.5})
         set_bc_row(4, n_nodes, {4: 1.0, 2: -0.5})
     elif bc == "conducting_1":
         set_bc_row(3, 0, {3: 1.0})
         set_bc_row(3, n_nodes, {
-            3: 1.0 + g_sh * r_ext,
+            3: 1.0 + g_sh_L * r_ext,
             0: -j0,
-            1: -g_sh,
-            2: g_sh * lam_eff - 0.5 * j0,
+            1: -g_sh_L,
+            2: g_sh_L * lam_eff_L - 0.5 * j0,
         })
         set_bc_row(4, 0, {4: 1.0})
         set_bc_row(4, n_nodes, {4: 1.0, 2: -0.5})
