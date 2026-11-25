@@ -296,6 +296,52 @@ def solve_local_braginskii(state: LocalPlasmaState, k_perp_m: float, k_par_m: fl
     return complex(evals[idx]), evecs[:, idx], evals
 
 
+def biased_sheath_parameters(i_disc_a: float, area_m2: float, r_ext_ohm: float,
+                             ne_m3: float, te_ev: float, *,
+                             mu: float = 4.0, Z: int = 1,
+                             sheath_lambda: float = 3.7,
+                             l_ohm_m: float = 1.92) -> dict:
+    """Compute dimensionless biased-sheath, external-impedance, and Spitzer-drop parameters.
+
+    Follows the convention ``j0_norm = J_par0 / (e * n_e * c_s)`` where a
+    positively biased end plate drawing net electron current ``i_disc_a > 0``
+    has ``J_par0 = -i_disc_a / area_m2 < 0`` (electrons flowing in ``+z``
+    toward the plate at ``z = L``).
+
+    Returns a dict with:
+    - ``j_sat_a_m2``, ``j0_a_m2``, ``j0_norm`` (``< 0`` for electron collection)
+    - ``r_sh_ohm = T_e[eV] / (J_sat * area_m2)`` and ``r_ext_hat = r_ext_ohm / r_sh_ohm``
+    - ``g_sh = max(1 - j0_norm, 0)`` and ``lambda_eff = max(Lambda - ln(max(1 - j0_norm, 1e-6)), 0)``
+    - ``eta_par_ohm_m`` (Spitzer parallel resistivity ``0.51 m_e nu_ei / (n_e e^2)``)
+      and ``dv_ohm_v = eta_par_ohm_m * |j0_a_m2| * l_ohm_m``.
+    """
+    if area_m2 <= 0.0 or ne_m3 <= 0.0 or te_ev <= 0.0:
+        raise ValueError("area_m2, ne_m3, and te_ev must be strictly positive")
+    scales = local_drift_scales(ne_m3 * 1e-6, te_ev, 800.0, mu=mu, Z=Z)
+    cs = float(scales["cs_m_s"])
+    nu_ei = float(scales["nu_ei_s"])
+    j_sat = E_CHARGE * float(ne_m3) * cs
+    j0_a_m2 = -float(i_disc_a) / float(area_m2)
+    j0_norm = j0_a_m2 / j_sat
+    r_sh_ohm = float(te_ev) / (j_sat * float(area_m2))
+    r_ext_hat = max(float(r_ext_ohm), 0.0) / r_sh_ohm
+    g_sh = max(1.0 - j0_norm, 0.0)
+    lam_eff = max(float(sheath_lambda) - float(np.log(max(1.0 - j0_norm, 1e-6))), 0.0)
+    eta_par = 0.51 * M_ELECTRON * nu_ei / (float(ne_m3) * E_CHARGE ** 2)
+    dv_ohm = eta_par * abs(j0_a_m2) * float(l_ohm_m)
+    return {
+        "j_sat_a_m2": float(j_sat),
+        "j0_a_m2": float(j0_a_m2),
+        "j0_norm": float(j0_norm),
+        "r_sh_ohm": float(r_sh_ohm),
+        "r_ext_hat": float(r_ext_hat),
+        "g_sh": float(g_sh),
+        "lambda_eff": float(lam_eff),
+        "eta_par_ohm_m": float(eta_par),
+        "dv_ohm_v": float(dv_ohm),
+    }
+
+
 def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
                                l_par_m: float = 14.0, sheath_lambda: float = 3.7,
                                bc: str = "conducting_1", nu_in_s: float = 0.0,
@@ -303,6 +349,11 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
                                chi_par_on: bool = True,
                                include_centrifugal: bool = True,
                                sheath_heat_gamma: float = 0.0,
+                               j0_norm: float = 0.0,
+                               r_ext_hat: float = 0.0,
+                               sheath_conductance: float | None = None,
+                               sheath_lambda_eff: float | None = None,
+                               include_current_convective: bool = False,
                                n_nodes: int = 24,
                                z_probe_a_m: float | None = None,
                                z_probe_b_m: float | None = None,
@@ -319,11 +370,28 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
     (biased conducting end plate):
 
     - ``"conducting_1"``: insulating ``j = 0, v_i = 0`` at ``z = 0``;
-      conducting sheath ``j = +(phi - Lambda * T)``, ``v_i = +0.5 * T`` at ``z = L``.
-    - ``"conducting_2"``: conducting sheath at both ``z = 0`` and ``z = L``.
+      generalized biased conducting sheath at ``z = L``::
+
+          (1 + g_sh * r_ext_hat) * j = j0_norm * (n + 0.5 * T)
+                                       + g_sh * (phi - lambda_eff * T)
+
+      and ``v_i = +0.5 * T``. When ``j0_norm = 0`` and ``r_ext_hat = 0``
+      (defaults), ``g_sh = 1`` and ``lambda_eff = sheath_lambda``, recovering
+      the floating Berk-Ryutov-Tsidulko sheath ``j = phi - Lambda * T``.
+      Pass ``sheath_conductance=0.0, sheath_lambda_eff=0.0`` to test the flat
+      electron-saturation limit.
+    - ``"conducting_2"``: generalized conducting sheath at both ``z = 0`` and ``z = L``.
     - ``"insulating"``: ``j = 0, v_i = 0`` at both ends (zero axial particle
       flux / reflecting ends; note that physical insulating end plates still
       draw ions at the Bohm speed with only ``j = 0`` forced).
+
+    When ``include_current_convective=True`` and ``j0_norm != 0``, includes the
+    Kadomtsev-Nedospasov Spitzer resistivity-gradient drive
+    ``+1.5j * nu_res * j0_norm * T`` in parallel Ohm's law and the matching
+    linearized Ohmic-heating terms in the electron temperature equation
+    (parallel electron advection ``u_e0 * d/dz`` is intentionally omitted from
+    the 1-D Chebyshev BVP because an unconstrained hyperbolic inflow boundary
+    introduces spurious grid-scale modes).
 
     Unstable Conducting Wall Mode classification (``out["cwm"]``) is based on
     conducting-end sheath anchoring rather than a hard-coded frequency sign:
@@ -348,6 +416,8 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
         raise ValueError(f"bc must be 'conducting_1', 'conducting_2', or 'insulating', got {bc!r}")
     if k_perp_m <= 0.0 or l_par_m <= 0.0:
         raise ValueError("k_perp_m and l_par_m must be strictly positive")
+    if r_ext_hat < 0.0:
+        raise ValueError(f"r_ext_hat must be >= 0, got {r_ext_hat}")
 
     x_asc, D_asc = chebyshev_diff_matrix(n_nodes)
     M = n_nodes + 1
@@ -364,6 +434,8 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
     cs = state.cs_m_s
     chi = state.chi_par_m2_s if chi_par_on else 0.0
     w_g = state.omega_g_rad_s if include_centrifugal else 0.0
+    j0 = float(j0_norm)
+    r_ext = float(r_ext_hat)
 
     I = np.eye(M, dtype=complex)
     A = np.zeros((5 * M, 5 * M), dtype=complex)
@@ -384,20 +456,26 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
     A[sl(1), sl(1)] = -1j * float(nu_in_s) * b * I
     A[sl(1), sl(3)] = -1j * cs * Dz
 
-    # 3) Electron temperature
+    # 3) Electron temperature (+ linearized Ohmic heating when current-convective on)
     B[sl(2), sl(2)] = I
     A[sl(2), sl(1)] = state.omega_star_T_rad_s * I
     A[sl(2), sl(2)] = +1j * (2.0 / 3.0) * chi * Dzz
     A[sl(2), sl(3)] = +1j * (2.0 / 3.0) * (1.0 + c_th) * cs * Dz
     A[sl(2), sl(4)] = -1j * (2.0 / 3.0) * cs * Dz
+    if include_current_convective and j0 != 0.0:
+        A[sl(2), sl(0)] += -1j * (2.0 / 3.0) * nu_res * (j0 ** 2) * I
+        A[sl(2), sl(2)] += -1j * nu_res * (j0 ** 2) * I
+        A[sl(2), sl(3)] += +1j * (4.0 / 3.0) * nu_res * j0 * I
 
-    # 4) Parallel Ohm's law
+    # 4) Parallel Ohm's law (+ Kadomtsev-Nedospasov resistivity-gradient term)
     B[sl(3), sl(3)] = (mu_e + alpha_em) * I
     B[sl(3), sl(4)] = -mu_e * I
     A[sl(3), sl(0)] = +1j * cs * Dz
     A[sl(3), sl(1)] = -1j * cs * Dz
     A[sl(3), sl(2)] = +1j * (1.0 + c_th) * cs * Dz
     A[sl(3), sl(3)] = -1j * nu_res * I
+    if include_current_convective and j0 != 0.0:
+        A[sl(3), sl(2)] += +1j * 1.5 * nu_res * j0 * I
 
     # 5) Ion parallel momentum
     B[sl(4), sl(4)] = I
@@ -416,14 +494,35 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
                 A[row, sl(f_j)] = val
 
     lam = float(sheath_lambda)
+    g_sh = max(1.0 - j0, 0.0) if sheath_conductance is None else float(sheath_conductance)
+    if sheath_lambda_eff is None:
+        lam_eff = lam if j0 == 0.0 else max(lam - float(np.log(max(1.0 - j0, 1e-6))), 0.0)
+    else:
+        lam_eff = float(sheath_lambda_eff)
+
     if bc == "conducting_2":
-        set_bc_row(3, 0, {3: 1.0, 1: +1.0, 2: -lam})
-        set_bc_row(3, n_nodes, {3: 1.0, 1: -1.0, 2: +lam})
+        set_bc_row(3, 0, {
+            3: 1.0 + g_sh * r_ext,
+            0: +j0,
+            1: +g_sh,
+            2: 0.5 * j0 - g_sh * lam_eff,
+        })
+        set_bc_row(3, n_nodes, {
+            3: 1.0 + g_sh * r_ext,
+            0: -j0,
+            1: -g_sh,
+            2: g_sh * lam_eff - 0.5 * j0,
+        })
         set_bc_row(4, 0, {4: 1.0, 2: +0.5})
         set_bc_row(4, n_nodes, {4: 1.0, 2: -0.5})
     elif bc == "conducting_1":
         set_bc_row(3, 0, {3: 1.0})
-        set_bc_row(3, n_nodes, {3: 1.0, 1: -1.0, 2: +lam})
+        set_bc_row(3, n_nodes, {
+            3: 1.0 + g_sh * r_ext,
+            0: -j0,
+            1: -g_sh,
+            2: g_sh * lam_eff - 0.5 * j0,
+        })
         set_bc_row(4, 0, {4: 1.0})
         set_bc_row(4, n_nodes, {4: 1.0, 2: -0.5})
     else:

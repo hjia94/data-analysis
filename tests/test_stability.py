@@ -16,6 +16,7 @@ if _JUN2026_DIR not in sys.path:
 from data_analysis.plasma.stability import (
     M_ELECTRON,
     M_PROTON,
+    biased_sheath_parameters,
     chebyshev_diff_matrix,
     fit_smooth_radial_profile,
     local_braginskii_state,
@@ -258,6 +259,59 @@ class TestLinearStabilitySolvers(unittest.TestCase):
         # Unstable run with t_onset = 1.40 ms -> picks pre_onset sweep at 1.25 ms (idx 3)
         idx_p, reg_p = jst.select_near_onset_sweep(t_start, t_mid, regs, 1.40, ref_sweep_idx=3)
         self.assertEqual((idx_p, reg_p), (3, "pre_onset"))
+
+    def test_biased_sheath_parameters_and_generalized_axial_bvp(self):
+        # 1. Exact biased_sheath_parameters scaling
+        area = np.pi * (0.0254 ** 2)
+        p = biased_sheath_parameters(
+            i_disc_a=20.0, area_m2=area, r_ext_ohm=0.20,
+            ne_m3=5e18, te_ev=2.0, sheath_lambda=3.7, l_ohm_m=1.92,
+        )
+        self.assertLess(p["j0_norm"], 0.0)
+        self.assertGreater(p["g_sh"], 1.0)
+        self.assertLess(p["lambda_eff"], 3.7)
+        self.assertAlmostEqual(p["r_ext_hat"], 0.20 / p["r_sh_ohm"], places=12)
+        self.assertGreater(p["dv_ohm_v"], 0.0)
+
+        # 2. High external resistance r_ext_hat -> inf approaches insulating BC
+        st = local_braginskii_state(
+            ne_cm3=5e12, te_ev=2.0, b0_g=800.0,
+            dln_ne_dr_cm=+0.3, dln_te_dr_cm=-0.3, er_v_per_cm=1.2, r_cm=3.0, m=-1,
+        )
+        kp = float(np.hypot(st.k_theta_m, np.pi / 0.04))
+        res_ins = solve_axial_braginskii_bvp(st, kp, bc="insulating", n_nodes=24)
+        res_hi_r = solve_axial_braginskii_bvp(
+            st, kp, bc="conducting_1", r_ext_hat=1e6, n_nodes=24,
+        )
+        self.assertIsNone(res_hi_r["cwm"])
+        self.assertAlmostEqual(res_hi_r["top"].f_hz, res_ins["top"].f_hz, delta=50.0)
+        self.assertAlmostEqual(res_hi_r["top"].gamma_s, res_ins["top"].gamma_s, delta=100.0)
+
+        # 3. Pure flat electron-saturation (g_sh=0, lam_eff=0, no CC) removes negative-f CWM
+        res_flt = solve_axial_braginskii_bvp(st, kp, bc="conducting_1", n_nodes=24)
+        self.assertIsNotNone(res_flt["cwm"])
+        self.assertLess(res_flt["cwm"].f_hz, -1e3)
+        res_esat = solve_axial_braginskii_bvp(
+            st, kp, bc="conducting_1", j0_norm=-0.5,
+            sheath_conductance=0.0, sheath_lambda_eff=0.0,
+            include_current_convective=False, n_nodes=24,
+        )
+        self.assertTrue(res_esat["cwm"] is None or res_esat["cwm"].f_hz > 0.0)
+
+        # 4. Kadomtsev-Nedospasov current-convective drive with j0_norm < 0 excites
+        # a negative-f resistive mode on a collisional d(ln T)/dr < 0 column even
+        # with insulating ends (absent at j0_norm = 0)
+        st_res = local_braginskii_state(
+            ne_cm3=1.2e13, te_ev=1.0, b0_g=800.0,
+            dln_ne_dr_cm=+0.3, dln_te_dr_cm=-0.3, er_v_per_cm=1.0, r_cm=3.0, m=-1,
+        )
+        res_ins0 = solve_axial_braginskii_bvp(st_res, kp, bc="insulating", n_nodes=24)
+        res_ins_cc = solve_axial_braginskii_bvp(
+            st_res, kp, bc="insulating", j0_norm=-0.5,
+            include_current_convective=True, n_nodes=24,
+        )
+        self.assertLess(res_ins_cc["top"].f_hz, 0.0)
+        self.assertGreater(res_ins_cc["top"].gamma_s, res_ins0["top"].gamma_s + 1e3)
 
     def test_jun2026_stability_batch_all_respects_overwrite_false(self):
         with tempfile.TemporaryDirectory() as tmp:

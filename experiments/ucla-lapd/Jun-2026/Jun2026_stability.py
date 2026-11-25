@@ -25,18 +25,23 @@ synthesis comparison table.
 """
 
 import datetime
+import glob
 import os
 
 import numpy as np
 from scipy.interpolate import UnivariateSpline
 
+from data_analysis.io import open_lapd
+from data_analysis.plasma.fields import reference_locked_phasor
 from data_analysis.plasma.stability import (
+    biased_sheath_parameters,
     fit_smooth_radial_profile,
     local_braginskii_state,
     solve_axial_braginskii_bvp,
     solve_local_cwm,
     solve_radial_cylindrical_modes,
 )
+from data_analysis.signal import clip_time_window
 from data_analysis.utils import merge_save_npz
 
 import Jun2026_modes as jmo
@@ -59,6 +64,19 @@ DEFAULT_R_GRID_CM = np.linspace(0.5, 12.0, 24)
 DEFAULT_MIN_WIDTH_CM = 2.4        # smooth radial fit lower bound (prevents r->0 spikes)
 KH_SENSITIVITY_MIN_WIDTHS_CM = (1.5, 2.0, 2.4, 3.0)
 KH_SPLINE_SMOOTHING = 0.5         # quartic spline smoothing factor s on symmetrized Vp(r)
+
+# Port-35 concentric disc electrode geometry & biasscope current-shunt factor
+# (confirmed from HDF5 run descriptions: diameters 2", 4", 6", 8", 10"; shunts 1 V / 100 A).
+BIASSCOPE_SHUNT_A_PER_V = 100.0
+DISC_AREAS_M2 = {
+    "2in": float(np.pi * (0.0254 ** 2)),
+    "4in": float(np.pi * ((0.0508 ** 2) - (0.0254 ** 2))),
+    "6in": float(np.pi * ((0.0762 ** 2) - (0.0508 ** 2))),
+}
+BIASSCOPE_PRE_MS = (8.0, 11.5)    # pre-bias baseline in discharge-start scope time
+BIASSCOPE_DC_MS = (13.0, 16.5)    # bias-on DC plateau (1.0-4.5 ms bias-relative)
+BIASSCOPE_AC_MS = (14.4, 16.8)    # saturated AC window (2.4-4.8 ms bias-relative)
+L_P29_TO_P35_M = 1.92             # axial distance from P29 LP to Port-35 bias plate [m]
 
 
 def select_near_onset_sweep(t_start_ms, t_mid_ms, regimes, t_onset_med_ms, ref_sweep_idx):
@@ -372,9 +390,191 @@ def analyze_b0_scaling(data_dir=DATA_DIR, *, ref_run="02", b0_list=(600.0, 800.0
     return out
 
 
+def extract_biasscope_dc_impedance(data_dir=DATA_DIR, runs=None, onset_table=None, *,
+                                   max_shots=60):
+    """Extract Port-35 disc DC voltages, DC currents [A], and AC circuit impedance ``Z_ext(f0)``.
+
+    Reads ``biasscope`` channels ``C1-C3`` (2"/4"/6" currents via ``1 V / 100 A`` shunts)
+    and ``C4-C7`` (2"/4"/6"/8" bias voltages, already x200-scaled in scope headers).
+    Returns ``{run_num: {...}}``. Raises ``ImportError`` / ``FileNotFoundError`` if
+    raw HDF5 files or ``scope_io`` are unavailable.
+    """
+    specs = jpr.PROFILE_RUNS if runs is None else tuple(s for s in jpr.PROFILE_RUNS if s.run_num in runs)
+    out = {}
+    for spec in specs:
+        rnum = spec.run_num
+        hits = sorted(glob.glob(os.path.join(data_dir, f"{rnum}-*.hdf5")))
+        if not hits:
+            raise FileNotFoundError(f"no HDF5 for run {rnum} in {data_dir}")
+        run = open_lapd(hits[0])
+        tb = run.time_array(scope_name="biasscope")
+        dt_b = float(tb[1] - tb[0])
+        ip0, ip1 = clip_time_window(tb, *BIASSCOPE_PRE_MS)
+        id0, id1 = clip_time_window(tb, *BIASSCOPE_DC_MS)
+        ia0, ia1 = clip_time_window(tb, *BIASSCOPE_AC_MS)
+
+        all_shots = np.asarray(run.shots(scope_name="biasscope"), dtype=int)
+        idx = np.unique(np.linspace(0, all_shots.size - 1, min(all_shots.size, max_shots), dtype=int))
+        sel = all_shots[idx].tolist()
+
+        f0 = (float(onset_table[rnum]["f_peak_hz"])
+              if (onset_table and rnum in onset_table and np.isfinite(onset_table[rnum]["f_peak_hz"]))
+              else 3500.0)
+
+        rec = {"gas_puff_ms": float(spec.gas_puff_ms), "f0_hz": float(f0)}
+        ac_segs = {}
+        for ch, key, scale in (
+            ("C1", "I_2in", BIASSCOPE_SHUNT_A_PER_V),
+            ("C2", "I_4in", BIASSCOPE_SHUNT_A_PER_V),
+            ("C3", "I_6in", BIASSCOPE_SHUNT_A_PER_V),
+            ("C4", "V_2in", 1.0),
+            ("C5", "V_4in", 1.0),
+            ("C6", "V_6in", 1.0),
+            ("C7", "V_8in", 1.0),
+        ):
+            st, _ = run.channel(ch, scope_name="biasscope", shots=sel)
+            arr = np.asarray(st, dtype=float) * scale
+            pre = float(np.nanmean(arr[:, ip0:ip1]))
+            dc = float(np.nanmean(arr[:, id0:id1]))
+            rec[f"{key}_pre"] = pre
+            rec[f"{key}_dc"] = dc
+            rec[f"{key}_delta"] = dc - pre
+            seg = arr[:, ia0:ia1]
+            ac_segs[key] = seg - np.nanmean(seg, axis=1, keepdims=True)
+
+        # AC external circuit impedance Z_ext(f0) = dV / dI locked to disc current.
+        # Physical passive supply sag has angle(Z_ext) ~ +-180 deg -> R_ext = -Re(Z_ext) > 0.
+        for lbl in ("2in", "4in", "6in"):
+            dv_c, g2_vi = reference_locked_phasor(ac_segs[f"V_{lbl}"], ac_segs[f"I_{lbl}"], dt_b, f0)
+            di_c, _ = reference_locked_phasor(ac_segs[f"I_{lbl}"], ac_segs[f"I_{lbl}"], dt_b, f0)
+            z = complex(dv_c / di_c) if abs(di_c) > 0.0 else (np.nan + 0j)
+            rec[f"Z_{lbl}_abs_ohm"] = float(abs(z))
+            rec[f"Z_{lbl}_phase_deg"] = float(np.degrees(np.angle(z)))
+            rec[f"R_ext_{lbl}_ohm"] = float(-z.real) if np.isfinite(z.real) else np.nan
+            rec[f"g2_VI_{lbl}"] = float(g2_vi)
+            rec[f"dV_{lbl}_v"] = float(abs(dv_c))
+            rec[f"dI_{lbl}_a"] = float(abs(di_c))
+
+        out[rnum] = rec
+    return out
+
+
+def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=None,
+                          l_par_m=DEFAULT_L_PAR_M, wall_width_cm=DEFAULT_WALL_WIDTH_CM,
+                          n_nodes=DEFAULT_N_NODES, max_shots=60, biasscope_data=None):
+    """Benchmark biased-sheath, external-impedance, electron-saturation, and current-convective BVPs.
+
+    Compares six 1-D axial 5-field Braginskii BVP variants on each puff-scan run:
+    1. ``flt``: floating ideal conducting wall (``j0=0, R_ext=0``).
+    2. ``flt_rext``: floating sheath + measured external pulser resistance (``R_ext_2in`` scaling).
+    3. ``bsh_rext``: biased electron-collecting retarding sheath (``j0_4in, g_sh, lam_eff``) + ``R_ext``.
+    4. ``bsh_cc``: biased sheath + Kadomtsev-Nedospasov current-convective bulk term (``+1.5j*nu_res*j0*T``).
+    5. ``esat_cc``: flat electron-saturation sheath (``g_sh=0, lam_eff=0``) + current-convective term.
+    6. ``ins_cc``: insulating ends + current-convective term.
+    """
+    prof_path = profiles_npz or os.path.join(data_dir, jpr.OUT_NAME)
+    onset_path = onset_npz or os.path.join(data_dir, jon.OUT_NAME)
+    onset_table = jon.load_onset_table(onset_path) if os.path.isfile(onset_path) else {}
+
+    if biasscope_data is None:
+        biasscope_data = extract_biasscope_dc_impedance(
+            data_dir=data_dir, onset_table=onset_table, max_shots=max_shots,
+        )
+
+    k_r = np.pi / (float(wall_width_cm) * 1e-2)
+    out = {}
+    with np.load(prof_path, allow_pickle=True) as pf:
+        for spec in jpr.PROFILE_RUNS:
+            r = spec.run_num
+            if r not in biasscope_data or f"{r}__ref_sweep_idx" not in pf.files:
+                continue
+            bs = biasscope_data[r]
+            ref_idx = int(pf[f"{r}__ref_sweep_idx"])
+            st, lam = _extract_wall_state(pf, r, ref_idx, b0_g=800.0)
+            k_perp = float(np.hypot(st.k_theta_m, k_r))
+
+            # Fallback R_ext (when Run 06 is stable and g2_VI is low) uses 0.15 / 0.18 ohm typical pulser sag
+            r_ext_2 = float(bs["R_ext_2in_ohm"]) if (bs["g2_VI_2in"] >= 0.5 and bs["R_ext_2in_ohm"] > 0.0) else 0.15
+            r_ext_4 = float(bs["R_ext_4in_ohm"]) if (bs["g2_VI_4in"] >= 0.5 and bs["R_ext_4in_ohm"] > 0.0) else 0.18
+            p2 = biased_sheath_parameters(
+                bs["I_2in_dc"], DISC_AREAS_M2["2in"], r_ext_2,
+                st.ne_m3, st.te_ev, sheath_lambda=lam, l_ohm_m=L_P29_TO_P35_M,
+            )
+            p4 = biased_sheath_parameters(
+                bs["I_4in_dc"], DISC_AREAS_M2["4in"], r_ext_4,
+                st.ne_m3, st.te_ev, sheath_lambda=lam, l_ohm_m=L_P29_TO_P35_M,
+            )
+
+            # Use 4" annulus DC current density (spans r=2.54-5.08 cm over the inner wall)
+            # and representative finite-lobe external impedance r_ext_hat = p2["r_ext_hat"].
+            j0_w = p4["j0_norm"]
+            r_hat = p2["r_ext_hat"]
+
+            res_flt = solve_axial_braginskii_bvp(
+                st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1", n_nodes=n_nodes,
+            )
+            res_flt_r = solve_axial_braginskii_bvp(
+                st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1",
+                r_ext_hat=r_hat, n_nodes=n_nodes,
+            )
+            res_bsh_r = solve_axial_braginskii_bvp(
+                st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1",
+                j0_norm=j0_w, r_ext_hat=r_hat, n_nodes=n_nodes,
+            )
+            res_bsh_cc = solve_axial_braginskii_bvp(
+                st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1",
+                j0_norm=j0_w, r_ext_hat=0.0, include_current_convective=True, n_nodes=n_nodes,
+            )
+            res_esat_cc = solve_axial_braginskii_bvp(
+                st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="conducting_1",
+                j0_norm=j0_w, r_ext_hat=0.0, sheath_conductance=0.0, sheath_lambda_eff=0.0,
+                include_current_convective=True, n_nodes=n_nodes,
+            )
+            res_ins_cc = solve_axial_braginskii_bvp(
+                st, k_perp, l_par_m=l_par_m, sheath_lambda=lam, bc="insulating",
+                j0_norm=j0_w, include_current_convective=True, n_nodes=n_nodes,
+            )
+
+            # Measured core/ring plasma potentials for V_bias - V_p sheath-regime diagnostics
+            vp_core = float(pf[f"{r}__ref_vp_core_v"])
+            vp_ring = float(pf[f"{r}__ref_vp_ring_v"])
+
+            row = {
+                **bs,
+                "vp_core_v": vp_core,
+                "vp_ring_v": vp_ring,
+                "vp_minus_v2_v": vp_core - float(bs["V_2in_dc"]),
+                "vp_minus_v4_v": vp_ring - float(bs["V_4in_dc"]),
+                "j0_2in_a_m2": p2["j0_a_m2"],
+                "j0_2in_norm": p2["j0_norm"],
+                "r_sh_2in_ohm": p2["r_sh_ohm"],
+                "r_ext_hat_2in": p2["r_ext_hat"],
+                "dv_ohm_2in_v": p2["dv_ohm_v"],
+                "j0_4in_a_m2": p4["j0_a_m2"],
+                "j0_4in_norm": p4["j0_norm"],
+                "r_sh_4in_ohm": p4["r_sh_ohm"],
+                "r_ext_hat_4in": p4["r_ext_hat"],
+                "lambda_eff_4in": p4["lambda_eff"],
+                "dv_ohm_4in_v": p4["dv_ohm_v"],
+            }
+            for tag, res, use_cwm in (
+                ("flt", res_flt, True),
+                ("flt_rext", res_flt_r, True),
+                ("bsh_rext", res_bsh_r, True),
+                ("bsh_cc", res_bsh_cc, True),
+                ("esat_cc_top", res_esat_cc, False),
+                ("ins_cc_top", res_ins_cc, False),
+            ):
+                mode = res["cwm"] if use_cwm else res["top"]
+                for k, v in _pack_axial(mode).items():
+                    row[f"{tag}_{k}"] = v
+            out[r] = row
+    return out
+
+
 def batch_all(data_dir=DATA_DIR, out_path=None, *, l_par_m=DEFAULT_L_PAR_M,
               wall_width_cm=DEFAULT_WALL_WIDTH_CM, k_par_m=DEFAULT_K_PAR_M,
-              n_nodes=DEFAULT_N_NODES, overwrite=False):
+              n_nodes=DEFAULT_N_NODES, include_biased_sheath=True, overwrite=False):
     """Run all linear stability comparisons and save ``stability_linear_jun2026.npz``."""
     out_path = out_path or os.path.join(data_dir, OUT_NAME)
     if os.path.isfile(out_path):
@@ -391,6 +591,15 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, l_par_m=DEFAULT_L_PAR_M,
         data_dir=data_dir, l_par_m=l_par_m,
         wall_width_cm=wall_width_cm, n_nodes=n_nodes,
     )
+    biased_res = {}
+    if include_biased_sheath:
+        try:
+            biased_res = analyze_biased_sheath(
+                data_dir=data_dir, l_par_m=l_par_m,
+                wall_width_cm=wall_width_cm, n_nodes=n_nodes,
+            )
+        except (FileNotFoundError, ImportError) as exc:
+            print(f"  [note] skipping biased-sheath biasscope extraction: {exc}")
 
     payload = {
         "updated": np.str_(datetime.datetime.now().isoformat(timespec="seconds")),
@@ -417,6 +626,8 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, l_par_m=DEFAULT_L_PAR_M,
 
     _pack("puff", puff_res)
     _pack("b0", b0_res)
+    if biased_res:
+        _pack("biased", biased_res)
 
     merge_save_npz(out_path, payload)
     print(f"\nWrote {out_path}")
@@ -513,6 +724,35 @@ def print_summary(npz_path=None):
                 f"gamma = {float(d[f'b0__{lbl}__gamma_s'])*1e-3:+5.2f} ms^-1, "
                 f"dphi(P29-P25) = {float(d[f'b0__{lbl}__dphi_ab_deg']):+5.1f} deg"
             )
+
+        if any(k.startswith("biased__") for k in d.files):
+            print("\n=== 4. Port-35 Biased-Sheath, External Impedance & Current-Convective Benchmark ===")
+            print(
+                f"{'Run':>3} {'Puff':>4} | {'I2/I4[A]':>9} {'R2/R4[Ohm]':>11} {'dV_ohm':>6} "
+                f"{'j0_4':>6} {'Rhat2':>5} | {'Flt(0R)':>11} | {'Flt+Rext':>11} | "
+                f"{'BiasSh+R':>11} | {'Bsh+CC':>11} | {'ESat+CC(t)':>11} | {'Ins+CC(t)':>11}"
+            )
+            def _fg(pfx, tag):
+                fk, gk = f"{pfx}{tag}_f_hz", f"{pfx}{tag}_gamma_s"
+                if fk not in d.files or not np.isfinite(float(d[gk])):
+                    return "   ---   ---"
+                return f"{float(d[fk])*1e-3:+5.2f} {float(d[gk])*1e-3:+5.2f}"
+
+            for spec in jpr.PROFILE_RUNS:
+                r = spec.run_num
+                pfx = f"biased__{r}__"
+                if f"{pfx}I_2in_dc" not in d.files:
+                    continue
+                print(
+                    f"{r:>3} {float(d[pfx+'gas_puff_ms']):4.0f} | "
+                    f"{float(d[pfx+'I_2in_dc']):4.1f}/{float(d[pfx+'I_4in_dc']):4.1f} "
+                    f"{float(d[pfx+'R_ext_2in_ohm']):5.2f}/{float(d[pfx+'R_ext_4in_ohm']):5.2f} "
+                    f"{float(d[pfx+'dv_ohm_2in_v']):5.1f}V "
+                    f"{float(d[pfx+'j0_4in_norm']):+6.2f} {float(d[pfx+'r_ext_hat_2in']):5.2f} | "
+                    f"{_fg(pfx, 'flt')} | {_fg(pfx, 'flt_rext')} | "
+                    f"{_fg(pfx, 'bsh_rext')} | {_fg(pfx, 'bsh_cc')} | "
+                    f"{_fg(pfx, 'esat_cc_top')} | {_fg(pfx, 'ins_cc_top')}"
+                )
 
 
 if __name__ == "__main__":
