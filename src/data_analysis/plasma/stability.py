@@ -298,29 +298,40 @@ def solve_local_braginskii(state: LocalPlasmaState, k_perp_m: float, k_par_m: fl
 
 def _sheath_linearization(j0_out: float, lam: float,
                           g_sh_override: float | None = None,
-                          lam_eff_override: float | None = None) -> tuple[float, float, bool]:
+                          lam_eff_override: float | None = None,
+                          knee_frac: float = 0.5) -> tuple[float, float, bool, float]:
     """Linearized sheath conductance ``g_sh`` and potential drop ``lam_eff`` for outward DC current ``j0_out``.
 
     ``j0_out = J_par,out / (e * n_0 * c_s)`` is positive for net ion collection
     into the wall and negative for net electron collection.
 
-    - Retarding-electron sheath (``1 - exp(lam) < j0_out < 1``):
+    Let ``u = (1 - j0_out) / exp(lam)`` be the electron-saturation fraction:
+    - Retarding-electron sheath well below the knee (``0 < u <= knee_frac``):
       ``g_sh = 1 - j0_out``, ``lam_eff = lam - ln(1 - j0_out)``.
-    - Electron saturation (``j0_out <= 1 - exp(lam)``): Boltzmann barrier vanishes
-      (``lam_eff = 0``) and differential conductance drops to ``g_sh = 0``.
-    - Ion saturation (``j0_out >= 1``): flat ion current gives ``g_sh = 0, lam_eff = 0``.
+    - Electron-saturation knee (``knee_frac < u < 1``): ``g_sh`` rolls off
+      smoothly via a ``C^1`` cosine taper from ``1 - j0_out`` down to ``0``
+      instead of jumping discontinuously from ``exp(lam)`` to ``0`` at ``u = 1``.
+    - Electron saturation (``u >= 1``): ``g_sh = 0, lam_eff = 0``.
+    - Ion saturation (``j0_out >= 1``, i.e. ``u <= 0``): ``g_sh = 0, lam_eff = 0``.
+
+    Returns ``(g_sh, lam_eff, electron_saturated, electron_sat_fraction)``.
     """
     e_lam = float(np.exp(lam))
-    electron_sat = (1.0 - j0_out) >= e_lam
+    u = float((1.0 - j0_out) / e_lam)
+    electron_sat = u >= 1.0
     ion_sat = j0_out >= 1.0
     if electron_sat or ion_sat:
         g_auto, lam_auto = 0.0, 0.0
     else:
-        g_auto = float(1.0 - j0_out)
         lam_auto = float(lam) if j0_out == 0.0 else float(lam - np.log(1.0 - j0_out))
+        if u > float(knee_frac):
+            taper = 0.5 * (1.0 + float(np.cos(np.pi * (u - float(knee_frac)) / (1.0 - float(knee_frac)))))
+            g_auto = float(1.0 - j0_out) * taper
+        else:
+            g_auto = float(1.0 - j0_out)
     g_sh = g_auto if g_sh_override is None else float(g_sh_override)
     lam_eff = lam_auto if lam_eff_override is None else float(lam_eff_override)
-    return g_sh, lam_eff, bool(electron_sat)
+    return g_sh, lam_eff, bool(electron_sat), float(max(u, 0.0))
 
 
 def biased_sheath_parameters(i_disc_a: float, area_m2: float, r_ext_ohm: float,
@@ -365,7 +376,7 @@ def biased_sheath_parameters(i_disc_a: float, area_m2: float, r_ext_ohm: float,
     r_sh_ohm = float(te_ev) / (j_sat * float(area_m2))
     r_ext_hat = max(float(r_ext_ohm), 0.0) / r_sh_ohm
     r_ext_eff_hat = (float(mode_coupling) ** 2) * r_ext_hat
-    g_sh, lam_eff, e_sat = _sheath_linearization(j0_norm, float(sheath_lambda))
+    g_sh, lam_eff, e_sat, e_sat_frac = _sheath_linearization(j0_norm, float(sheath_lambda))
     eta_par = 0.51 * M_ELECTRON * nu_ei / (float(ne_m3) * E_CHARGE ** 2)
     dv_ohm = eta_par * abs(j0_a_m2) * float(l_ohm_m)
     return {
@@ -379,6 +390,8 @@ def biased_sheath_parameters(i_disc_a: float, area_m2: float, r_ext_ohm: float,
         "g_sh": float(g_sh),
         "lambda_eff": float(lam_eff),
         "electron_saturated": bool(e_sat),
+        "electron_sat_fraction": float(e_sat_frac),
+        "near_electron_sat": bool(e_sat_frac >= 0.5),
         "eta_par_ohm_m": float(eta_par),
         "dv_ohm_v": float(dv_ohm),
     }
@@ -537,9 +550,9 @@ def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
 
     lam = float(sheath_lambda)
     # Outward DC current is +j0 at z = L (+z normal) and -j0 at z = 0 (-z normal).
-    # Both ends automatically clamp g_sh -> 0, lam_eff -> 0 at electron or ion saturation.
-    g_sh_L, lam_eff_L, _ = _sheath_linearization(+j0, lam, sheath_conductance, sheath_lambda_eff)
-    g_sh_0, lam_eff_0, _ = _sheath_linearization(-j0, lam, sheath_conductance, sheath_lambda_eff)
+    # Both ends smoothly roll off g_sh over the electron-saturation knee and clamp at saturation.
+    g_sh_L, lam_eff_L, _, _ = _sheath_linearization(+j0, lam, sheath_conductance, sheath_lambda_eff)
+    g_sh_0, lam_eff_0, _, _ = _sheath_linearization(-j0, lam, sheath_conductance, sheath_lambda_eff)
 
     if bc == "conducting_2":
         # At z = 0 (outward normal -z, j_out = -j):

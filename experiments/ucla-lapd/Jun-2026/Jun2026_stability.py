@@ -468,6 +468,12 @@ def _disc_mode_coupling(bdot_2d_npz=None):
     effective external impedance scales as ``c_m**2 * R_ext / R_sh``.
     Reads Run 26 ``h1`` 2-D ``Jz`` from ``bdot_2d_jun2026.npz`` when available;
     otherwise falls back to the measured 800 G values (``0.561`` / ``0.297``).
+
+    Caveats: (1) derived from Run 26 (800 G, 35 ms puff) and applied across all
+    puff runs; (2) assumes the Port-35 disc stack is centered on the P28 B-dot
+    probe origin ``(0, 0)``; (3) uses ``Jz`` measured at Port 28 (2.24 m upstream
+    of Port 35) rather than at the plate; and (4) incoherent noise in ``|Jz|``
+    inflates the denominator, slightly biasing ``c_m`` low.
     """
     if bdot_2d_npz and os.path.isfile(bdot_2d_npz):
         with np.load(bdot_2d_npz) as bd:
@@ -534,15 +540,26 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
             # Use baseline-corrected currents (I_dc - I_pre) and verify shunt sign against V_bias > V_p
             i2_net = float(bs["I_2in_delta"])
             i4_net = float(bs["I_4in_delta"])
+            sign_status = {}
             for lbl, vb, vp_d, inet in (
                 ("2in", float(bs["V_2in_dc"]), vp_2in, i2_net),
                 ("4in", float(bs["V_4in_dc"]), vp_4in, i4_net),
             ):
-                if (vb > vp_d + 1.0) and (inet <= 0.0):
-                    raise ValueError(
-                        f"Run {r} {lbl}: V_bias={vb:.1f} V > V_p={vp_d:.1f} V expects positive "
-                        f"electron-collection shunt reading, got I_delta={inet:+.2f} A; check shunt polarity"
-                    )
+                if vb > vp_d + 1.0:
+                    if inet <= 0.0:
+                        raise ValueError(
+                            f"Run {r} {lbl}: V_bias={vb:.1f} V > V_p={vp_d:.1f} V expects positive "
+                            f"electron-collection shunt reading, got I_delta={inet:+.2f} A; check shunt polarity"
+                        )
+                    sign_status[lbl] = "verified"
+                else:
+                    sign_status[lbl] = "not_checked"
+            if all(v == "verified" for v in sign_status.values()):
+                overall_sign_status = "verified"
+            elif any(v == "verified" for v in sign_status.values()):
+                overall_sign_status = "partial"
+            else:
+                overall_sign_status = "not_checked"
 
             # Fallback R_ext (when Run 06/05 has low AC g2_VI) uses typical passive pulser sag 0.15 / 0.18 Ohm
             r_ext_2 = float(bs["R_ext_2in_ohm"]) if (bs["g2_VI_2in"] >= 0.5 and bs["R_ext_2in_ohm"] > 0.0) else 0.15
@@ -596,13 +613,17 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
                 "vp_4in_v": vp_4in,
                 "vp_minus_v2_v": vp_2in - float(bs["V_2in_dc"]),
                 "vp_minus_v4_v": vp_4in - float(bs["V_4in_dc"]),
-                "shunt_sign_verified": True,
+                "shunt_sign_status": overall_sign_status,
+                "shunt_sign_2in_status": sign_status["2in"],
+                "shunt_sign_4in_status": sign_status["4in"],
                 "j0_2in_a_m2": p2["j0_a_m2"],
                 "j0_2in_norm": p2["j0_norm"],
                 "r_sh_2in_ohm": p2["r_sh_ohm"],
                 "r_ext_hat_2in": p2["r_ext_hat"],
                 "r_ext_eff_hat_2in": p2["r_ext_eff_hat"],
                 "electron_sat_2in": p2["electron_saturated"],
+                "electron_sat_frac_2in": p2["electron_sat_fraction"],
+                "near_electron_sat_2in": p2["near_electron_sat"],
                 "dv_ohm_2in_v": p2["dv_ohm_v"],
                 "j0_4in_a_m2": p4["j0_a_m2"],
                 "j0_4in_norm": p4["j0_norm"],
@@ -611,6 +632,8 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
                 "r_ext_eff_hat_4in": p4["r_ext_eff_hat"],
                 "lambda_eff_4in": p4["lambda_eff"],
                 "electron_sat_4in": p4["electron_saturated"],
+                "electron_sat_frac_4in": p4["electron_sat_fraction"],
+                "near_electron_sat_4in": p4["near_electron_sat"],
                 "dv_ohm_4in_v": p4["dv_ohm_v"],
             }
             for tag, res, use_cwm in (

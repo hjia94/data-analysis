@@ -283,12 +283,30 @@ class TestLinearStabilitySolvers(unittest.TestCase):
         )
         self.assertEqual(p_ctr["r_ext_eff_hat"], 0.0)
 
+        # Electron saturation knee tapers g_sh smoothly without a jump at u = 1
+        lam_k = 3.5
+        e_lam = np.exp(lam_k)
+        i_sat = p["j_sat_a_m2"] * area
+        p_mid = biased_sheath_parameters(
+            i_disc_a=(0.75 * e_lam - 1.0) * i_sat, area_m2=area, r_ext_ohm=0.20,
+            ne_m3=5e18, te_ev=2.0, sheath_lambda=lam_k,
+        )
+        p_near = biased_sheath_parameters(
+            i_disc_a=(0.99 * e_lam - 1.0) * i_sat, area_m2=area, r_ext_ohm=0.20,
+            ne_m3=5e18, te_ev=2.0, sheath_lambda=lam_k,
+        )
+        self.assertTrue(p_mid["near_electron_sat"])
+        self.assertFalse(p_mid["electron_saturated"])
+        self.assertGreater(p_mid["g_sh"], p_near["g_sh"])
+        self.assertLess(p_near["g_sh"], 0.1)  # smooth roll-off near u -> 1, not ~exp(lam)
+
         # Electron saturation (1 - j0 >= exp(Lambda)): BOTH lambda_eff and g_sh auto-clamp to 0
         p_esat = biased_sheath_parameters(
             i_disc_a=2000.0, area_m2=area, r_ext_ohm=0.20,
-            ne_m3=5e18, te_ev=2.0, sheath_lambda=3.5,
+            ne_m3=5e18, te_ev=2.0, sheath_lambda=lam_k,
         )
         self.assertTrue(p_esat["electron_saturated"])
+        self.assertTrue(p_esat["near_electron_sat"])
         self.assertEqual(p_esat["lambda_eff"], 0.0)
         self.assertEqual(p_esat["g_sh"], 0.0)
 
