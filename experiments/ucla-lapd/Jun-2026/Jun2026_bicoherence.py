@@ -1,27 +1,39 @@
 """Jun-2026 nonlinear wave-wave coupling via auto- and cross-bicoherence.
 
 Tests whether the observed harmonics (``2*f0``, ``3*f0``) and broadband
-fluctuations in the saturated instability are genuinely quadratically phase-
-coupled (``f1 + f2 -> f3``) or merely independent/trigger-locked oscillations:
+fluctuations are quadratically phase-coupled (``f1 + f2 -> f3``) or merely
+independent/trigger-locked oscillations:
 
 1. **Stationary Isat auto-bicoherence** across all 20 campaign runs
    (Day-1 puff 23-45 ms ``06, 00-05``; Day-2 puff ``08-14``; ``B0`` scan
-   ``26-31``) on a fixed saturated post-onset window ``[2.24, 4.80] ms``
+   ``26-31``) on a fixed late-bias window ``[2.24, 4.80] ms``
    (``nperseg = 256`` at 100 kHz -> ``df = 390.625 Hz``, 1 independent segment
-   per shot so the analytic ``bicoherence_threshold`` is exact).
+   per shot so the analytic ``bicoherence_threshold`` is exact). Keeping one
+   fixed window preserves identical ``df`` and Hann main-lobe resolution across
+   all runs; runs whose ``t_onset_med_ms`` is after ``2.24 ms`` (or ``nan`` for
+   stable runs) include pre-onset/growth intervals and are explicitly flagged
+   via ``window_post_onset`` and ``t_onset_med_ms``.
 2. **Trigger-locking controls** on every run:
    - Shot-to-shot phase consistency ``R(f) = |<X(f)/|X(f)|>|`` at ``f0``,
      ``2*f0``, and ``3*f0`` vs. the Rayleigh 95% threshold ``sqrt(-ln(p)/N)``.
    - Shot-shuffled surrogate bicoherence ``b2_shuf`` (deterministic Sattolo
-     derangement on ``Z``, breaking adjacent-shot drift), which preserves
-     trigger-locked phase coincidence while destroying genuine shot-by-shot
-     nonlinear phase coupling.
+     derangement on ``Z``, breaking adjacent-shot drift). A low ``b2_shuf``
+     alongside high ``b2`` rules out trigger-locking as the source of ``b2``;
+     a high ``b2_shuf`` (when ``R`` is elevated) means trigger-locking
+     confounds the test and cannot distinguish genuine coupling from
+     trigger-locked coincidence.
 3. **End-electrode current auto- and cross-bicoherence** (Runs ``06, 00-05``):
    - Auto-bicoherence of ``biasscope`` ``I_2"`` (``C1``) and ``I_4"`` (``C2``),
    - Same-scope cross-bicoherence ``(I_2", I_2", I_4")``, and
-   - Cross-scope ``(Isat@P33, Isat@P33, I_2")`` on anti-aliased common shots
-     (``+12.0 ms`` trigger offset), testing whether the 2nd harmonic is driven
-     in the plasma, in the external biasing circuit, or coupled across both.
+   - Cross-scope ``(Isat@P33, Isat@P33, I_2")`` and ``(I_2", I_2", Isat@P33)``
+     on anti-aliased common shots (``+12.0 ms`` trigger offset).
+
+Note on interpretation: auto-bicoherence alone cannot distinguish resonant
+three-wave coupling from static waveform distortion (e.g. a non-sinusoidal
+probe response or steepened advected profile). High cross-bicoherence between
+P33 ``Isat`` and Port-35 shunt currents ``I_2"``/``I_4"`` (alongside the P28
+B-dot ``m_J = -2`` 2nd-harmonic filament in ``Jun2026_modes.py``) rules out a
+purely local ``Isat`` probe-response artifact.
 
 Saves ``bicoherence_jun2026.npz`` into ``DATA_DIR`` and prints a concise
 synthesis table.
@@ -135,11 +147,13 @@ def _mean_windowed_psd(stack, dt_s, nperseg, window=WINDOW, detrend=DETREND):
     return freq, psd
 
 
-def _peak_triad(res, res_shuf, *, symmetric=True):
+def _peak_triad(res, res_shuf, *, symmetric=True, positive_only=False):
     """Strongest finite triad in the non-redundant ``f3 > 0`` domain."""
     f1g, f2g = np.meshgrid(res.f1, res.f2, indexing="ij")
     f3g = f1g + f2g
     mask = np.isfinite(res.b2) & (f3g > 0.0)
+    if positive_only:
+        mask &= f2g > 0.0
     if symmetric:
         mask &= f2g <= f1g + 1e-9
     if not np.any(mask):
@@ -203,15 +217,21 @@ def analyze_bicoherence_stack(t_s, stack, *, f0_hz=None, nperseg=NPERSEG,
         f_band=f1_band_hz, window=window, detrend=detrend, p=p,
     )
 
-    f3_hz, b2_sum_mean, b2_sum_max, b2_sum_count = summed_bicoherence(res, symmetric=True)
-    _, b2_shuf_sum_mean, b2_shuf_sum_max, _ = summed_bicoherence(res_shuf, symmetric=True)
+    f3_hz, b2_sum_mean, b2_sum_max, b2_sum_count = summed_bicoherence(
+        res, symmetric=True, positive_only=True,
+    )
+    _, b2_shuf_sum_mean, b2_shuf_sum_max, _ = summed_bicoherence(
+        res_shuf, symmetric=True, positive_only=True,
+    )
 
     b2_h2, biphase_h2 = _lookup_triad(res, k2_a * df_hz, k2_b * df_hz, tol_hz)
     b2_h2_shuf, _ = _lookup_triad(res_shuf, k2_a * df_hz, k2_b * df_hz, tol_hz)
     b2_h3, biphase_h3 = _lookup_triad(res, k3_a * df_hz, k3_b * df_hz, tol_hz)
     b2_h3_shuf, _ = _lookup_triad(res_shuf, k3_a * df_hz, k3_b * df_hz, tol_hz)
 
-    pk_b2, pk_f1, pk_f2, pk_f3, pk_shuf = _peak_triad(res, res_shuf, symmetric=True)
+    pk_b2, pk_f1, pk_f2, pk_f3, pk_shuf = _peak_triad(
+        res, res_shuf, symmetric=True, positive_only=True,
+    )
 
     # Harmonic amplitude ratios sqrt(P(n*f0)/P(f0)) on the same windowed FFT
     p1 = psd[k1] if k1 < psd.size else np.nan
@@ -312,26 +332,30 @@ def analyze_cross_bicoherence_stacks(t_s, stack_x, stack_y, stack_z, *, f0_hz,
     }
 
 
-def _load_onset_f0(data_dir):
-    """Load per-run ``f_peak_hz`` from ``onset_summary_jun2026.npz`` if available."""
+def _load_onset_info(data_dir):
+    """Load per-run ``f_peak_hz`` and ``t_onset_med_ms`` from ``onset_summary_jun2026.npz``."""
     p = os.path.join(data_dir, jon.OUT_NAME)
     if not os.path.isfile(p):
         raise FileNotFoundError(
             f"missing {p}; run Jun2026_onset.py first so bicoherence uses the "
-            "verified per-run fundamental frequency f0"
+            "verified per-run fundamental frequency f0 and onset timing"
         )
-    d = np.load(p, allow_pickle=False)
-    out = {}
-    for spec in jon.ONSET_RUNS:
-        key = f"{spec.run_num}__f_peak_hz"
-        if key in d:
-            out[spec.run_num] = float(d[key])
-    return p, out
+    f0_map = {}
+    tonset_map = {}
+    with np.load(p, allow_pickle=False) as d:
+        for spec in jon.ONSET_RUNS:
+            fk = f"{spec.run_num}__f_peak_hz"
+            if fk in d:
+                f0_map[spec.run_num] = float(d[fk])
+            tk = f"{spec.run_num}__t_onset_med_ms"
+            if tk in d:
+                tonset_map[spec.run_num] = float(d[tk])
+    return p, f0_map, tonset_map
 
 
-def analyze_run_auto(spec, data_dir=DATA_DIR, *, f0_hz=None, tmin_ms=TMIN_MS,
-                     tmax_ms=TMAX_MS, target_dt_s=TARGET_DT_S, nperseg=NPERSEG,
-                     max_shots=DEFAULT_MAX_SHOTS, return_stack=False):
+def analyze_run_auto(spec, data_dir=DATA_DIR, *, f0_hz=None, t_onset_med_ms=np.nan,
+                     tmin_ms=TMIN_MS, tmax_ms=TMAX_MS, target_dt_s=TARGET_DT_S,
+                     nperseg=NPERSEG, max_shots=DEFAULT_MAX_SHOTS, return_stack=False):
     """Run stationary-reference auto-bicoherence for one ``OnsetRunSpec``."""
     ifn = jon.run_ifn(data_dir, spec.run_num)
     t_ds, stack_ds, shot_nums, puff_parsed = jon._read_downsampled_window(
@@ -340,6 +364,7 @@ def analyze_run_auto(spec, data_dir=DATA_DIR, *, f0_hz=None, tmin_ms=TMIN_MS,
         target_dt_s=target_dt_s, max_shots=max_shots,
     )
     res = analyze_bicoherence_stack(t_ds, stack_ds, f0_hz=f0_hz, nperseg=nperseg)
+    t_on = float(t_onset_med_ms) if t_onset_med_ms is not None else np.nan
     res["shot_nums"] = shot_nums
     res["source_file"] = os.path.basename(ifn)
     res["group"] = spec.group
@@ -350,6 +375,8 @@ def analyze_run_auto(spec, data_dir=DATA_DIR, *, f0_hz=None, tmin_ms=TMIN_MS,
     res["gas_puff_ms"] = float(spec.gas_puff_ms) if spec.gas_puff_ms is not None else float(puff_parsed)
     res["tmin_ms"] = float(tmin_ms)
     res["tmax_ms"] = float(tmax_ms)
+    res["t_onset_med_ms"] = t_on
+    res["window_post_onset"] = bool(np.isfinite(t_on) and t_on <= float(tmin_ms))
     if return_stack:
         return res, (t_ds, stack_ds, shot_nums)
     return res
@@ -466,18 +493,60 @@ def analyze_biasscope_bicoherence(data_dir=DATA_DIR, *, onset_f0=None,
     return out
 
 
+_SETTINGS_META_KEYS = (
+    "_meta__tmin_ms",
+    "_meta__tmax_ms",
+    "_meta__target_dt_s",
+    "_meta__nperseg",
+    "_meta__window",
+    "_meta__detrend",
+    "_meta__alpha_p",
+    "_meta__max_shots",
+    "_meta__surrogate_rng_seed",
+)
+
+
+def _validate_existing_settings(existing, expected, path):
+    """Ensure incremental merges do not mix incompatible bicoherence settings."""
+    mismatches = []
+    for k in _SETTINGS_META_KEYS:
+        if k not in existing:
+            mismatches.append(f"{k}: missing in existing archive")
+            continue
+        cur = expected[k]
+        old = existing[k]
+        if isinstance(cur, str):
+            ok = str(old) == cur
+        elif isinstance(cur, (int, np.integer)):
+            ok = int(old) == int(cur)
+        else:
+            ok = bool(np.isclose(float(old), float(cur), rtol=1e-9, atol=1e-12))
+        if not ok:
+            mismatches.append(f"{k}: stored={old!r} vs current={cur!r}")
+    if mismatches:
+        raise ValueError(
+            f"existing {path} was built with different settings ({'; '.join(mismatches)}); "
+            "pass overwrite=True with run_nums=None to regenerate"
+        )
+
+
 def batch_all(data_dir=DATA_DIR, out_name=OUT_NAME, *, run_nums=None,
               max_shots=DEFAULT_MAX_SHOTS, include_biasscope=True, overwrite=False):
-    """Run all Jun-2026 bicoherence analyses and save ``bicoherence_jun2026.npz``."""
+    """Run Jun-2026 bicoherence analyses incrementally and save ``bicoherence_jun2026.npz``.
+
+    - ``overwrite=False`` (default): validates stored settings, skips runs
+      already present in ``out_path``, and computes/merges any missing runs.
+    - ``overwrite=True``: recomputes the requested ``run_nums`` (or all runs
+      when ``run_nums=None``) and replaces only those runs' keys in-place
+      (preserving unselected runs on partial ``run_nums`` refreshes).
+    """
     out_path = os.path.join(data_dir, out_name)
-    if os.path.isfile(out_path) and not overwrite:
-        print(f"Skipping existing {out_path} (pass overwrite=True to recompute)")
-        return out_path
-
-    onset_path, onset_f0 = _load_onset_f0(data_dir)
+    onset_path, onset_f0, onset_t_ms = _load_onset_info(data_dir)
     specs = jon.ONSET_RUNS if run_nums is None else tuple(jon.ONSET_RUN_MAP[r] for r in run_nums)
+    selected_runs = {spec.run_num for spec in specs}
+    all_bias_runs = tuple(r for r in BIASSCOPE_RUNS if r in selected_runs)
 
-    payload = {
+    meta = {
         "_meta__created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "_meta__onset_file": os.path.basename(onset_path),
         "_meta__tmin_ms": float(TMIN_MS),
@@ -491,27 +560,50 @@ def batch_all(data_dir=DATA_DIR, out_name=OUT_NAME, *, run_nums=None,
         "_meta__surrogate_rng_seed": int(SURROGATE_RNG_SEED),
     }
 
+    existing_keys = set()
+    full_overwrite = bool(overwrite and run_nums is None and include_biasscope)
+    if os.path.isfile(out_path):
+        with np.load(out_path, allow_pickle=False) as ex:
+            existing_keys = set(ex.files)
+            if not full_overwrite:
+                _validate_existing_settings(ex, meta, out_path)
+
+    if overwrite:
+        auto_specs = list(specs)
+        bias_runs = all_bias_runs if include_biasscope else ()
+    else:
+        auto_specs = [s for s in specs if f"auto_{s.run_num}__b2_h2" not in existing_keys]
+        bias_runs = (
+            tuple(r for r in all_bias_runs if f"bias_{r}__i2_b2_h2" not in existing_keys)
+            if include_biasscope else ()
+        )
+
+    if not auto_specs and not bias_runs:
+        print(f"All requested runs already present in {out_path} (pass overwrite=True to recompute)")
+        return out_path
+
+    payload = dict(meta)
     cached_isat = {}
-    for spec in tqdm(specs, desc="Auto-bicoherence", unit="run"):
-        need_cache = include_biasscope and (spec.run_num in BIASSCOPE_RUNS)
+    bias_set = set(bias_runs)
+    for spec in tqdm(auto_specs, desc="Auto-bicoherence", unit="run"):
+        need_cache = spec.run_num in bias_set
         if need_cache:
             res, stack_info = analyze_run_auto(
                 spec, data_dir=data_dir, f0_hz=onset_f0.get(spec.run_num),
+                t_onset_med_ms=onset_t_ms.get(spec.run_num, np.nan),
                 max_shots=max_shots, return_stack=True,
             )
             cached_isat[spec.run_num] = stack_info
         else:
             res = analyze_run_auto(
                 spec, data_dir=data_dir, f0_hz=onset_f0.get(spec.run_num),
+                t_onset_med_ms=onset_t_ms.get(spec.run_num, np.nan),
                 max_shots=max_shots,
             )
         for k, v in res.items():
             payload[f"auto_{spec.run_num}__{k}"] = v
 
-    selected_runs = {spec.run_num for spec in specs}
-    bias_runs = tuple(r for r in BIASSCOPE_RUNS if r in selected_runs)
-
-    if include_biasscope and bias_runs:
+    if bias_runs:
         bs = analyze_biasscope_bicoherence(
             data_dir=data_dir, onset_f0=onset_f0, runs=bias_runs,
             max_shots=max_shots, cached_isat=cached_isat,
@@ -520,9 +612,20 @@ def batch_all(data_dir=DATA_DIR, out_name=OUT_NAME, *, run_nums=None,
             for k, v in d.items():
                 payload[f"bias_{rnum}__{k}"] = v
 
-    if overwrite and os.path.isfile(out_path):
-        os.remove(out_path)
-    merge_save_npz(out_path, payload)
+    drop_keys = []
+    if full_overwrite:
+        drop_keys = [k for k in existing_keys if k not in payload]
+    elif overwrite:
+        overwritten_prefixes = (
+            tuple(f"auto_{s.run_num}__" for s in auto_specs)
+            + tuple(f"bias_{r}__" for r in bias_runs)
+        )
+        drop_keys = [
+            k for k in existing_keys
+            if k.startswith(overwritten_prefixes) and k not in payload
+        ]
+
+    merge_save_npz(out_path, payload, drop_keys=drop_keys)
     print(f"Wrote {out_path}")
     return out_path
 
@@ -531,62 +634,62 @@ def print_summary(npz_path=None):
     """Print concise auto- and cross-bicoherence summary tables from saved NPZ."""
     if npz_path is None:
         npz_path = os.path.join(DATA_DIR, OUT_NAME)
-    d = np.load(npz_path, allow_pickle=False)
-
-    print("\n=== 1. Stationary Isat Auto-Bicoherence (2.24-4.80 ms, df=390.6 Hz, 1 seg/shot) ===")
-    print("Run  Grp       Puff   B0   N  thr    f0   A2/A1  b2(h2)  shuf  phi2  b2(h3)  shuf  R(f0) R(2f) Rthr | Peak (f1,f2)->f3  b2pk")
-    for spec in jon.ONSET_RUNS:
-        p = f"auto_{spec.run_num}__"
-        if f"{p}b2_h2" not in d:
-            continue
-        r = spec.run_num
-        grp = str(d[f"{p}group"])
-        puff = float(d[f"{p}gas_puff_ms"])
-        b0 = float(d[f"{p}b0_g"])
-        n = int(d[f"{p}n_avg"])
-        thr = float(d[f"{p}threshold"])
-        f0 = float(d[f"{p}f0_hz"]) / 1e3
-        a21 = float(d[f"{p}amp_h2_over_h1"])
-        b2 = float(d[f"{p}b2_h2"])
-        s2 = float(d[f"{p}b2_h2_shuf"])
-        ph2 = float(d[f"{p}biphase_h2_deg"])
-        b3 = float(d[f"{p}b2_h3"])
-        s3 = float(d[f"{p}b2_h3_shuf"])
-        r1 = float(d[f"{p}pc_R_h1"])
-        r2 = float(d[f"{p}pc_R_h2"])
-        rthr = float(d[f"{p}pc_threshold"])
-        pk = float(d[f"{p}b2_peak"])
-        pf1 = float(d[f"{p}b2_peak_f1_hz"]) / 1e3
-        pf2 = float(d[f"{p}b2_peak_f2_hz"]) / 1e3
-        pf3 = float(d[f"{p}b2_peak_f3_hz"]) / 1e3
-        ph2_s = f"{ph2:+5.0f}" if np.isfinite(ph2) else "  nan"
-        print(
-            f" {r:2s}  {grp:9s} {puff:4.0f} {b0:4.0f} {n:3d} {thr:.3f} {f0:5.2f}  {a21:5.2f}   "
-            f"{b2:5.3f} {s2:5.3f} {ph2_s}   {b3:5.3f} {s3:5.3f}  {r1:5.2f} {r2:5.2f} {rthr:4.2f} | "
-            f"({pf1:4.1f},{pf2:+5.1f})->{pf3:4.1f} {pk:5.3f}"
-        )
-
-    has_bias = any(f"bias_{r}__i2_b2_h2" in d for r in BIASSCOPE_RUNS)
-    if has_bias:
-        print("\n=== 2. End-Electrode Current Auto- & Cross-Bicoherence at (f0, f0)->2f0 ===")
-        print("Run  Puff   N  thr    f0  | I2\" A2/A1 b2(h2) shuf  phi2  R1   | I4\" b2(h2) shuf | (I2,I2,I4) shuf | (Is,Is,I2) shuf | (I2,I2,Is) shuf")
-        for r in BIASSCOPE_RUNS:
-            p = f"bias_{r}__"
-            if f"{p}i2_b2_h2" not in d:
+    with np.load(npz_path, allow_pickle=False) as d:
+        print("\n=== 1. Stationary Isat Auto-Bicoherence (2.24-4.80 ms, df=390.6 Hz, 1 seg/shot; post=Y if t_on<=2.24 ms) ===")
+        print("Run  Grp       Puff   B0 post   N  thr    f0   A2/A1  b2(h2)  shuf  phi2  b2(h3)  shuf  R(f0) R(2f) Rthr | Peak (f1,f2)->f3  b2pk")
+        for spec in jon.ONSET_RUNS:
+            p = f"auto_{spec.run_num}__"
+            if f"{p}b2_h2" not in d:
                 continue
-            puff = jon.ONSET_RUN_MAP[r].gas_puff_ms
-            n = int(d[f"{p}n_shots"])
+            r = spec.run_num
+            grp = str(d[f"{p}group"])
+            puff = float(d[f"{p}gas_puff_ms"])
+            b0 = float(d[f"{p}b0_g"])
+            post_flag = "Y" if (f"{p}window_post_onset" in d and bool(d[f"{p}window_post_onset"])) else "N"
+            n = int(d[f"{p}n_avg"])
             thr = float(d[f"{p}threshold"])
             f0 = float(d[f"{p}f0_hz"]) / 1e3
+            a21 = float(d[f"{p}amp_h2_over_h1"])
+            b2 = float(d[f"{p}b2_h2"])
+            s2 = float(d[f"{p}b2_h2_shuf"])
+            ph2 = float(d[f"{p}biphase_h2_deg"])
+            b3 = float(d[f"{p}b2_h3"])
+            s3 = float(d[f"{p}b2_h3_shuf"])
+            r1 = float(d[f"{p}pc_R_h1"])
+            r2 = float(d[f"{p}pc_R_h2"])
+            rthr = float(d[f"{p}pc_threshold"])
+            pk = float(d[f"{p}b2_peak"])
+            pf1 = float(d[f"{p}b2_peak_f1_hz"]) / 1e3
+            pf2 = float(d[f"{p}b2_peak_f2_hz"]) / 1e3
+            pf3 = float(d[f"{p}b2_peak_f3_hz"]) / 1e3
+            ph2_s = f"{ph2:+5.0f}" if np.isfinite(ph2) else "  nan"
             print(
-                f" {r:2s}  {puff:4.0f} {n:3d} {thr:.3f} {f0:5.2f} | "
-                f"     {float(d[f'{p}i2_amp_h2_over_h1']):4.2f}  {float(d[f'{p}i2_b2_h2']):5.3f} {float(d[f'{p}i2_b2_h2_shuf']):5.3f} "
-                f"{float(d[f'{p}i2_biphase_h2_deg']):+5.0f} {float(d[f'{p}i2_pc_R_h1']):4.2f} | "
-                f"    {float(d[f'{p}i4_b2_h2']):5.3f} {float(d[f'{p}i4_b2_h2_shuf']):5.3f} | "
-                f"    {float(d[f'{p}x_i2_i2_i4_b2_h2']):5.3f} {float(d[f'{p}x_i2_i2_i4_b2_h2_shuf']):5.3f} | "
-                f"    {float(d[f'{p}x_isat_isat_i2_b2_h2']):5.3f} {float(d[f'{p}x_isat_isat_i2_b2_h2_shuf']):5.3f} | "
-                f"    {float(d[f'{p}x_i2_i2_isat_b2_h2']):5.3f} {float(d[f'{p}x_i2_i2_isat_b2_h2_shuf']):5.3f}"
+                f" {r:2s}  {grp:9s} {puff:4.0f} {b0:4.0f}   {post_flag}  {n:3d} {thr:.3f} {f0:5.2f}  {a21:5.2f}   "
+                f"{b2:5.3f} {s2:5.3f} {ph2_s}   {b3:5.3f} {s3:5.3f}  {r1:5.2f} {r2:5.2f} {rthr:4.2f} | "
+                f"({pf1:4.1f},{pf2:+5.1f})->{pf3:4.1f} {pk:5.3f}"
             )
+
+        has_bias = any(f"bias_{r}__i2_b2_h2" in d for r in BIASSCOPE_RUNS)
+        if has_bias:
+            print("\n=== 2. End-Electrode Current Auto- & Cross-Bicoherence at (f0, f0)->2f0 ===")
+            print("Run  Puff   N  thr    f0  | I2\" A2/A1 b2(h2) shuf  phi2  R1   | I4\" b2(h2) shuf | (I2,I2,I4) shuf | (Is,Is,I2) shuf | (I2,I2,Is) shuf")
+            for r in BIASSCOPE_RUNS:
+                p = f"bias_{r}__"
+                if f"{p}i2_b2_h2" not in d:
+                    continue
+                puff = jon.ONSET_RUN_MAP[r].gas_puff_ms
+                n = int(d[f"{p}n_shots"])
+                thr = float(d[f"{p}threshold"])
+                f0 = float(d[f"{p}f0_hz"]) / 1e3
+                print(
+                    f" {r:2s}  {puff:4.0f} {n:3d} {thr:.3f} {f0:5.2f} | "
+                    f"     {float(d[f'{p}i2_amp_h2_over_h1']):4.2f}  {float(d[f'{p}i2_b2_h2']):5.3f} {float(d[f'{p}i2_b2_h2_shuf']):5.3f} "
+                    f"{float(d[f'{p}i2_biphase_h2_deg']):+5.0f} {float(d[f'{p}i2_pc_R_h1']):4.2f} | "
+                    f"    {float(d[f'{p}i4_b2_h2']):5.3f} {float(d[f'{p}i4_b2_h2_shuf']):5.3f} | "
+                    f"    {float(d[f'{p}x_i2_i2_i4_b2_h2']):5.3f} {float(d[f'{p}x_i2_i2_i4_b2_h2_shuf']):5.3f} | "
+                    f"    {float(d[f'{p}x_isat_isat_i2_b2_h2']):5.3f} {float(d[f'{p}x_isat_isat_i2_b2_h2_shuf']):5.3f} | "
+                    f"    {float(d[f'{p}x_i2_i2_isat_b2_h2']):5.3f} {float(d[f'{p}x_i2_i2_isat_b2_h2_shuf']):5.3f}"
+                )
 
 
 if __name__ == "__main__":

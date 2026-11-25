@@ -131,14 +131,18 @@ class TestBispectralControls(unittest.TestCase):
             + 0.05 * self.rng.standard_normal((n, self.nseg))
         )
         res = bicoherence(x, self.dt, self.nseg, f1_band=(4 * self.df, 24 * self.df),
-                          f2_band=(4 * self.df, 24 * self.df))
+                          f2_band=(-24 * self.df, 24 * self.df))
         f3_sym, _, bmax_sym, cnt_sym = summed_bicoherence(res, symmetric=True)
         _, _, _, cnt_full = summed_bicoherence(res, symmetric=False)
-        # Peak of summed b2_max is at 2*f0
-        self.assertAlmostEqual(float(f3_sym[int(np.argmax(bmax_sym))]), 2 * f0, places=4)
-        # Symmetry avoids double-counting off-diagonal pairs
+        f3_pos, _, bmax_pos, cnt_pos = summed_bicoherence(res, symmetric=True, positive_only=True)
+        # Peak of summed b2_max in principal triangle is at 2*f0
+        self.assertAlmostEqual(float(f3_pos[int(np.argmax(bmax_pos))]), 2 * f0, places=4)
+        # Symmetry avoids double-counting off-diagonal positive pairs
         self.assertTrue(np.all(cnt_sym <= cnt_full))
         self.assertTrue(np.any(cnt_sym < cnt_full))
+        # positive_only drops negative-f2 conjugate reflections (min positive f2 unmasked is 3*df)
+        self.assertLess(int(cnt_pos.sum()), int(cnt_sym.sum()))
+        self.assertTrue(np.all(f3_pos >= 7 * self.df - 1e-6))
 
 
 class TestJun2026Bicoherence(unittest.TestCase):
@@ -197,51 +201,78 @@ class TestJun2026Bicoherence(unittest.TestCase):
         self.assertGreater(out["b2_h2"], 0.95)
         self.assertLess(out["b2_h2_shuf"], out["threshold"])
 
-    def test_batch_all_overwrite_false_skips_existing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            p = os.path.join(tmp, jbi.OUT_NAME)
-            np.savez(p, sentinel=np.array([42]))
-            ret = jbi.batch_all(data_dir=tmp, overwrite=False)
-            self.assertEqual(ret, p)
-            with np.load(p) as d:
-                self.assertEqual(int(d["sentinel"][0]), 42)
-
-    def test_batch_all_run_nums_scopes_biasscope_subset(self):
+    def test_batch_all_incremental_settings_and_partial_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
             onset_path = os.path.join(tmp, jbi.jon.OUT_NAME)
-            np.savez(onset_path, **{"02__f_peak_hz": 3934.0, "26__f_peak_hz": 4110.0})
+            np.savez(
+                onset_path,
+                **{
+                    "00__f_peak_hz": 3209.0, "00__t_onset_med_ms": 2.88,
+                    "02__f_peak_hz": 3934.0, "02__t_onset_med_ms": 1.65,
+                    "26__f_peak_hz": 4110.0, "26__t_onset_med_ms": 1.40,
+                },
+            )
+
+            auto_calls = []
+            bias_calls = []
 
             def fake_auto(spec, **kw):
-                res = {"b2_h2": 0.9}
+                auto_calls.append(spec.run_num)
+                t_on = float(kw.get("t_onset_med_ms", np.nan))
+                res = {
+                    "b2_h2": 0.9,
+                    "t_onset_med_ms": t_on,
+                    "window_post_onset": bool(np.isfinite(t_on) and t_on <= jbi.TMIN_MS),
+                }
                 if kw.get("return_stack"):
                     return res, (np.zeros(4), np.zeros((2, 4)), np.array([1, 2]))
                 return res
 
-            seen_bias_runs = []
-
             def fake_bias(*, runs=jbi.BIASSCOPE_RUNS, **kw):
-                seen_bias_runs.append(tuple(runs))
+                bias_calls.append(tuple(runs))
                 return {r: {"i2_b2_h2": 0.8} for r in runs}
 
             with (
                 mock.patch.object(jbi, "analyze_run_auto", side_effect=fake_auto),
                 mock.patch.object(jbi, "analyze_biasscope_bicoherence", side_effect=fake_bias),
             ):
-                # Mixed selection: only run "02" belongs to BIASSCOPE_RUNS
-                out1 = jbi.batch_all(data_dir=tmp, out_name="sub1.npz", run_nums=["02", "26"])
-                self.assertEqual(seen_bias_runs, [("02",)])
-                with np.load(out1) as d:
+                # 1. Initial subset ["00", "02"]: scopes biasscope and sets window_post_onset
+                out = jbi.batch_all(data_dir=tmp, run_nums=["00", "02"])
+                self.assertEqual(auto_calls, ["00", "02"])
+                self.assertEqual(bias_calls, [("00", "02")])
+                with np.load(out) as d:
+                    self.assertFalse(bool(d["auto_00__window_post_onset"]))
+                    self.assertTrue(bool(d["auto_02__window_post_onset"]))
+                    self.assertIn("bias_02__i2_b2_h2", d)
+                    self.assertNotIn("bias_06__i2_b2_h2", d)
+
+                # 2. Re-running with overwrite=False adds missing "26", skips "02", skips biasscope
+                auto_calls.clear()
+                bias_calls.clear()
+                jbi.batch_all(data_dir=tmp, run_nums=["02", "26"], overwrite=False)
+                self.assertEqual(auto_calls, ["26"])
+                self.assertEqual(bias_calls, [])
+                with np.load(out) as d:
+                    self.assertIn("auto_00__b2_h2", d)
                     self.assertIn("auto_02__b2_h2", d)
                     self.assertIn("auto_26__b2_h2", d)
-                    self.assertIn("bias_02__i2_b2_h2", d)
-                    self.assertNotIn("bias_00__i2_b2_h2", d)
 
-                # Non-biasscope selection: biasscope analysis must not be called at all
-                out2 = jbi.batch_all(data_dir=tmp, out_name="sub2.npz", run_nums=["26"])
-                self.assertEqual(seen_bias_runs, [("02",)])
-                with np.load(out2) as d:
+                # 3. Settings mismatch under overwrite=False raises ValueError
+                with self.assertRaises(ValueError):
+                    jbi.batch_all(data_dir=tmp, run_nums=["26"], max_shots=99, overwrite=False)
+
+                # 4. Partial overwrite=True refreshes ONLY "02" without deleting "00" or "26"
+                auto_calls.clear()
+                bias_calls.clear()
+                jbi.batch_all(data_dir=tmp, run_nums=["02"], overwrite=True)
+                self.assertEqual(auto_calls, ["02"])
+                self.assertEqual(bias_calls, [("02",)])
+                with np.load(out) as d:
+                    self.assertIn("auto_00__b2_h2", d)
+                    self.assertIn("auto_02__b2_h2", d)
                     self.assertIn("auto_26__b2_h2", d)
-                    self.assertFalse(any(k.startswith("bias_") for k in d.files))
+                    self.assertIn("bias_00__i2_b2_h2", d)
+                    self.assertIn("bias_02__i2_b2_h2", d)
 
 
 if __name__ == "__main__":

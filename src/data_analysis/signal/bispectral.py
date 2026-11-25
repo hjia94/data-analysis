@@ -356,7 +356,7 @@ def shot_phase_consistency(stack, dt, nperseg=1024, noverlap=None, *, f_band=Non
 def bicoherence_surrogate(stack_x, stack_y, stack_z, dt, nperseg=1024, noverlap=None, *,
                           f1_band=None, f2_band=None, window="hann", detrend="constant",
                           p=0.05, shift=None, rng=None):
-    """Shot-shuffled surrogate bicoherence separating trigger locking from true coupling.
+    """Shot-shuffled surrogate bicoherence testing for trigger-locking confounds.
 
     Permutes the shot index of ``stack_z`` with zero fixed points before
     computing ``<X_s(f1) Y_s(f2) Z_{perm(s)}*(f1+f2)>``. When ``rng`` is
@@ -365,10 +365,16 @@ def bicoherence_surrogate(stack_x, stack_y, stack_z, dt, nperseg=1024, noverlap=
     ``shift`` shots is used (default ``n_shots // 2`` to maximally separate
     paired shots and avoid leaking slow adjacent-shot drift into the surrogate).
 
-    Any phase coincidence caused by shot-to-shot trigger locking survives the
-    permutation, whereas genuine shot-by-shot quadratic phase coupling (where
-    the fundamental phase varies across shots) averages away. Pass
-    ``(x, x, x)`` for an auto-bicoherence surrogate.
+    Interpreting the surrogate alongside :func:`shot_phase_consistency`:
+    any phase coincidence caused by shot-to-shot trigger locking survives the
+    permutation, whereas genuine shot-by-shot quadratic phase coupling (when
+    the fundamental phase varies across shots) averages away. Thus a **low**
+    surrogate alongside high ``b2`` rules out trigger-locking as the source of
+    ``b2``. Conversely, a **high** surrogate (when shot phase consistency ``R``
+    is large) means trigger-locking confounds ``b2`` and the test cannot
+    distinguish genuine coupling from trigger-locked coincidence (it does *not*
+    prove absence of coupling). Pass ``(x, x, x)`` for an auto-bicoherence
+    surrogate.
     """
     arrs = [np.asarray(s) for s in (stack_x, stack_y, stack_z)]
     if any(a.ndim != 2 for a in arrs):
@@ -401,13 +407,21 @@ def bicoherence_surrogate(stack_x, stack_y, stack_z, dt, nperseg=1024, noverlap=
                              detrend=detrend, p=p)
 
 
-def summed_bicoherence(result, *, symmetric=False):
+def summed_bicoherence(result, *, symmetric=False, positive_only=False):
     """Collapse a 2-D bicoherence map onto the target sum frequency ``f3 = f1 + f2``.
 
     For every positive ``f3`` that has at least one finite triad ``(f1, f2)`` in
-    ``result.b2``, returns ``(f3_hz, b2_mean, b2_max, count)``. Set
-    ``symmetric=True`` for auto-bicoherence so conjugate-symmetric pairs
-    ``(f1, f2)`` and ``(f2, f1)`` are counted once (``f2 <= f1``).
+    ``result.b2``, returns ``(f3_hz, b2_mean, b2_max, count)``.
+
+    - ``symmetric=True`` enforces ``f2 <= f1`` so conjugate-symmetric positive
+      pairs ``(f1, f2)`` and ``(f2, f1)`` within the same ``f3`` bin are counted
+      once.
+    - ``positive_only=True`` additionally restricts to ``f2 > 0``. For an
+      auto-bispectrum computed over signed ``f2``, negative-``f2`` difference
+      triads ``(f3 + |f2|, -|f2|)`` are conjugate reflections of positive-``f2``
+      triads in a higher ``f3`` bin; set both ``symmetric=True`` and
+      ``positive_only=True`` to count every physical triad once in the
+      non-redundant Kim-Powers principal domain ``0 < f2 <= f1``.
     """
     f1 = np.asarray(result.f1, dtype=float)
     f2 = np.asarray(result.f2, dtype=float)
@@ -419,6 +433,8 @@ def summed_bicoherence(result, *, symmetric=False):
     f1g, f2g = np.meshgrid(f1, f2, indexing="ij")
     f3g = f1g + f2g
     mask = np.isfinite(b2) & (f3g > 0.0)
+    if positive_only:
+        mask &= f2g > 0.0
     if symmetric:
         tol = 1e-9 * (df if df is not None else 1.0)
         mask &= f2g <= f1g + tol
