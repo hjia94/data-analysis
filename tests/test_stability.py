@@ -1,0 +1,216 @@
+"""Unit tests for linear magnetized-plasma stability solvers (CWM, Braginskii, KH)."""
+
+import os
+import sys
+import tempfile
+import unittest
+
+import numpy as np
+
+_JUN2026_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "experiments", "ucla-lapd", "Jun-2026")
+)
+if _JUN2026_DIR not in sys.path:
+    sys.path.insert(0, _JUN2026_DIR)
+
+from data_analysis.plasma.stability import (
+    M_ELECTRON,
+    M_PROTON,
+    chebyshev_diff_matrix,
+    fit_smooth_radial_profile,
+    local_braginskii_state,
+    solve_axial_braginskii_bvp,
+    solve_local_braginskii,
+    solve_local_cwm,
+    solve_radial_cylindrical_modes,
+)
+import Jun2026_stability as jst
+
+
+class TestLinearStabilitySolvers(unittest.TestCase):
+    def test_chebyshev_diff_matrix_exact_on_polynomials_and_sine(self):
+        x, D = chebyshev_diff_matrix(16)
+        self.assertAlmostEqual(x[0], -1.0, places=12)
+        self.assertAlmostEqual(x[-1], +1.0, places=12)
+        self.assertTrue(np.all(np.diff(x) > 0.0))
+
+        # Exact derivative of f(x) = x^3 - 2x^2 + 5
+        f = x ** 3 - 2.0 * x ** 2 + 5.0
+        df_exact = 3.0 * x ** 2 - 4.0 * x
+        self.assertLess(float(np.max(np.abs(D @ f - df_exact))), 1e-11)
+
+        # Spectral accuracy on smooth trigonometric function (n=16 -> ~1e-9; n=20 -> ~1e-13)
+        g = np.sin(np.pi * x)
+        dg_exact = np.pi * np.cos(np.pi * x)
+        self.assertLess(float(np.max(np.abs(D @ g - dg_exact))), 1e-9)
+
+    def test_braginskii_recovers_alfven_and_acoustic_waves(self):
+        # Uniform plasma (zero gradients, zero resistivity/chi/nu_in) -> exact
+        # inertial/kinetic Alfven wave w^2 = k_par^2 v_A^2 / (1 + k_perp^2 d_e^2)
+        # and ion acoustic wave w^2 = (5/3) k_par^2 c_s^2 (with adiabatic T_e)!
+        st = local_braginskii_state(
+            ne_cm3=5e12, te_ev=2.0, b0_g=800.0,
+            dln_ne_dr_cm=0.0, dln_te_dr_cm=0.0, er_v_per_cm=0.0,
+        )
+        # Zero resistivity by disabling collisions via high Te or testing directly on a custom state
+        st_ideal = st._replace(nu_ei_s=0.0, eta_par_ohm_m=0.0, chi_par_m2_s=0.0)
+        k_perp = 80.0
+        k_par = 0.5
+        _, _, evals = solve_local_braginskii(
+            st_ideal, k_perp, k_par,
+            nu_in_s=0.0, em=True, thermal_force=False, chi_par_on=False,
+            include_centrifugal=False,
+        )
+        # All modes must be neutrally stable (real frequencies)
+        self.assertLess(float(np.max(np.abs(evals.imag))), 1e-3)
+
+        b = (k_perp * st_ideal.rho_s_m) ** 2
+        mu_e = M_ELECTRON / (st_ideal.mu * M_PROTON)
+        # Exact kinetic + inertial Alfven wave (with adiabatic electron gamma_e = 5/3):
+        # w^2 = k_par^2 v_A^2 * (1 + (5/3)*k_perp^2*rho_s^2) / (1 + k_perp^2*d_e^2)
+        w_A_exact = (
+            k_par * st_ideal.v_alfven_m_s
+            * np.sqrt((1.0 + (5.0 / 3.0) * b) / (1.0 + 2.0 * b * mu_e / st_ideal.beta_e))
+        )
+        # Adiabatic oblique ion-acoustic / slow wave (gamma_e = 5/3 when chi_par = 0):
+        # w_s = sqrt(5/3) * k_par * c_s / sqrt(1 + (5/3)*k_perp^2*rho_s^2)
+        w_s_exact = np.sqrt(5.0 / 3.0) * k_par * st_ideal.cs_m_s / np.sqrt(1.0 + (5.0 / 3.0) * b)
+
+        re_pos = np.sort(evals.real[evals.real > 1.0])
+        self.assertAlmostEqual(re_pos[-1] / w_A_exact, 1.0, delta=0.01)
+        self.assertAlmostEqual(re_pos[0] / w_s_exact, 1.0, delta=0.01)
+
+    def test_centrifugal_stability_sign_hollow_vs_peaked(self):
+        # Flute limit (k_par = 0): w^2 = (k_theta / k_perp)^2 * r * Omega_E^2 * (d ln n / dr)
+        k_perp = 100.0
+        st_hollow = local_braginskii_state(
+            ne_cm3=5e12, te_ev=2.0, b0_g=800.0,
+            dln_ne_dr_cm=+0.35, dln_te_dr_cm=0.0, er_v_per_cm=+1.2, r_cm=3.0, m=-1,
+        )
+        w_h, _, evals_h = solve_local_braginskii(
+            st_hollow, k_perp, k_par_m=0.0,
+            em=False, thermal_force=False, chi_par_on=False, include_centrifugal=True,
+        )
+        # Hollow wall (dn/dr > 0): strictly stable (gamma = 0) with real Brunt-Vaisala frequency
+        self.assertLess(abs(w_h.imag), 1e-4)
+        w_bv = (st_hollow.k_theta_m / k_perp) * np.sqrt(
+            st_hollow.r_m * (st_hollow.omega_E_rad_s ** 2) * (0.35 * 1e2)
+        )
+        self.assertAlmostEqual(float(np.max(np.abs(evals_h.real))) / w_bv, 1.0, delta=1e-4)
+
+        # Peaked edge (dn/dr < 0): rotational interchange unstable with exact gamma = w_bv
+        st_peaked = local_braginskii_state(
+            ne_cm3=5e12, te_ev=2.0, b0_g=800.0,
+            dln_ne_dr_cm=-0.35, dln_te_dr_cm=0.0, er_v_per_cm=+1.2, r_cm=3.0, m=-1,
+        )
+        w_p, _, _ = solve_local_braginskii(
+            st_peaked, k_perp, k_par_m=0.0,
+            em=False, thermal_force=False, chi_par_on=False, include_centrifugal=True,
+        )
+        self.assertAlmostEqual(w_p.imag / w_bv, 1.0, delta=1e-4)
+        self.assertLess(abs(w_p.real), 1e-4)
+
+    def test_local_cwm_matches_analytic_asymptote_and_axial_bvp_short_limit(self):
+        # Asymptotic CWM limit (nu_C >> |Lambda * w_*T|, no resistance/chi):
+        # w_r ~ Lambda * w_*T,  gamma ~ (Lambda * w_*T)^2 / nu_C > 0
+        st = local_braginskii_state(
+            ne_cm3=5e12, te_ev=2.0, b0_g=800.0,
+            dln_ne_dr_cm=0.0, dln_te_dr_cm=-0.04, er_v_per_cm=0.0, r_cm=3.0, m=-1,
+        )
+        k_perp = 40.0
+        L = 5.0
+        lam = 3.7
+        w_loc, _ = solve_local_cwm(
+            st, k_perp, l_par_m=L, sheath_lambda=lam, n_ends=2.0,
+            include_res=False, include_chi=False,
+        )
+        b = (k_perp * st.rho_s_m) ** 2
+        nu_C = (2.0 * st.cs_m_s / L) / b
+        w_asym_re = lam * st.omega_star_T_rad_s
+        w_asym_im = (w_asym_re ** 2) / nu_C
+        # Check asymptotic regime holds and matches within 5%
+        self.assertGreater(nu_C, 5.0 * abs(w_asym_re))
+        self.assertAlmostEqual(w_loc.real / w_asym_re, 1.0, delta=0.05)
+        self.assertAlmostEqual(w_loc.imag / w_asym_im, 1.0, delta=0.08)
+
+        # At k_par = 0, the 5-field local Braginskii solver with lumped sheath closure
+        # reduces identically to the 2-field local CWM dispersion.
+        w_brag_cwm, _, _ = solve_local_braginskii(
+            st, k_perp, k_par_m=0.0, em=False, thermal_force=False,
+            chi_par_on=False, include_centrifugal=False,
+            sheath_l_par_m=L, sheath_lambda=lam, n_ends=2.0,
+        )
+        self.assertAlmostEqual(w_brag_cwm.real / w_loc.real, 1.0, places=6)
+        self.assertAlmostEqual(w_brag_cwm.imag / w_loc.imag, 1.0, places=6)
+
+        # In the ideal (zero-resistivity, zero-chi, ES) short-column limit, the 5-field
+        # 1-D axial BVP recovers the same-sign sheath-anchored CWM branch (with O(1)
+        # shift from parallel electron compressional work (2/3) div_par(v_e) and Bohm vi).
+        st_ideal = st._replace(nu_ei_s=0.0, eta_par_ohm_m=0.0, chi_par_m2_s=0.0)
+        res_ax = solve_axial_braginskii_bvp(
+            st_ideal, k_perp, l_par_m=L, sheath_lambda=lam, bc="conducting_2",
+            em=False, thermal_force=False, chi_par_on=False,
+            include_centrifugal=False, n_nodes=14,
+        )
+        self.assertIsNotNone(res_ax["top"])
+        self.assertGreater(res_ax["top"].omega_rad_s.real * w_loc.real, 0.0)
+        self.assertGreater(res_ax["top"].omega_rad_s.imag, 0.0)
+        self.assertGreater(res_ax["top"].j_end_rel, 0.99)
+        self.assertAlmostEqual(res_ax["top"].omega_rad_s.real / w_loc.real, 1.0, delta=0.25)
+
+    def test_resistive_drift_wave_has_positive_growth_along_omega_star_n(self):
+        # Hasegawa-Wakatani limit (grad T_e = 0, finite nu_ei & k_par):
+        # unstable with Re(w) same sign as omega_*n!
+        st = local_braginskii_state(
+            ne_cm3=6e12, te_ev=2.5, b0_g=800.0,
+            dln_ne_dr_cm=+0.35, dln_te_dr_cm=0.0, er_v_per_cm=0.0, r_cm=3.0, m=-1,
+        )
+        w, _, _ = solve_local_braginskii(
+            st, k_perp_m=80.0, k_par_m=1.0,
+            em=False, thermal_force=False, chi_par_on=False, include_centrifugal=False,
+        )
+        self.assertGreater(w.imag, 0.0)
+        self.assertGreater(w.real * st.omega_star_n_rad_s, 0.0)
+
+    def test_radial_pure_kh_stable_on_gaussian_well_and_shear_suppresses_cwm(self):
+        r_cm = np.linspace(0.5, 12.0, 24)
+        # Smooth hollow density, peaked core Te, smooth Gaussian Vp well
+        ne = 9e12 - 6e12 * np.exp(-(r_cm / 3.5) ** 2)
+        te = 1.2 + 3.0 * np.exp(-(r_cm / 3.5) ** 2)
+        vp = 20.0 + 6.0 * np.exp(-(r_cm / 4.0) ** 2)
+
+        kh = solve_radial_cylindrical_modes(r_cm, ne, te, vp, model="pure_kh")
+        self.assertLessEqual(kh["gamma_s"], 1e-2)
+
+        cwm_nosh = solve_radial_cylindrical_modes(
+            r_cm, ne, te, vp, model="cwm_sheath",
+            include_centrifugal=False, include_exb_shear=False,
+        )
+        cwm_sh = solve_radial_cylindrical_modes(
+            r_cm, ne, te, vp, model="cwm_sheath",
+            include_centrifugal=False, include_exb_shear=True,
+        )
+        self.assertGreater(cwm_nosh["gamma_s"], 1e3)
+        self.assertLess(cwm_sh["gamma_s"], cwm_nosh["gamma_s"])
+
+    def test_fit_smooth_radial_profile_recovers_gaussian(self):
+        x = np.arange(-15.0, 16.0, 1.0)
+        xc = 1.0
+        y = 20.0 + 6.0 * np.exp(-((x - xc) / 4.0) ** 2)
+        r_grid = np.linspace(0.5, 12.0, 24)
+        y_fit, resid = fit_smooth_radial_profile(x, xc, y, r_grid)
+        self.assertLess(resid, 1e-6)
+        self.assertLess(float(np.max(np.abs(y_fit - (20.0 + 6.0 * np.exp(-(r_grid / 4.0) ** 2))))), 1e-6)
+
+    def test_jun2026_stability_batch_all_respects_overwrite_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_npz = os.path.join(tmp, "stability_linear_jun2026.npz")
+            np.savez(out_npz, sentinel=np.int64(7))
+            res = jst.batch_all(data_dir=tmp, out_path=out_npz, overwrite=False)
+            self.assertEqual(res, out_npz)
+            with np.load(out_npz) as d:
+                self.assertEqual(int(d["sentinel"]), 7)
+
+
+if __name__ == "__main__":
+    unittest.main()
