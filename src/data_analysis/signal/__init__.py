@@ -29,9 +29,13 @@ from data_analysis.signal.core import (
 )
 from data_analysis.signal.bispectral import (
     BicoherenceResult,
+    PhaseConsistencyResult,
     bicoherence,
+    bicoherence_surrogate,
     bicoherence_threshold,
     cross_bicoherence,
+    shot_phase_consistency,
+    summed_bicoherence,
 )
 
 __all__ = [
@@ -61,7 +65,11 @@ __all__ = [
     "fit_exponential_growth",
     "dominant_frequency",
     "BicoherenceResult",
+    "PhaseConsistencyResult",
     "bicoherence",
+    "bicoherence_surrogate",
     "bicoherence_threshold",
     "cross_bicoherence",
+    "shot_phase_consistency",
+    "summed_bicoherence",
 ]
