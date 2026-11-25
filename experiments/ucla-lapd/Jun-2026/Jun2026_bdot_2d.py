@@ -9,12 +9,24 @@ alongside simultaneous P29-R ``Isat`` (``lpscope/C2``) on the same grid:
    (2nd harmonic) over the post-onset saturated window ``[2.4, 4.8] ms`` in the
    physics ``exp(i*(m*theta - w*t))`` convention (:func:`reference_locked_phasor`).
 2. **Maxwell div/curl coil-polarity check**: compares interior
-   ``RMS|div B_perp| / RMS|curl B|_z`` for as-wired ``(Bx, +By)`` vs. flipped
-   ``(Bx, -By)`` to verify right-handed coil winding polarity directly from data.
+   ``RMS|div B_perp| / RMS|curl B|_z`` for ``(Bx, +by_sign*By)`` vs.
+   ``(Bx, -by_sign*By)`` to verify relative right-handed in-plane coil
+   polarity directly from data. By default (``on_polarity_mismatch="raise"``),
+   a clearly lower flipped ratio raises ``ValueError`` rather than silently
+   using inverted coils (or pass ``on_polarity_mismatch="flip"`` to invert
+   ``By`` automatically); ``by_sign_used`` is always recorded. Note that
+   negating *both* ``(Bx, By)`` together leaves ``div/curl``, ``m_J``, and
+   ``B_L/B_R`` unchanged while shifting ``J_par`` by 180 deg, so
+   ``dphi(J_par - LP)`` is determined modulo 180 deg until at least one
+   in-plane coil's absolute polarity is bench-verified
+   (``abs_coil_polarity_verified=False`` by default).
 3. **2-D field-aligned current density** ``J_par = (curl B_perp)_z / mu_0``
    (when calibrated; otherwise uncalibrated ``(G*A)*mu_0*J_par = (curl Phi_perp)_z``
-   [V*s/m] with ``bdot_calibrated=False``): azimuthal mode number ``m_J``,
-   purity, fitted center, peak current radius, and phase relative to P29-R ``Isat``.
+   [V*s/m] with ``bdot_calibrated=False``): azimuthal mode number ``m_J``
+   (weighted by transverse B-dot coherence ``min(g2_Bx, g2_By)`` on the
+   current-bearing interior ``|J_z| >= 0.2 max|J_z|`` so ``m_J_purity`` is
+   comparable with :mod:`Jun2026_modes`), fitted center, peak current radius,
+   and phase relative to P29-R ``Isat`` (mod 180 deg until abs coil sign is verified).
 4. **Shear-Alfvén vs. compressional ratio** ``|delta B_z| / |delta B_perp|`` and
    **circular polarization decomposition** ``(B_L, B_R, ellipticity)`` across
    core (``r <= 2.5 cm``), inner wall (``2.5 < r <= 4.5 cm``), and outer
@@ -62,6 +74,10 @@ DEFAULT_TMIN_MS = 2.4             # strictly post-onset for Run 26 (1.40 ms) & R
 DEFAULT_TMAX_MS = 4.8
 DEFAULT_WINDOW = "hann"
 DEFAULT_B_SIGN_Z = +1             # B0 along +z (North = West x Up)
+DEFAULT_BY_SIGN = +1              # applied sign on By (+1 as-wired, -1 inverted)
+DEFAULT_ON_POLARITY_MISMATCH = "raise"  # "raise" | "flip" | "ignore"
+DEFAULT_ABS_COIL_POLARITY_VERIFIED = False  # True once one in-plane coil abs sign is bench-verified
+DEFAULT_MJ_GAMMA2_MIN = 0.5       # transverse B-dot coherence threshold on current-bearing interior
 DEFAULT_GRID_STEP_CM = 1.0
 DEFAULT_BDOT_AREA_M2 = None       # pass bench-calibrated area [m^2] when available
 DEFAULT_BDOT_GAIN = 1.0
@@ -112,39 +128,106 @@ def _apply_bdot_calibration(vx, vy, vz, omega, *, bdot_area_m2=None, bdot_gain=1
 
 
 def analyze_harmonic_fields(x_cm, y_cm, Bx, By, Bz, LP, g2_Bx, g2_By, g2_Bz, g2_LP, *,
-                            calibrated=False, b_sign_z=DEFAULT_B_SIGN_Z):
-    """Compute 2-D ``J_par``, div/curl polarity ratio, ``B_L/B_R`` polarization, and LP phase."""
+                            calibrated=False, b_sign_z=DEFAULT_B_SIGN_Z,
+                            by_sign=DEFAULT_BY_SIGN,
+                            on_polarity_mismatch=DEFAULT_ON_POLARITY_MISMATCH,
+                            abs_coil_polarity_verified=DEFAULT_ABS_COIL_POLARITY_VERIFIED,
+                            m_j_gamma2_min=DEFAULT_MJ_GAMMA2_MIN):
+    """Compute 2-D ``J_par``, div/curl polarity ratio, ``B_L/B_R`` polarization, and LP phase.
+
+    Checks Maxwell's ``div B_perp = 0`` handedness by comparing interior
+    ``RMS|div B_perp| / RMS|curl B|_z`` for ``(Bx, by_sign * By)`` vs.
+    ``(Bx, -by_sign * By)``. If the opposite ``By`` sign cuts ``div/curl`` by
+    more than 30% (``alt < 0.7 * as_is``):
+    - ``"raise"`` (default): raises ``ValueError`` rather than returning a
+      corrupted ``m_J`` / polarization map.
+    - ``"flip"``: negates ``By`` automatically and records ``by_sign_used = -by_sign``.
+    - ``"ignore"``: keeps ``by_sign`` as given and flags ``coil_handedness_ok = False``.
+
+    Note that simultaneously negating *both* ``(Bx, By)`` leaves ``div/curl``,
+    ``m_J``, and ``B_L/B_R`` invariant while shifting ``dphi_J_minus_LP_deg`` by
+    180 deg; ``abs_coil_polarity_verified`` records whether at least one in-plane
+    coil's absolute polarity has been independently verified.
+    """
+    if by_sign not in (+1, -1):
+        raise ValueError(f"by_sign must be +1 or -1, got {by_sign!r}")
+    if on_polarity_mismatch not in ("raise", "flip", "ignore"):
+        raise ValueError(
+            f"on_polarity_mismatch must be 'raise', 'flip', or 'ignore', got {on_polarity_mismatch!r}"
+        )
+
     x_cm = np.asarray(x_cm, dtype=float)
     y_cm = np.asarray(y_cm, dtype=float)
+    Bx = np.asarray(Bx, dtype=complex)
+    By_used = float(by_sign) * np.asarray(By, dtype=complex)
+    By_alt = -By_used
+    Bz = np.asarray(Bz, dtype=complex)
+    LP = np.asarray(LP, dtype=complex)
     dx_m = float(np.median(np.diff(x_cm))) * 1e-2
     dy_m = float(np.median(np.diff(y_cm))) * 1e-2
     XX, YY = np.meshgrid(x_cm, y_cm)
     interior = slice(1, -1)
 
-    # 1. Div/curl coil-polarity diagnostic (as-wired vs By-flipped)
-    _, _, curl_z = curl(Bx, By, 0, dx_m, dy_m, None, axes=(-1, -2, -3))
-    div_perp = divergence_2d(Bx, By, dx_m, dy_m, axes=(-1, -2))
+    # 1. Div/curl coil-polarity diagnostic (requested by_sign vs opposite By)
+    _, _, curl_z = curl(Bx, By_used, 0, dx_m, dy_m, None, axes=(-1, -2, -3))
+    div_perp = divergence_2d(Bx, By_used, dx_m, dy_m, axes=(-1, -2))
     rms_div = float(np.sqrt(np.nanmean(np.abs(div_perp[interior, interior]) ** 2)))
     rms_curl = float(np.sqrt(np.nanmean(np.abs(curl_z[interior, interior]) ** 2)))
     div_curl_ratio = rms_div / rms_curl if rms_curl > 0.0 else np.nan
 
-    _, _, curl_z_flip = curl(Bx, -By, 0, dx_m, dy_m, None, axes=(-1, -2, -3))
-    div_perp_flip = divergence_2d(Bx, -By, dx_m, dy_m, axes=(-1, -2))
-    rms_div_f = float(np.sqrt(np.nanmean(np.abs(div_perp_flip[interior, interior]) ** 2)))
-    rms_curl_f = float(np.sqrt(np.nanmean(np.abs(curl_z_flip[interior, interior]) ** 2)))
-    div_curl_flip = rms_div_f / rms_curl_f if rms_curl_f > 0.0 else np.nan
+    _, _, curl_z_alt = curl(Bx, By_alt, 0, dx_m, dy_m, None, axes=(-1, -2, -3))
+    div_perp_alt = divergence_2d(Bx, By_alt, dx_m, dy_m, axes=(-1, -2))
+    rms_div_a = float(np.sqrt(np.nanmean(np.abs(div_perp_alt[interior, interior]) ** 2)))
+    rms_curl_a = float(np.sqrt(np.nanmean(np.abs(curl_z_alt[interior, interior]) ** 2)))
+    div_curl_alt = rms_div_a / rms_curl_a if rms_curl_a > 0.0 else np.nan
+
+    mismatch = bool(
+        np.isfinite(div_curl_ratio) and np.isfinite(div_curl_alt)
+        and (div_curl_alt < 0.7 * div_curl_ratio)
+    )
+    by_sign_used = int(by_sign)
+    coil_handedness_ok = True
+    polarity_auto_flipped = False
+    if mismatch:
+        if on_polarity_mismatch == "raise":
+            raise ValueError(
+                f"In-plane B-dot coil polarity mismatch for by_sign={by_sign:+d}: "
+                f"div/curl={div_curl_ratio:.3f} vs flipped By={div_curl_alt:.3f}. "
+                f"Verify hardware coil wiring or pass by_sign={-by_sign:+d} / "
+                "on_polarity_mismatch='flip'."
+            )
+        if on_polarity_mismatch == "flip":
+            By_used = By_alt
+            by_sign_used = -int(by_sign)
+            curl_z, div_perp = curl_z_alt, div_perp_alt
+            rms_div, rms_curl = rms_div_a, rms_curl_a
+            div_curl_ratio, div_curl_alt = div_curl_alt, div_curl_ratio
+            polarity_auto_flipped = True
+        else:
+            coil_handedness_ok = False
 
     # J_par: A/m^2 if calibrated, else (G*A)*mu_0*J_par = (curl Phi)_z [V*s/m]
     Jz = (curl_z / mu_0) if calibrated else curl_z
 
-    # 2. Azimuthal mode m_J and fitted center on 2-D Jz
+    # 2. Azimuthal mode m_J and fitted center on 2-D Jz.
+    # Weight by true transverse B-dot coherence min(g2_Bx, g2_By) (so m_J_purity
+    # is comparable with Jun2026_modes), gated to the current-bearing interior
+    # |Jz| >= 0.2 * max|Jz| where curl_z is above exterior finite-difference noise.
     j_int_abs = np.abs(Jz[interior, interior])
     j_max = float(np.nanmax(j_int_abs)) if np.any(np.isfinite(j_int_abs)) else 0.0
+    g2_bperp_int = np.minimum(
+        np.asarray(g2_Bx, dtype=float)[interior, interior],
+        np.asarray(g2_By, dtype=float)[interior, interior],
+    )
+    g2_j_fit = (
+        np.where(j_int_abs >= 0.2 * j_max, g2_bperp_int, np.nan)
+        if j_max > 0.0 else g2_bperp_int
+    )
     m_j = fit_azimuthal_mode(
         XX[interior, interior].ravel(), YY[interior, interior].ravel(),
-        j_int_abs.ravel(), np.angle(Jz[interior, interior]).ravel(),
+        g2_j_fit.ravel(), np.angle(Jz[interior, interior]).ravel(),
         r_min_cm=1.0, r_max_cm=7.0,
-        gamma2_min=0.2 * j_max if j_max > 0.0 else 0.0,
+        gamma2_min=float(m_j_gamma2_min),
         moving_is_a=True,
     )
     cx = float(m_j.center_x_cm) if np.isfinite(m_j.center_x_cm) else 2.0
@@ -157,14 +240,14 @@ def analyze_harmonic_fields(x_cm, y_cm, Bx, By, Bz, LP, g2_Bx, g2_By, g2_Bz, g2_
         r_peak_j_cm = np.nan
 
     # 3. Compressional vs shear-Alfven amplitude ratio |Bz| / |B_perp|
-    b_perp_abs = np.sqrt(np.abs(Bx) ** 2 + np.abs(By) ** 2)
+    b_perp_abs = np.sqrt(np.abs(Bx) ** 2 + np.abs(By_used) ** 2)
     rms_bperp = float(np.sqrt(np.nanmean(b_perp_abs[interior, interior] ** 2)))
     rms_bz = float(np.sqrt(np.nanmean(np.abs(Bz[interior, interior]) ** 2)))
     bz_over_bperp = rms_bz / rms_bperp if rms_bperp > 0.0 else np.nan
 
     # 4. Circular polarization B_L (CW/ion sense) vs B_R (CCW/electron sense)
     B_L, B_R, ellip = circular_polarization(
-        Bx, By, convention="exp_minus_iwt", b_sign_z=b_sign_z,
+        Bx, By_used, convention="exp_minus_iwt", b_sign_z=b_sign_z,
     )
 
     zones = {
@@ -199,11 +282,15 @@ def analyze_harmonic_fields(x_cm, y_cm, Bx, By, Bz, LP, g2_Bx, g2_By, g2_Bz, g2_
         dphi_j_lp_deg, R_j_lp, n_j_lp = np.nan, np.nan, 0
 
     return {
-        "Bx": Bx, "By": By, "Bz": Bz, "Jz": Jz,
+        "Bx": Bx, "By": By_used, "Bz": Bz, "Jz": Jz,
         "div_B_perp": div_perp, "B_L": B_L, "B_R": B_R, "ellipticity": ellip,
         "LP": LP, "g2_Bx": g2_Bx, "g2_By": g2_By, "g2_Bz": g2_Bz, "g2_LP": g2_LP,
         "rms_div": rms_div, "rms_curl": rms_curl,
-        "div_curl_ratio": div_curl_ratio, "div_curl_ratio_flipped": div_curl_flip,
+        "div_curl_ratio": div_curl_ratio, "div_curl_ratio_flipped": div_curl_alt,
+        "by_sign_used": int(by_sign_used),
+        "coil_handedness_ok": bool(coil_handedness_ok),
+        "polarity_auto_flipped": bool(polarity_auto_flipped),
+        "abs_coil_polarity_verified": bool(abs_coil_polarity_verified),
         "m_J": int(m_j.m), "m_J_purity": float(m_j.purity),
         "center_x_cm": cx, "center_y_cm": cy, "r_peak_j_cm": r_peak_j_cm,
         "bz_over_bperp": bz_over_bperp,
@@ -273,6 +360,9 @@ def _grid_reference_locked_channel(stack, ref_seg, pos_obj, shot_to_idx, dt_sig,
 def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
                 tmin_ms=DEFAULT_TMIN_MS, tmax_ms=DEFAULT_TMAX_MS,
                 window=DEFAULT_WINDOW, b_sign_z=DEFAULT_B_SIGN_Z,
+                by_sign=DEFAULT_BY_SIGN,
+                on_polarity_mismatch=DEFAULT_ON_POLARITY_MISMATCH,
+                abs_coil_polarity_verified=DEFAULT_ABS_COIL_POLARITY_VERIFIED,
                 bdot_area_m2=DEFAULT_BDOT_AREA_M2, bdot_gain=DEFAULT_BDOT_GAIN):
     """Extract 2-D complex B-dot & LP phasors, ``J_par``, and polarization for one run."""
     ifn = _run_ifn(data_dir, spec.run_num)
@@ -333,6 +423,7 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
         "t0_offset_us": float(t0_offset_s * 1e6),
         "bdot_calibrated": bool(bdot_area_m2 is not None),
         "bdot_gain": float(bdot_gain),
+        "abs_coil_polarity_verified": bool(abs_coil_polarity_verified),
     }
 
     for h_lbl, f_hz in (("h1", freqs[0]), ("h2", freqs[1])):
@@ -347,6 +438,8 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
         h_res = analyze_harmonic_fields(
             ux, uy, Bx, By, Bz, lp_c, gx, gy, gz, glp,
             calibrated=cal_flag, b_sign_z=b_sign_z,
+            by_sign=by_sign, on_polarity_mismatch=on_polarity_mismatch,
+            abs_coil_polarity_verified=abs_coil_polarity_verified,
         )
         out[f"{h_lbl}__freq_hz"] = float(f_hz)
         for k, v in h_res.items():
@@ -355,12 +448,17 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
     return out
 
 
-def _run_settings_dict(tmin_ms, tmax_ms, window, b_sign_z, bdot_area_m2, bdot_gain):
+def _run_settings_dict(tmin_ms, tmax_ms, window, b_sign_z, by_sign,
+                       on_polarity_mismatch, abs_coil_polarity_verified,
+                       bdot_area_m2, bdot_gain):
     return {
         "tmin_ms": float(tmin_ms),
         "tmax_ms": float(tmax_ms),
         "window": str(window),
         "b_sign_z": int(b_sign_z),
+        "by_sign": int(by_sign),
+        "on_polarity_mismatch": str(on_polarity_mismatch),
+        "abs_coil_polarity_verified": bool(abs_coil_polarity_verified),
         "bdot_calibrated": bool(bdot_area_m2 is not None),
         "bdot_gain": float(bdot_gain),
     }
@@ -391,6 +489,9 @@ def _run_settings_mismatch(npz_data, run_num, want):
 def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
               tmin_ms=DEFAULT_TMIN_MS, tmax_ms=DEFAULT_TMAX_MS,
               window=DEFAULT_WINDOW, b_sign_z=DEFAULT_B_SIGN_Z,
+              by_sign=DEFAULT_BY_SIGN,
+              on_polarity_mismatch=DEFAULT_ON_POLARITY_MISMATCH,
+              abs_coil_polarity_verified=DEFAULT_ABS_COIL_POLARITY_VERIFIED,
               bdot_area_m2=DEFAULT_BDOT_AREA_M2, bdot_gain=DEFAULT_BDOT_GAIN,
               overwrite=False):
     """Compute 2-D B-dot phasors, ``J_par``, and ``B_L/B_R`` polarization -> npz path."""
@@ -399,7 +500,10 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
     out_path = out_path or os.path.join(data_dir, OUT_NAME)
     onset_path = onset_npz or os.path.join(data_dir, jon.OUT_NAME)
     onset_table = jon.load_onset_table(onset_path) if os.path.isfile(onset_path) else {}
-    want = _run_settings_dict(tmin_ms, tmax_ms, window, b_sign_z, bdot_area_m2, bdot_gain)
+    want = _run_settings_dict(
+        tmin_ms, tmax_ms, window, b_sign_z, by_sign, on_polarity_mismatch,
+        abs_coil_polarity_verified, bdot_area_m2, bdot_gain,
+    )
 
     if overwrite and runs is None and os.path.isfile(out_path):
         os.remove(out_path)
@@ -436,6 +540,8 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
         res = analyze_run(
             spec, data_dir=data_dir, onset_table=onset_table,
             tmin_ms=tmin_ms, tmax_ms=tmax_ms, window=window, b_sign_z=b_sign_z,
+            by_sign=by_sign, on_polarity_mismatch=on_polarity_mismatch,
+            abs_coil_polarity_verified=abs_coil_polarity_verified,
             bdot_area_m2=bdot_area_m2, bdot_gain=bdot_gain,
         )
         p = spec.run_num
@@ -478,23 +584,26 @@ def print_summary(npz_path=None):
             if f"{r}__f0_hz" not in d.files:
                 continue
             cal = bool(d[f"{r}__bdot_calibrated"])
+            abs_pol = bool(d[f"{r}__abs_coil_polarity_verified"]) if f"{r}__abs_coil_polarity_verified" in d.files else False
             b_unit = "G" if cal else "uV*s"
             b_scale = 1e4 if cal else 1e6
+            pol_note = "" if abs_pol else " [mod 180d: abs coil sign unverified]"
             print(
                 f"\nRun {r} ({float(d[f'{r}__b0_g']):.0f} G, f0={float(d[f'{r}__f0_hz']):.1f} Hz, "
                 f"win=[{float(d[f'{r}__tmin_ms']):.1f}, {float(d[f'{r}__tmax_ms']):.1f}] ms, "
-                f"calibrated={cal}):"
+                f"calibrated={cal}, abs_polarity_verified={abs_pol}):"
             )
             for h_lbl, h_name in (("h1", "f0 "), ("h2", "2f0")):
                 pfx = f"{r}__{h_lbl}__"
+                by_s = int(d[pfx + "by_sign_used"]) if (pfx + "by_sign_used") in d.files else +1
                 print(
-                    f"  [{h_name}] div/curl: as-wired={float(d[pfx+'div_curl_ratio']):.3f} vs "
-                    f"By-flipped={float(d[pfx+'div_curl_ratio_flipped']):.3f} | "
-                    f"J_par: m_J={int(d[pfx+'m_J']):+d} (pur={float(d[pfx+'m_J_purity']):.3f}, "
+                    f"  [{h_name}] div/curl (by_sign={by_s:+d}): used={float(d[pfx+'div_curl_ratio']):.3f} vs "
+                    f"alt={float(d[pfx+'div_curl_ratio_flipped']):.3f} | "
+                    f"J_par: m_J={int(d[pfx+'m_J']):+d} (g2-pur={float(d[pfx+'m_J_purity']):.3f}, "
                     f"ctr=({float(d[pfx+'center_x_cm']):+.1f},{float(d[pfx+'center_y_cm']):+.1f})cm, "
                     f"r_pk={float(d[pfx+'r_peak_j_cm']):.2f}cm) | "
                     f"|Bz|/|Bp|={float(d[pfx+'bz_over_bperp']):.3f} (g2_z={float(d[pfx+'med_g2_Bz']):.2f}) | "
-                    f"dphi(J-LP)={float(d[pfx+'dphi_J_minus_LP_deg']):+.1f}d (R={float(d[pfx+'R_J_LP']):.2f})"
+                    f"dphi(J-LP)={float(d[pfx+'dphi_J_minus_LP_deg']):+.1f}d{pol_note} (R={float(d[pfx+'R_J_LP']):.2f})"
                 )
                 for zn, zl in (("core", "Core  r<=2.5"), ("wall", "Wall 2.5-4.5"), ("outer", "Outer 4.5-8 ")):
                     print(

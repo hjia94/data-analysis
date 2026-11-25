@@ -266,9 +266,11 @@ def batch_line(ifn, iv_run, cal_path=CAL_NPZ, te_ev=TE_EV, out_path=None):
             if stacks is None:
                 continue
             R, counts, amplitude = binned_face_ratio(stacks[0], stacks[1], edges)
-            # Confirmed P33 6-tip face normals: X+ -> +x (West), Y+ -> +y (Up),
-            # Z+ -> South (verified by bias-off Z flow on Cal 17/19 & Run 32) ->
-            # default FLOW_SIGN_PLUS_FACING_AXIS = -1 yields lab-frame velocities.
+            # P33 6-tip face normals: Z+ -> South is data-verified by bias-off
+            # Z flow on Cal 17/19 & Run 32; X+ -> +x (West) and Y+ -> +y (Up)
+            # are operator-reported mounting orientation (pending CAD/photo for
+            # an E x B-independent X/Y check). Default FLOW_SIGN_PLUS_FACING_AXIS = -1
+            # yields lab-frame velocities under that mounting.
             mach[axis][p] = mach_single(R, kappa[axis])
             amp[i, p] = amplitude
             n_valid[i, p] = counts

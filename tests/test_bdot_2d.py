@@ -99,7 +99,10 @@ class TestElectromagnetic2DHelpers(unittest.TestCase):
         # Maxwell div/curl check: as-wired << flipped
         self.assertLess(res["div_curl_ratio"], 0.05)
         self.assertGreater(res["div_curl_ratio_flipped"], 0.8)
-        # Mode m_J = -1 with near-unit purity
+        self.assertEqual(res["by_sign_used"], +1)
+        self.assertTrue(res["coil_handedness_ok"])
+        self.assertFalse(res["abs_coil_polarity_verified"])
+        # Mode m_J = -1 with near-unit coherence-weighted purity
         self.assertEqual(res["m_J"], -1)
         self.assertGreater(res["m_J_purity"], 0.98)
         # Core is LHCP (< -0.4), outer Biot-Savart exterior is RHCP (> +0.8)
@@ -108,6 +111,37 @@ class TestElectromagnetic2DHelpers(unittest.TestCase):
         # Antiphase J_z vs LP locking
         self.assertAlmostEqual(abs(res["dphi_J_minus_LP_deg"]), 180.0, delta=1e-6)
         self.assertAlmostEqual(res["R_J_LP"], 1.0, delta=1e-6)
+
+        # Inverted By: default on_polarity_mismatch='raise' must fail fast
+        with self.assertRaises(ValueError):
+            jb2.analyze_harmonic_fields(
+                x_cm, y_cm, Bx, -By, Bz, LP, g2_ones, g2_ones, g2_ones, g2_ones,
+                calibrated=False, b_sign_z=+1,
+            )
+
+        # Inverted By with on_polarity_mismatch='flip' corrects By and recovers m_J = -1
+        res_flip = jb2.analyze_harmonic_fields(
+            x_cm, y_cm, Bx, -By, Bz, LP, g2_ones, g2_ones, g2_ones, g2_ones,
+            calibrated=False, b_sign_z=+1, on_polarity_mismatch="flip",
+        )
+        self.assertEqual(res_flip["by_sign_used"], -1)
+        self.assertTrue(res_flip["coil_handedness_ok"])
+        self.assertTrue(res_flip["polarity_auto_flipped"])
+        self.assertEqual(res_flip["m_J"], -1)
+        self.assertLess(res_flip["div_curl_ratio"], 0.05)
+        self.assertAlmostEqual(res_flip["core_ellip_med"], res["core_ellip_med"], places=12)
+        self.assertAlmostEqual(res_flip["outer_ellip_med"], res["outer_ellip_med"], places=12)
+
+        # Common-mode (-Bx, -By) inversion leaves div/curl, m_J, and ellipticity
+        # invariant while shifting dphi(J - LP) by 180 deg (mod-180 caveat)
+        res_cm = jb2.analyze_harmonic_fields(
+            x_cm, y_cm, -Bx, -By, Bz, LP, g2_ones, g2_ones, g2_ones, g2_ones,
+            calibrated=False, b_sign_z=+1,
+        )
+        self.assertEqual(res_cm["m_J"], -1)
+        self.assertAlmostEqual(res_cm["div_curl_ratio"], res["div_curl_ratio"], places=12)
+        self.assertAlmostEqual(res_cm["outer_ellip_med"], res["outer_ellip_med"], places=12)
+        self.assertAlmostEqual(res_cm["dphi_J_minus_LP_deg"], 0.0, delta=1e-6)
 
     def test_batch_all_incremental_settings_and_partial_overwrite(self):
         fake = {
