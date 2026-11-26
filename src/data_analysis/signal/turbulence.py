@@ -13,6 +13,14 @@ Provides:
   production ``P_shear = -<dv_r dv_theta> * gamma_E`` (positive = extraction
   from mean flow to waves; negative = wave feeds mean flow), and radially
   integrated ``integral(P_shear * r dr)``.
+- :func:`amplitude_normalized_cross_phase`: causal unit-phasor cross-phase
+  that prevents saturated tail power from dominating linear growth ramps.
+- :func:`harmonic_steepening`: bispectral biphase ``beta = phi_2 - 2*phi_1``
+  decomposition separating symmetric wall-curvature peakedness
+  ``(A_2/A_1)*cos(beta)`` from true antisymmetric sawtooth steepening
+  ``(A_2/A_1)*sin(beta)``, alongside Elgar-Guza Hilbert asymmetry,
+  rise-vs-fall slope ratio, rise-time fraction, and a phase-folded cycle
+  waveform normalized to a unit-amplitude fundamental ``cos(theta)``.
 """
 
 from typing import NamedTuple
@@ -55,6 +63,24 @@ class ReynoldsProduction(NamedTuple):
     shear_per_cm: np.ndarray       # gamma_E = r * d(v_theta / r) / dr
     p_shear_local: np.ndarray      # -reynolds_stress * gamma_E (>0: mean->wave; <0: wave->mean)
     p_shear_integrated: float      # integral(p_shear_local * r dr)
+
+
+class HarmonicSteepening(NamedTuple):
+    """Bispectral biphase and waveform-asymmetry decomposition of a rotating mode."""
+    a2_a1_med: float
+    a3_a1_med: float
+    biphase_lock: float            # |<B>| / <|B|> in [0, 1], B = X(2f1) * conj(X(f1))^2
+    biphase_deg: float             # beta = phi_2 - 2*phi_1 in (-180, 180]
+    curvature_comp: float          # (A2/A1) * cos(beta): symmetric peakedness / wall curvature
+    steepening_comp: float         # (A2/A1) * sin(beta): sawtooth steepening (>0 steep rise)
+    skewness_med: float            # harmonic-band waveform skewness S
+    hilbert_asymmetry_med: float   # Elgar-Guza skew(Im(hilbert(x))) (<0 steep rise, >0 steep fall)
+    slope_ratio_med: float         # p95(dx>0) / p95(-dx[dx<0]) (>1 steep rise, <1 steep fall)
+    rise_frac_med: float           # fraction of samples with dx > 0 (<0.5 steep rise)
+    phase_rad: np.ndarray          # fundamental-phase bin centers in (-pi, pi)
+    folded_wave: np.ndarray        # phase-folded waveform normalized so fundamental = cos(phase_rad)
+    folded_std: np.ndarray         # across-shot std of folded waveform in each phase bin
+    n_shots: int
 
 
 def fit_broadband_spectrum(
@@ -416,3 +442,205 @@ def amplitude_normalized_cross_phase(
     all_z = np.concatenate(unit_phasors)
     z_mean = complex(np.mean(all_z))
     return float(abs(z_mean)), float(np.degrees(np.angle(z_mean))), int(all_z.size)
+
+
+def harmonic_steepening(
+    stack,
+    fs_hz,
+    f0_hz,
+    *,
+    n_harmonics=4,
+    f0_search_hz=600.0,
+    slope_pct=95.0,
+    n_phase_bins=64,
+    edge_trim_frac=0.10,
+):
+    """Quantify nonlinear sawtooth steepening vs. symmetric peakedness of a harmonic mode.
+
+    For a harmonic waveform ``A_1 cos(wt + phi_1) + A_2 cos(2wt + phi_2) + ...``,
+    the complex bispectrum ``B = X(2 f_1) * conj(X(f_1))^2`` yields the biphase
+    ``beta = phi_2 - 2*phi_1`` (invariant under per-shot time/phase shifts and
+    symmetric windowing):
+
+    - ``beta = 0 deg`` or ``180 deg`` (``cos(beta) = +-1``, ``sin(beta) = 0``):
+      symmetric peaked crests or deep troughs (e.g. curved background density
+      wall ``n_0''(r)``), giving skewness ``S != 0`` but equal rise/fall slopes
+      and zero Hilbert asymmetry.
+    - ``beta = +90 deg`` (``sin(beta) = +1``): steep rising front / slow falling
+      tail (``slope_ratio > 1``, ``rise_frac < 0.5``, ``hilbert_asymmetry < 0``).
+    - ``beta = -90 deg`` (``sin(beta) = -1``): slow rise / steep falling back
+      (``slope_ratio < 1``, ``rise_frac > 0.5``, ``hilbert_asymmetry > 0``).
+
+    Also constructs a fundamental-phase-folded cycle waveform normalized per
+    shot by ``sqrt(2) * std(x_1)`` so a pure sinusoid maps to ``cos(phase_rad)``
+    of exact unit amplitude.
+
+    Args:
+        stack: 1-D ``(nt,)`` or 2-D ``(nshot, nt)`` time-series array.
+        fs_hz: Sampling rate [Hz].
+        f0_hz: Nominal fundamental frequency [Hz].
+        n_harmonics: Upper harmonic index retained in the zero-phase harmonic
+            bandpass ``[0.5*f0, (n_harmonics + 0.5)*f0]``.
+        f0_search_hz: Half-width [Hz] around ``f0_hz`` searched per shot for
+            the exact spectral peak ``f_1`` (zero-padded FFT).
+        slope_pct: Percentile of positive vs. negative ``dx`` used for the
+            robust rise/fall slope ratio (default 95).
+        n_phase_bins: Number of azimuthal/phase bins on ``[-pi, pi)`` for the
+            phase-folded cycle waveform.
+        edge_trim_frac: Fraction trimmed from each end after ``sosfiltfilt``
+            to eliminate filter boundary transients.
+
+    Returns:
+        :class:`HarmonicSteepening`.
+    """
+    arr = np.asarray(stack, dtype=float)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    elif arr.ndim != 2:
+        raise ValueError(f"stack must be 1-D or 2-D, got shape {arr.shape}")
+
+    nb = int(n_phase_bins)
+    if nb < 8:
+        raise ValueError(f"n_phase_bins must be >= 8, got {n_phase_bins}")
+    phase_edges = np.linspace(-np.pi, np.pi, nb + 1)
+    phase_centers = 0.5 * (phase_edges[:-1] + phase_edges[1:])
+
+    def _empty():
+        nan_vec = np.full(nb, np.nan, dtype=float)
+        return HarmonicSteepening(
+            a2_a1_med=np.nan,
+            a3_a1_med=np.nan,
+            biphase_lock=np.nan,
+            biphase_deg=np.nan,
+            curvature_comp=np.nan,
+            steepening_comp=np.nan,
+            skewness_med=np.nan,
+            hilbert_asymmetry_med=np.nan,
+            slope_ratio_med=np.nan,
+            rise_frac_med=np.nan,
+            phase_rad=phase_centers,
+            folded_wave=nan_vec.copy(),
+            folded_std=nan_vec.copy(),
+            n_shots=0,
+        )
+
+    fs = float(fs_hz)
+    f0 = float(f0_hz) if f0_hz is not None else np.nan
+    nsh, nt = arr.shape
+    if nt < 24 or not np.isfinite(fs) or fs <= 0.0 or not np.isfinite(f0) or f0 <= 0.0:
+        return _empty()
+    if 2.0 * f0 >= 0.48 * fs:
+        return _empty()
+
+    f_lo_h = max(0.5 * f0, min(500.0, 0.25 * f0))
+    f_hi_h = min((float(n_harmonics) + 0.5) * f0, 0.45 * fs)
+    f_lo_1 = max(0.65 * f0, f_lo_h)
+    f_hi_1 = min(1.35 * f0, 0.45 * fs)
+    if not (0.0 < f_lo_h < f_hi_h < 0.5 * fs and 0.0 < f_lo_1 < f_hi_1 < 0.5 * fs):
+        return _empty()
+
+    sos_harm = signal.butter(4, [f_lo_h, f_hi_h], btype="bandpass", fs=fs, output="sos")
+    sos_f1 = signal.butter(4, [f_lo_1, f_hi_1], btype="bandpass", fs=fs, output="sos")
+
+    t_lin = np.linspace(-1.0, 1.0, nt)
+    denom_t = float(np.dot(t_lin, t_lin))
+    win = np.hanning(nt)
+    nfft = max(2048, 1 << int(np.ceil(np.log2(max(4 * nt, 2048)))))
+    freqs = np.fft.rfftfreq(nfft, d=1.0 / fs)
+    search_hw = max(float(f0_search_hz), 0.15 * f0)
+    idx1_cand = np.flatnonzero(np.abs(freqs - f0) <= search_hw)
+    if idx1_cand.size == 0:
+        return _empty()
+
+    trim = min(max(8, int(float(edge_trim_frac) * nt)), nt // 4)
+    B_list, a21_l, a31_l = [], [], []
+    S_l, A_l, sr_l, rf_l = [], [], [], []
+    folded_rows = []
+
+    for k in range(nsh):
+        row = arr[k]
+        if not np.all(np.isfinite(row)):
+            continue
+        mu = float(np.mean(row))
+        sl = float(np.dot(t_lin, row - mu) / denom_t)
+        det = row - (mu + sl * t_lin)
+
+        X = np.fft.rfft(det * win, n=nfft)
+        kp1 = int(idx1_cand[int(np.argmax(np.abs(X[idx1_cand])))])
+        kp2 = 2 * kp1
+        kp3 = 3 * kp1
+        if kp2 >= X.size or abs(X[kp1]) <= 0.0:
+            continue
+        x1, x2 = X[kp1], X[kp2]
+        x3 = X[kp3] if kp3 < X.size else 0.0
+        B_list.append(x2 * np.conj(x1) ** 2)
+        a21_l.append(float(abs(x2) / abs(x1)))
+        a31_l.append(float(abs(x3) / abs(x1)))
+
+        xh = signal.sosfiltfilt(sos_harm, det)
+        x1_t = signal.sosfiltfilt(sos_f1, det)
+        xc = xh[trim:-trim] if nt > 2 * trim + 8 else xh
+        x1c = x1_t[trim:-trim] if nt > 2 * trim + 8 else x1_t
+        if xc.size < 8 or float(np.std(xc)) <= 0.0:
+            continue
+
+        S_l.append(float(stats.skew(xc)))
+        A_l.append(float(stats.skew(np.imag(signal.hilbert(xc)))))
+        dx = np.diff(xc)
+        pos_dx = dx[dx > 0.0]
+        neg_dx = -dx[dx < 0.0]
+        if pos_dx.size and neg_dx.size:
+            pos_s = float(np.percentile(pos_dx, float(slope_pct)))
+            neg_s = float(np.percentile(neg_dx, float(slope_pct)))
+            if neg_s > 0.0:
+                sr_l.append(pos_s / neg_s)
+        rf_l.append(float(np.mean(dx > 0.0)))
+
+        # Phase-fold onto fundamental phase theta in [-pi, pi), normalized so fundamental ~ cos(theta).
+        amp1 = float(np.sqrt(2.0) * np.std(x1c))
+        if amp1 > 0.0:
+            theta = np.angle(signal.hilbert(x1c))
+            b_idx = np.clip(np.digitize(theta, phase_edges) - 1, 0, nb - 1)
+            counts = np.bincount(b_idx, minlength=nb)
+            sums = np.bincount(b_idx, weights=xc / amp1, minlength=nb)
+            row_fold = np.where(counts > 0, sums / np.where(counts > 0, counts, 1), np.nan)
+            folded_rows.append(row_fold)
+
+    if not B_list or not S_l:
+        return _empty()
+
+    B_arr = np.asarray(B_list, dtype=complex)
+    b_denom = float(np.mean(np.abs(B_arr)))
+    b_lock = float(abs(np.mean(B_arr)) / b_denom) if b_denom > 0.0 else np.nan
+    beta_deg = float(np.degrees(np.angle(np.mean(B_arr)))) if b_denom > 0.0 else np.nan
+    a21_med = float(np.median(a21_l))
+    a31_med = float(np.median(a31_l))
+    curv = a21_med * float(np.cos(np.radians(beta_deg))) if np.isfinite(beta_deg) else np.nan
+    steep = a21_med * float(np.sin(np.radians(beta_deg))) if np.isfinite(beta_deg) else np.nan
+
+    if folded_rows:
+        fm = np.vstack(folded_rows)
+        cnt = np.sum(np.isfinite(fm), axis=0)
+        f_mean = np.where(cnt > 0, np.nansum(fm, axis=0) / np.where(cnt > 0, cnt, 1), np.nan)
+        diff2 = np.where(np.isfinite(fm), (fm - f_mean[None, :]) ** 2, 0.0)
+        f_std = np.where(cnt > 1, np.sqrt(np.sum(diff2, axis=0) / np.where(cnt > 1, cnt - 1, 1)), 0.0)
+    else:
+        f_mean = np.full(nb, np.nan, dtype=float)
+        f_std = np.full(nb, np.nan, dtype=float)
+
+    return HarmonicSteepening(
+        a2_a1_med=a21_med,
+        a3_a1_med=a31_med,
+        biphase_lock=b_lock,
+        biphase_deg=beta_deg,
+        curvature_comp=curv,
+        steepening_comp=steep,
+        skewness_med=float(np.median(S_l)),
+        hilbert_asymmetry_med=float(np.median(A_l)),
+        slope_ratio_med=float(np.median(sr_l)) if sr_l else np.nan,
+        rise_frac_med=float(np.median(rf_l)) if rf_l else np.nan,
+        phase_rad=phase_centers,
+        folded_wave=f_mean,
+        folded_std=f_std,
+        n_shots=int(len(S_l)),
+    )

@@ -646,6 +646,153 @@ def plot_xcorr_plane_run(ifn, ch_a=jxc.CH_A, ch_b=jxc.CH_B, npz_path=None,
 # =========================================================================== #
 
 
+def plot_turbulence_steepening(npz_path=None, *, data_dir=None,
+                               save_fig=True, show=False):
+    """4-panel nonlinear steepening & phase-folded sawtooth waveform figure.
+
+    Reads ``turbulence_transport_jun2026.npz`` produced by
+    ``Jun2026_turbulence.py`` (zero raw HDF5 reads) and draws:
+
+    * **(a)** Phase-folded stationary ``Isat`` cycle waveforms vs. pure
+      sinusoid ``cos(theta)`` across puff and outer-probe runs (``02``, ``03``,
+      ``04``, ``27``).
+    * **(b)** Run 32 hollow-wall ``[3.5, 4.5) cm`` phase-folded velocity
+      (``M_r``, ``M_theta``) and flow-cancelled density (``Isat_0``) vs.
+      ``cos(theta)`` — illustrating intrinsic velocity-field sawtooth
+      steepening independent of ``n_0''(r)``.
+    * **(c)** Radial biphase winding ``beta(r)`` and orthogonal decomposition
+      into symmetric wall curvature ``(A2/A1)*cos(beta)`` vs. sawtooth
+      steepening ``(A2/A1)*sin(beta)`` across ``r = 0..7 cm`` on Runs 11–12.
+    * **(d)** Campaign summary of ``steepening`` vs. ``curvature`` across the
+      Day-1 puff scan (Runs ``00–04``) and ``B0`` scan (Runs ``28, 27, 30``).
+    """
+    import Jun2026_turbulence as jtb
+
+    path = npz_path or os.path.join(data_dir or jtb.DATA_DIR, jtb.OUT_NAME)
+    with np.load(path, allow_pickle=True) as d:
+        res = {k: d[k] for k in d.files}
+
+    fig, axs = plt.subplots(2, 2, figsize=(13.5, 9.2))
+
+    # --- (a) Phase-folded stationary Isat waveforms vs pure cos(theta) ---
+    ax = axs[0, 0]
+    th_ref = np.linspace(-np.pi, np.pi, 256)
+    ax.plot(th_ref / (2.0 * np.pi), np.cos(th_ref), "k--", lw=1.6, alpha=0.65,
+            label=r"Pure sine $\cos\theta$")
+    specs_a = (
+        ("02", "Run 02 (30 ms, inner wall)", "#d62728"),
+        ("03", "Run 03 (35 ms, inner wall)", "#ff7f0e"),
+        ("04", "Run 04 (40 ms, broadband)", "#7f7f7f"),
+        ("27", "Run 27 (35 ms, outer probe)", "#1f77b4"),
+    )
+    for rnum, lbl, col in specs_a:
+        p = f"spec_{rnum}__"
+        if p + "folded_wave" not in res:
+            continue
+        ph = np.asarray(res[p + "folded_phase_rad"], dtype=float) / (2.0 * np.pi)
+        w = np.asarray(res[p + "folded_wave"], dtype=float)
+        ws = np.asarray(res[p + "folded_std"], dtype=float)
+        beta = float(res[p + "biphase_deg"])
+        slp = float(res[p + "slope_ratio_med"])
+        rf = float(res[p + "rise_frac_med"])
+        ax.plot(ph, w, lw=2.2, color=col,
+                label=rf"{lbl}: $\beta={beta:+.0f}^\circ$, slp={slp:.2f}$\times$, $f_r={rf:.2f}$")
+        ax.fill_between(ph, w - ws, w + ws, color=col, alpha=0.12)
+    ax.axhline(0.0, color="0.75", lw=0.8)
+    ax.set_xlim(-0.5, 0.5)
+    ax.set_xlabel(r"Fundamental cycle phase $\theta / 2\pi$")
+    ax.set_ylabel(r"Normalized waveform $\tilde{I}_{\mathrm{sat}} / A_1$")
+    ax.set_title("(a) Phase-Folded Stationary $I_{\\mathrm{sat}}$ vs. Pure Sinusoid")
+    ax.legend(fontsize=8.2, loc="lower center", framealpha=0.92)
+    ax.grid(True, alpha=0.25)
+
+    # --- (b) Run 32 wall [3.5, 4.5) cm velocity (M_r, M_theta) vs density ---
+    ax = axs[0, 1]
+    ax.plot(th_ref / (2.0 * np.pi), np.cos(th_ref), "k--", lw=1.6, alpha=0.65,
+            label=r"Pure sine $\cos\theta$")
+    if "r32__steep_phase_rad" in res:
+        ph32 = np.asarray(res["r32__steep_phase_rad"], dtype=float) / (2.0 * np.pi)
+        bi = 2  # [3.5, 4.5) cm hollow-wall band
+        for tag, lbl, col in (
+            ("mr", r"Radial velocity $\tilde{M}_r$", "#d62728"),
+            ("mt", r"Azimuthal velocity $\tilde{M}_\theta$", "#2ca02c"),
+            ("isat0", r"Flow-cancelled $I_{\mathrm{sat},0}$", "#1f77b4"),
+        ):
+            w = np.asarray(res[f"r32__steep_{tag}_folded_waves"], dtype=float)[bi]
+            beta = float(res[f"r32__steep_{tag}_biphase_deg"][bi])
+            stp = float(res[f"r32__steep_{tag}_steepening_comp"][bi])
+            slp = float(res[f"r32__steep_{tag}_slope_ratio"][bi])
+            ax.plot(ph32, w, lw=2.3, color=col,
+                    label=rf"{lbl}: $\beta={beta:+.0f}^\circ$, sin={stp:+.2f}, slp={slp:.2f}$\times$")
+    ax.axhline(0.0, color="0.75", lw=0.8)
+    ax.set_xlim(-0.5, 0.5)
+    ax.set_xlabel(r"Fundamental cycle phase $\theta / 2\pi$")
+    ax.set_ylabel(r"Normalized waveform $\tilde{x} / A_1$")
+    ax.set_title(r"(b) Run 32 Wall $[3.5, 4.5)$ cm: Intrinsic Velocity vs. Density Steepening")
+    ax.legend(fontsize=8.3, loc="lower center", framealpha=0.92)
+    ax.grid(True, alpha=0.25)
+
+    # --- (c) Radial decomposition across hollow wall (Runs 11 & 12) ---
+    ax = axs[1, 0]
+    for rnum, puff, col, mk in (("11", 30, "#d62728", "o"), ("12", 35, "#1f77b4", "s")):
+        pr = f"radst_{rnum}__"
+        if pr + "r_cm" not in res:
+            continue
+        r = np.asarray(res[pr + "r_cm"], dtype=float)
+        stp = np.asarray(res[pr + "steepening_comp"], dtype=float)
+        crv = np.asarray(res[pr + "curvature_comp"], dtype=float)
+        ax.plot(r, stp, color=col, marker=mk, lw=2.2, ms=6,
+                label=rf"Run {rnum} ({puff} ms) steepening $(A_2/A_1)\sin\beta$")
+        ax.plot(r, crv, color=col, marker=mk, lw=1.4, ls="--", ms=4.5, alpha=0.65,
+                label=rf"Run {rnum} ({puff} ms) curvature $(A_2/A_1)\cos\beta$")
+    ax.axhline(0.0, color="0.5", lw=0.9)
+    ax.axvspan(2.5, 3.5, color="#ffcccc", alpha=0.25, label="Mid-wall (steep rise)")
+    ax.axvspan(5.0, 6.2, color="#cce5ff", alpha=0.25, label="Outer shear (steep fall)")
+    ax.set_xlabel(r"Radius $r = x - x_0$ [cm]")
+    ax.set_ylabel(r"Harmonic component amplitude")
+    ax.set_title(r"(c) Radial Decomposition Across Hollow Wall (Runs 11–12 $I_{\mathrm{sat},0}$)")
+    ax.legend(fontsize=7.8, loc="upper right", framealpha=0.92)
+    ax.grid(True, alpha=0.25)
+
+    # --- (d) Campaign summary: Puff scan (00-04) & B0 scan (28, 27, 30) ---
+    ax = axs[1, 1]
+    run_order = (
+        ("00", "24ms\n800G"), ("01", "25ms\n800G"), ("02", "30ms\n800G"),
+        ("03", "35ms\n800G"), ("04", "40ms\n800G"),
+        ("28", "35ms\n600G*"), ("27", "35ms\n800G*"), ("30", "35ms\n1000G*"),
+    )
+    xs = np.arange(len(run_order))
+    stps = [float(res[f"spec_{r}__steepening_comp"]) for r, _ in run_order]
+    crvs = [float(res[f"spec_{r}__curvature_comp"]) for r, _ in run_order]
+    slps = [float(res[f"spec_{r}__slope_ratio_med"]) for r, _ in run_order]
+    w_bar = 0.36
+    ax.bar(xs - w_bar / 2, stps, width=w_bar, color="#d62728", alpha=0.88,
+           label=r"Sawtooth steepening $(A_2/A_1)\sin\beta$")
+    ax.bar(xs + w_bar / 2, crvs, width=w_bar, color="#1f77b4", alpha=0.72,
+           label=r"Symmetric curvature $(A_2/A_1)\cos\beta$")
+    ax.axhline(0.0, color="0.4", lw=0.9)
+    ax.axvline(4.5, color="0.4", lw=1.0, ls=":")
+    for xi, sv, slp in zip(xs, stps, slps):
+        if not (np.isfinite(sv) and np.isfinite(slp) and slp > 0.0):
+            continue
+        va = "bottom" if sv >= 0 else "top"
+        off = 0.02 if sv >= 0 else -0.02
+        txt = f"{slp:.1f}x↑" if slp >= 1.0 else f"{1.0/slp:.1f}x↓"
+        ax.text(xi - w_bar / 2, sv + off, txt, ha="center", va=va, fontsize=7.8,
+                fontweight="bold", color="#8b0000")
+    ax.set_xticks(xs)
+    ax.set_xticklabels([lbl for _, lbl in run_order], fontsize=8.5)
+    ax.set_ylabel(r"2nd-harmonic component")
+    ax.set_title(r"(d) Puff Scan & $B_0$ Scan (*outer probe; slope ratio annotated)")
+    ax.set_ylim(-0.42, 0.56)
+    ax.legend(fontsize=8.2, loc="upper right", framealpha=0.92)
+    ax.grid(True, axis="y", alpha=0.25)
+
+    fig.suptitle("Jun-2026 Nonlinear Wave Steepening vs. Symmetric Wall Curvature",
+                 fontsize=13.5, fontweight="bold")
+    finalize_figure(fig, save_fig=_resolve_save(save_fig, "turbulence_steepening"), show=show)
+
+
 if __name__ == '__main__':
 
 

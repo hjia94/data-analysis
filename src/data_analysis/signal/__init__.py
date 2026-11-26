@@ -39,11 +39,13 @@ from data_analysis.signal.bispectral import (
 )
 from data_analysis.signal.turbulence import (
     FluctuationMoments,
+    HarmonicSteepening,
     ReynoldsProduction,
     SpectrumModelFit,
     amplitude_normalized_cross_phase,
     fit_broadband_spectrum,
     fluctuation_moments,
+    harmonic_steepening,
     reynolds_shear_production,
 )
 
@@ -82,10 +84,12 @@ __all__ = [
     "shot_phase_consistency",
     "summed_bicoherence",
     "FluctuationMoments",
+    "HarmonicSteepening",
     "ReynoldsProduction",
     "SpectrumModelFit",
     "amplitude_normalized_cross_phase",
     "fit_broadband_spectrum",
     "fluctuation_moments",
+    "harmonic_steepening",
     "reynolds_shear_production",
 ]

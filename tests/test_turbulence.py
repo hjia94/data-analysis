@@ -14,6 +14,7 @@ from data_analysis.signal import (
     amplitude_normalized_cross_phase,
     fit_broadband_spectrum,
     fluctuation_moments,
+    harmonic_steepening,
     reynolds_shear_production,
 )
 import Jun2026_turbulence as jtb
@@ -156,6 +157,106 @@ class TestTurbulenceHelpers(unittest.TestCase):
         self.assertAlmostEqual(phi_g, 0.0, delta=5.0)
         self.assertAlmostEqual(phi_e, +60.0, delta=5.0)
         self.assertAlmostEqual(phi_s, +60.0, delta=5.0)
+
+    def test_harmonic_steepening_separates_curvature_vs_sawtooth_and_folds_waveform(self):
+        fs = 100e3
+        t = np.arange(0, 2000) / fs
+        f0 = 4000.0
+        rng = np.random.default_rng(7)
+        # Random per-shot phase and slight frequency jitter to test phase-shift invariance
+        phases = rng.uniform(-np.pi, np.pi, size=8)
+        f_jit = f0 + rng.uniform(-120.0, 120.0, size=8)
+
+        def _make_stack(a2_cos, a2_sin):
+            rows = []
+            for ph, fj in zip(phases, f_jit):
+                th = 2.0 * np.pi * fj * t + ph
+                rows.append(10.0 + 0.2 * t + np.cos(th) + a2_cos * np.cos(2.0 * th) + a2_sin * np.sin(2.0 * th))
+            return np.vstack(rows)
+
+        # (a) Pure symmetric peakedness: beta = 0 deg, curv = +0.35, steep = 0, slope_ratio = 1, rise_frac = 0.5
+        st_sym = harmonic_steepening(_make_stack(+0.35, 0.0), fs, f0)
+        self.assertGreater(st_sym.biphase_lock, 0.99)
+        self.assertAlmostEqual(st_sym.a2_a1_med, 0.35, delta=0.02)
+        self.assertAlmostEqual(st_sym.biphase_deg, 0.0, delta=2.0)
+        self.assertAlmostEqual(st_sym.curvature_comp, +0.35, delta=0.02)
+        self.assertAlmostEqual(st_sym.steepening_comp, 0.0, delta=0.02)
+        self.assertGreater(st_sym.skewness_med, 0.5)
+        self.assertAlmostEqual(st_sym.hilbert_asymmetry_med, 0.0, delta=0.05)
+        self.assertAlmostEqual(st_sym.slope_ratio_med, 1.0, delta=0.08)
+        self.assertAlmostEqual(st_sym.rise_frac_med, 0.5, delta=0.03)
+        expected_sym = np.cos(st_sym.phase_rad) + 0.35 * np.cos(2.0 * st_sym.phase_rad)
+        np.testing.assert_allclose(st_sym.folded_wave, expected_sym, atol=0.08)
+
+        # (b) Steep rising sawtooth: -0.35*sin(2*th) = +0.35*cos(2*th + 90 deg) -> beta = +90 deg
+        st_rise = harmonic_steepening(_make_stack(0.0, -0.35), fs, f0)
+        self.assertGreater(st_rise.biphase_lock, 0.99)
+        self.assertAlmostEqual(st_rise.biphase_deg, +90.0, delta=2.0)
+        self.assertAlmostEqual(st_rise.curvature_comp, 0.0, delta=0.02)
+        self.assertAlmostEqual(st_rise.steepening_comp, +0.35, delta=0.02)
+        self.assertAlmostEqual(st_rise.skewness_med, 0.0, delta=0.05)
+        self.assertLess(st_rise.hilbert_asymmetry_med, -0.5)
+        self.assertGreater(st_rise.slope_ratio_med, 1.7)
+        self.assertLess(st_rise.rise_frac_med, 0.40)
+        expected_rise = np.cos(st_rise.phase_rad) - 0.35 * np.sin(2.0 * st_rise.phase_rad)
+        np.testing.assert_allclose(st_rise.folded_wave, expected_rise, atol=0.08)
+
+        # (c) Steep falling sawtooth: +0.35*sin(2*th) -> beta = -90 deg
+        st_fall = harmonic_steepening(_make_stack(0.0, +0.35), fs, f0)
+        self.assertAlmostEqual(st_fall.biphase_deg, -90.0, delta=2.0)
+        self.assertAlmostEqual(st_fall.steepening_comp, -0.35, delta=0.02)
+        self.assertGreater(st_fall.hilbert_asymmetry_med, 0.5)
+        self.assertLess(st_fall.slope_ratio_med, 0.6)
+        self.assertGreater(st_fall.rise_frac_med, 0.60)
+
+        # (d) 1-D pure sinusoid & invalid/Nyquist f0 edge cases
+        st_1d = harmonic_steepening(np.cos(2.0 * np.pi * f0 * t), fs, f0)
+        self.assertEqual(st_1d.n_shots, 1)
+        self.assertLess(st_1d.a2_a1_med, 0.02)
+        self.assertAlmostEqual(st_1d.slope_ratio_med, 1.0, delta=0.05)
+        st_bad = harmonic_steepening(np.cos(2.0 * np.pi * f0 * t), fs, 0.3 * fs)
+        self.assertEqual(st_bad.n_shots, 0)
+        self.assertTrue(np.isnan(st_bad.biphase_deg))
+
+    def test_plot_turbulence_steepening_smoke(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        import Jun2026_plot as jp
+
+        ph = np.linspace(-np.pi, np.pi, 65)
+        ph = 0.5 * (ph[:-1] + ph[1:])
+        synth = {
+            "r32__steep_phase_rad": ph,
+            "radst_11__r_cm": np.arange(8, dtype=float),
+            "radst_11__steepening_comp": np.linspace(-0.2, 0.4, 8),
+            "radst_11__curvature_comp": np.linspace(0.5, -0.2, 8),
+            "radst_12__r_cm": np.arange(8, dtype=float),
+            "radst_12__steepening_comp": np.linspace(-0.1, 0.3, 8),
+            "radst_12__curvature_comp": np.linspace(0.2, -0.1, 8),
+        }
+        for rnum in ("00", "01", "02", "03", "04", "28", "27", "30"):
+            p = f"spec_{rnum}__"
+            synth[p + "folded_phase_rad"] = ph
+            synth[p + "folded_wave"] = np.cos(ph) - 0.3 * np.sin(2.0 * ph)
+            synth[p + "folded_std"] = np.full_like(ph, 0.05)
+            synth[p + "biphase_deg"] = 75.0 if rnum in ("00", "01", "02", "03") else -90.0
+            synth[p + "steepening_comp"] = 0.3 if rnum in ("00", "01", "02", "03") else -0.25
+            synth[p + "curvature_comp"] = 0.1
+            synth[p + "slope_ratio_med"] = 2.5 if rnum in ("00", "01", "02", "03") else 0.4
+            synth[p + "rise_frac_med"] = 0.3 if rnum in ("00", "01", "02", "03") else 0.7
+        for tag in ("isat0", "mr", "mt"):
+            synth[f"r32__steep_{tag}_folded_waves"] = np.tile(np.cos(ph) - 0.25 * np.sin(2.0 * ph), (5, 1))
+            synth[f"r32__steep_{tag}_biphase_deg"] = np.full(5, 80.0)
+            synth[f"r32__steep_{tag}_steepening_comp"] = np.full(5, 0.3)
+            synth[f"r32__steep_{tag}_slope_ratio"] = np.full(5, 2.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            npz_p = os.path.join(tmp, jtb.OUT_NAME)
+            out_png = os.path.join(tmp, "steepening_test.png")
+            np.savez(npz_p, **synth)
+            jp.plot_turbulence_steepening(npz_path=npz_p, save_fig=out_png, show=False)
+            self.assertTrue(os.path.exists(out_png))
+            self.assertGreater(os.path.getsize(out_png), 1000)
 
     def test_batch_all_respects_overwrite_false(self):
         with tempfile.TemporaryDirectory() as tmp:
