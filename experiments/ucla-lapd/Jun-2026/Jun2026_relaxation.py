@@ -44,6 +44,7 @@ import glob
 import os
 
 import numpy as np
+from scipy import signal
 
 from data_analysis.io import open_lapd, parse_gas_puff, parse_shunts, position_shots
 from data_analysis.plasma.flow import find_flow_centre, polar_components
@@ -349,46 +350,45 @@ def analyze_mach_line_relaxation(data_dir=DATA_DIR, *, cal_npz=None,
             float(ic_late / ic_pre) if np.isfinite(ic_late) and np.isfinite(ic_pre) and ic_pre > 0 else np.nan
         )
 
-        # Single-shot 10 us onset-aligned traces & rigid-orbit smearing test on Runs 11-14
+        # Single-shot 10 us onset-aligned traces & rigid-orbit smearing bound on Runs 11-14
         if rnum in SINGLE_SHOT_RUNS:
             ss_out = _single_shot_onset_aligned(run, rnum, chans, shunts, pos, x_pos, x_center_cm)
             out.update(ss_out)
-            # Estimate rigid m=-1 orbital displacement delta_r = sqrt(2)*(dI_rms/I)/|d(ln I)/dr|
-            # and smear the measured pre-onset radial profile to separate orbit smearing from real filling.
+            # Upper bound on rigid m=+-1 orbital displacement delta_r = sqrt(2)*(dI_rms/I)/|d(ln I)/dr|_local
+            # evaluated at the exact wall radius r_wall where rms_w is measured; H_orbit_smeared is therefore
+            # the maximum apparent filling rigid wobble could cause (lower bound on smeared H).
             rms_w = float(ss_out.get(f"ss_{rnum}_wall__post_rms_norm_med", np.nan))
-            slope_pre = float(out[p + "wall_pre_onset_cm"])
-            dr_est = (
-                float(np.sqrt(2.0) * rms_w / abs(slope_pre))
-                if np.isfinite(rms_w) and np.isfinite(slope_pre) and abs(slope_pre) > 0.0
-                else np.nan
-            )
+            r_wall = abs(float(ss_out.get(f"ss_{rnum}_wall__x_cm", np.nan)) - float(x_center_cm))
+            dr_est = np.nan
             h_sm = np.nan
             smear_factor = np.nan
-            if np.isfinite(dr_est) and wins["pre_onset"] is not None:
+            if np.isfinite(rms_w) and np.isfinite(r_wall) and wins["pre_onset"] is not None:
                 lo_p, hi_p = wins["pre_onset"]
                 m_pre_t = (t_ms >= lo_p) & (t_ms <= hi_p)
                 if np.any(m_pre_t):
                     prof_pre_pos = np.nanmedian(isat0[:, m_pre_t], axis=1)
                     r_fine = np.linspace(0.0, 8.0, 161)
-                    # Build symmetric radial profile from both sides of x_center_cm
                     r_bins = np.arange(0.0, 8.5, 0.5)
                     hm_r = hollow_profile_metrics(rr, prof_pre_pos, radial_edges_cm=r_bins)
                     r_mid = 0.5 * (r_bins[:-1] + r_bins[1:])
-                    ok_r = np.isfinite(hm_r.radial_profile)
+                    ok_r = np.isfinite(hm_r.radial_profile) & (hm_r.radial_profile > 0.0)
                     if int(np.sum(ok_r)) >= 4:
                         p_fine = np.interp(r_fine, r_mid[ok_r], hm_r.radial_profile[ok_r])
-                        hm_0 = hollow_profile_metrics(
-                            r_fine, p_fine,
-                            core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
-                        )
-                        p_sm = orbit_smeared_profile(r_fine, p_fine, dr_est)
-                        hm_sm = hollow_profile_metrics(
-                            r_fine, p_sm,
-                            core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
-                        )
-                        if np.isfinite(hm_0.hollowness) and hm_0.hollowness > 0.0 and np.isfinite(hm_sm.hollowness):
-                            smear_factor = float(hm_sm.hollowness / hm_0.hollowness)
-                            h_sm = float(h_pre * smear_factor) if np.isfinite(h_pre) else np.nan
+                        dr_pts = _local_orbit_displacement(r_fine, p_fine, np.array([r_wall]), np.array([rms_w]))
+                        if dr_pts.size and np.isfinite(dr_pts[0]):
+                            dr_est = float(dr_pts[0])
+                            hm_0 = hollow_profile_metrics(
+                                r_fine, p_fine,
+                                core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                            )
+                            p_sm = orbit_smeared_profile(r_fine, p_fine, dr_est)
+                            hm_sm = hollow_profile_metrics(
+                                r_fine, p_sm,
+                                core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                            )
+                            if np.isfinite(hm_0.hollowness) and hm_0.hollowness > 0.0 and np.isfinite(hm_sm.hollowness):
+                                smear_factor = float(hm_sm.hollowness / hm_0.hollowness)
+                                h_sm = float(h_pre * smear_factor) if np.isfinite(h_pre) else np.nan
             out[p + "delta_r_orbit_est_cm"] = dr_est
             out[p + "H_orbit_smeared"] = h_sm
             out[p + "H_orbit_smeared_over_pre"] = smear_factor
@@ -565,8 +565,32 @@ def _safe_ratio(num, den):
     return float(num / den) if np.isfinite(num) and np.isfinite(den) and den > 0.0 else np.nan
 
 
+def _local_orbit_displacement(r_grid, prof_grid, r_samples, rms_samples, *, min_grad_cm=0.05):
+    """Pointwise rigid-wobble displacement ``delta_r_i = sqrt(2) * rms_i / |d(ln I)/dr|(r_i)``.
+
+    Divides each sample's relative RMS by the *local* radial log-gradient at
+    that exact radius rather than a band-averaged slope, eliminating radial
+    bias across curved hollow walls. Returns an upper-bound displacement array
+    (``NaN`` where the local gradient is below ``min_grad_cm`` or inputs are
+    non-finite), because non-rigid density perturbations, harmonics, and noise
+    can only inflate ``rms_samples``.
+    """
+    rg = np.asarray(r_grid, dtype=float)
+    pg = np.asarray(prof_grid, dtype=float)
+    rs = np.asarray(r_samples, dtype=float)
+    rms = np.asarray(rms_samples, dtype=float)
+    ok = np.isfinite(pg) & (pg > 0.0)
+    if int(np.sum(ok)) < 3:
+        return np.full(rs.shape, np.nan, dtype=float)
+    rk, pk = rg[ok], pg[ok]
+    dln_dr = np.gradient(np.log(pk), rk)
+    local_grad = np.abs(np.interp(rs, rk, dln_dr))
+    valid = np.isfinite(rms) & (rms >= 0.0) & np.isfinite(local_grad) & (local_grad >= float(min_grad_cm))
+    return np.where(valid, np.sqrt(2.0) * rms / np.where(valid, local_grad, 1.0), np.nan)
+
+
 def _summarize_2d_plane_windows(x_u, y_u, vals, t_on_ms, *,
-                                rel_rms_late=None, p10_late=None):
+                                rel_rms_late=None, rel_rms_f0_late=None, p10_late=None):
     """Per-window centered 2-D radial hollowness, crash-safe when any window is ``None``.
 
     Each bias-on / post-off window fits its own 2-D core center ``(xc_k, yc_k)``
@@ -623,7 +647,11 @@ def _summarize_2d_plane_windows(x_u, y_u, vals, t_on_ms, *,
     out["H_late_over_pre"] = _safe_ratio(out["H_late_sat"], out["H_pre_onset"])
     out["ic_late_over_pre"] = _safe_ratio(out["ic_late_sat"], out["ic_pre_onset"])
 
-    # Rigid m=-1 orbit-smearing forward model (both median and 90th-percentile wall RMS)
+    # Rigid m=+-1 orbit-smearing upper-bound check using pointwise local gradient |d(ln I)/dr|(r_i)
+    # and narrowband f0 RMS when available (strips 2f0, broadband turbulence, and digitizer noise).
+    # Even narrowband f0 delta_r is an UPPER BOUND on rigid wobble -> H_orbit_smeared is a LOWER BOUND
+    # (maximum possible apparent filling from rigid wobble).
+    rms_for_orbit = rel_rms_f0_late if rel_rms_f0_late is not None else rel_rms_late
     wall_rms_med = np.nan
     wall_rms_p90 = np.nan
     dr_est = np.nan
@@ -632,44 +660,48 @@ def _summarize_2d_plane_windows(x_u, y_u, vals, t_on_ms, *,
     h_sm_p90 = np.nan
     smear_factor = np.nan
     smear_factor_p90 = np.nan
-    if rel_rms_late is not None and "late_sat" in vals and np.all(np.isfinite(centers["late_sat"])):
+    if rms_for_orbit is not None and "late_sat" in vals and np.all(np.isfinite(centers["late_sat"])):
         xc_l, yc_l = centers["late_sat"]
         rr_l = np.hypot(x_u - xc_l, y_u - yc_l)
-        m_wall_l = (rr_l >= WALL_R_CM[0]) & (rr_l <= WALL_R_CM[1]) & np.isfinite(rel_rms_late)
+        m_wall_l = (rr_l >= WALL_R_CM[0]) & (rr_l <= WALL_R_CM[1]) & np.isfinite(rms_for_orbit)
         if np.any(m_wall_l):
-            wall_rms_med = float(np.median(rel_rms_late[m_wall_l]))
-            wall_rms_p90 = float(np.percentile(rel_rms_late[m_wall_l], 90))
-        slope_pre = float(out["wall_pre_onset_cm"])
-        if np.isfinite(wall_rms_med) and np.isfinite(slope_pre) and abs(slope_pre) > 0.0:
-            dr_est = float(np.sqrt(2.0) * wall_rms_med / abs(slope_pre))
-            dr_est_p90 = float(np.sqrt(2.0) * wall_rms_p90 / abs(slope_pre))
+            wall_rms_med = float(np.median(rms_for_orbit[m_wall_l]))
+            wall_rms_p90 = float(np.percentile(rms_for_orbit[m_wall_l], 90))
             r_mid = 0.5 * (RADIAL_EDGES_CM[:-1] + RADIAL_EDGES_CM[1:])
             p_pre = out["r_prof_norm_pre_onset"]
-            ok_r = np.isfinite(p_pre)
+            ok_r = np.isfinite(p_pre) & (p_pre > 0.0)
             if int(np.sum(ok_r)) >= 4:
                 r_fine = np.linspace(0.0, float(RADIAL_EDGES_CM[-1]), 161)
                 p_fine = np.interp(r_fine, r_mid[ok_r], p_pre[ok_r])
-                hm_0 = hollow_profile_metrics(
-                    r_fine, p_fine,
-                    core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                dr_pts = _local_orbit_displacement(
+                    r_fine, p_fine, rr_l[m_wall_l], rms_for_orbit[m_wall_l]
                 )
-                if np.isfinite(hm_0.hollowness) and hm_0.hollowness > 0.0:
-                    hm_sm = hollow_profile_metrics(
-                        r_fine, orbit_smeared_profile(r_fine, p_fine, dr_est),
+                dr_fin = dr_pts[np.isfinite(dr_pts)]
+                if dr_fin.size:
+                    dr_est = float(np.median(dr_fin))
+                    dr_est_p90 = float(np.percentile(dr_fin, 90))
+                    hm_0 = hollow_profile_metrics(
+                        r_fine, p_fine,
                         core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
                     )
-                    hm_sm90 = hollow_profile_metrics(
-                        r_fine, orbit_smeared_profile(r_fine, p_fine, dr_est_p90),
-                        core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
-                    )
-                    smear_factor = _safe_ratio(hm_sm.hollowness, hm_0.hollowness)
-                    smear_factor_p90 = _safe_ratio(hm_sm90.hollowness, hm_0.hollowness)
-                    if np.isfinite(out["H_pre_onset"]):
-                        h_sm = float(out["H_pre_onset"] * smear_factor) if np.isfinite(smear_factor) else np.nan
-                        h_sm_p90 = float(out["H_pre_onset"] * smear_factor_p90) if np.isfinite(smear_factor_p90) else np.nan
+                    if np.isfinite(hm_0.hollowness) and hm_0.hollowness > 0.0:
+                        hm_sm = hollow_profile_metrics(
+                            r_fine, orbit_smeared_profile(r_fine, p_fine, dr_est),
+                            core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                        )
+                        hm_sm90 = hollow_profile_metrics(
+                            r_fine, orbit_smeared_profile(r_fine, p_fine, dr_est_p90),
+                            core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                        )
+                        smear_factor = _safe_ratio(hm_sm.hollowness, hm_0.hollowness)
+                        smear_factor_p90 = _safe_ratio(hm_sm90.hollowness, hm_0.hollowness)
+                        if np.isfinite(out["H_pre_onset"]):
+                            h_sm = float(out["H_pre_onset"] * smear_factor) if np.isfinite(smear_factor) else np.nan
+                            h_sm_p90 = float(out["H_pre_onset"] * smear_factor_p90) if np.isfinite(smear_factor_p90) else np.nan
 
     out["wall_rel_rms_late"] = wall_rms_med
     out["wall_rel_rms_p90_late"] = wall_rms_p90
+    out["orbit_rms_source"] = "f0_bandpass" if rel_rms_f0_late is not None else "broadband"
     out["delta_r_orbit_est_cm"] = dr_est
     out["delta_r_orbit_p90_cm"] = dr_est_p90
     out["H_orbit_smeared"] = h_sm
@@ -759,15 +791,22 @@ def analyze_2d_planes_relaxation(data_dir=DATA_DIR):
         tarr_s = _time_seconds(run.time_array(scope_name=scope))
         dt_s = float(tarr_s[1] - tarr_s[0])
         step_10us = max(1, int(round(SINGLE_SHOT_DT_S / dt_s)))
+        fs_10us = 1.0 / (dt_s * step_10us)
         t_on = float(on[f"{rnum}__t_onset_med_ms"])
+        f0_hz = float(on[f"{rnum}__f_peak_hz"]) if f"{rnum}__f_peak_hz" in on.files else 4000.0
+        f_lo_bp = max(1500.0, f0_hz - 1500.0) if np.isfinite(f0_hz) else 2000.0
+        f_hi_bp = (f0_hz + 1500.0) if np.isfinite(f0_hz) else 6000.0
+        sos_f0 = signal.butter(4, [f_lo_bp, f_hi_bp], btype="bandpass", fs=fs_10us, output="sos")
         wins = _window_bounds(t_on)
         w_idx = {k: clip_time_window(tarr_s, *b) for k, b in wins.items() if b is not None}
 
         npos = x_u.size
         vals = {k: np.full(npos, np.nan, dtype=float) for k in w_idx}
         rel_rms_late = np.full(npos, np.nan, dtype=float)
+        rel_rms_f0_late = np.full(npos, np.nan, dtype=float)
         p10_late = np.full(npos, np.nan, dtype=float)
         late_bounds = w_idx.get("late_sat")
+        kern_50us = np.ones(5, dtype=float) / 5.0
 
         for p in range(npos):
             sh = position_shots(pos.shot_nums, p, pos.nshot)
@@ -782,14 +821,13 @@ def analyze_2d_planes_relaxation(data_dir=DATA_DIR):
                 a, b = late_bounds
                 seg = arr_sh[:, a:b]
                 n_ds = seg.shape[1] // step_10us
-                if n_ds >= 10:
-                    # 10 us block-mean suppresses digitizer white noise while keeping ~4 kHz m=-1 fully resolved
+                if n_ds >= 30:
+                    # 10 us block-mean (100 kHz) keeps ~4 kHz fundamental resolved while suppressing white noise
                     ds = seg[:, :n_ds * step_10us].reshape(seg.shape[0], n_ds, step_10us).mean(axis=2)
-                    # Determine positive magnitude sign per position using late mean
                     sgn = -1.0 if float(np.nanmedian(ds)) < 0.0 else 1.0
                     ds = sgn * ds
                     t_lin = np.linspace(-1.0, 1.0, n_ds)
-                    shot_rms, shot_p10 = [], []
+                    shot_rms, shot_rms_f0, shot_p10 = [], [], []
                     for s_i in range(ds.shape[0]):
                         row = ds[s_i]
                         if not np.all(np.isfinite(row)):
@@ -800,9 +838,14 @@ def analyze_2d_planes_relaxation(data_dir=DATA_DIR):
                         slope = float(np.dot(t_lin, row - mu) / np.dot(t_lin, t_lin))
                         resid = row - (mu + slope * t_lin)
                         shot_rms.append(float(np.std(resid) / mu))
-                        shot_p10.append(float(np.percentile(row, 10)))
+                        resid_f0 = signal.sosfiltfilt(sos_f0, resid)
+                        shot_rms_f0.append(float(np.std(resid_f0) / mu))
+                        # Light 50 us smoothing (~1/5 period) suppresses high-f noise before p10 trough
+                        row_sm = np.convolve(row, kern_50us, mode="valid")
+                        shot_p10.append(float(np.percentile(row_sm, 10)))
                     if shot_rms:
                         rel_rms_late[p] = float(np.median(shot_rms))
+                        rel_rms_f0_late[p] = float(np.median(shot_rms_f0))
                         p10_late[p] = float(np.median(shot_p10))
 
         for k in vals:
@@ -812,6 +855,7 @@ def analyze_2d_planes_relaxation(data_dir=DATA_DIR):
         plane_res = _summarize_2d_plane_windows(
             x_u, y_u, vals, t_on,
             rel_rms_late=rel_rms_late if late_bounds is not None else None,
+            rel_rms_f0_late=rel_rms_f0_late if late_bounds is not None else None,
             p10_late=p10_late if late_bounds is not None else None,
         )
         pfx = f"plane_{rnum}__"

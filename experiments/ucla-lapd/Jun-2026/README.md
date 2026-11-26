@@ -34,6 +34,7 @@ Always invoke scripts with the repo virtual environment (`.venv\Scripts\python.e
 | `Jun2026_bdot_2d.py` | `26` (`800 G`), `31` (`600 G`) | `bdot_2d_jun2026.npz` | 2-D reference-locked B-dot phasors (`f_0`, `2f_0`), Maxwell div/curl polarity check, `J_par = (curl B_perp)_z`, `|Bz|/|B_perp|`, and `B_L/B_R` circular polarization maps. |
 | `Jun2026_spindown.py` | `08`–`14`, `32` (+ `06`, `00`–`05`) | `spindown_pedersen_jun2026.npz` | Post-bias Mach spin-down (fast Alfvén torsional unwinding vs. slow relaxation upper bound `nu_in <= nu_slow`), rigorous ion-neutral Pedersen shortfall (`<= 3–20%` of bias current), parallel-shorting bound, and max-damping stability test. |
 | `Jun2026_relaxation.py` | `00`–`06`, `08`–`14`, `26`–`28`, `30`–`32` | `profile_relaxation_jun2026.npz` | Pre- vs. post-onset hollow-core profile relaxation & collapse test: swept IV `H_ne` vs. `H_Isat`, continuous flow-cancelled P33 `Isat_0` & `10 us` onset-aligned collapse check, `B0`/axial lines (`P29` vs. `P25`), and shift-immune 2-D planes (`26`, `31`, `32`). |
+| `Jun2026_turbulence.py` | `00`–`06`, `08`–`14`, `26`–`28`, `30`–`32` | `turbulence_transport_jun2026.npz` | Broadband PSD (exponential vs. power-law above pre-bias floor), coherent harmonic fraction, radial hollow-wall `(skewness, kurtosis)`, growth-vs-saturated cross-phase (`Isat` vs. Port-35 discs), and Run 32 direct radial particle flux, Reynolds stress, spiral sign & shear-flow energy production. |
 | `Jun2026_plot.py` | Saved `.npz` files | Static PNGs (`Jun2026/`) | Publication/diagnostic figures for IV lines, IV+Isat combined, and xcorr planes. |
 | `Jun2026_slider.py` | Saved `.npz` files | Standalone `.html` sliders | Scrubbable pages for IV lines, Isat FFTs, and multi-pair xcorr scans. |
 
@@ -130,7 +131,8 @@ Documented directly from the raw HDF5 files and run logs so downstream scripts d
 - Added linear stability solvers (`src/data_analysis/plasma/stability.py`: local CWM, local & 1-D axial Chebyshev 5-field Braginskii BVP, and 1-D cylindrical radial KH/CWM) and `Jun2026_stability.py` (`stability_linear_jun2026.npz`).
 - Added 2-D electromagnetic field helpers (`divergence_2d`, `circular_polarization`, `reference_locked_phasor` in `src/data_analysis/plasma/fields.py`) and `Jun2026_bdot_2d.py` (`bdot_2d_jun2026.npz`).
 - Added post-bias Mach spin-down, Pedersen closure bounds, and max-damping stability tests (`fit_exponential_relaxation` in `flow.py`, `pedersen_closure_diagnostics` in `stability.py`, `Jun2026_spindown.py` -> `spindown_pedersen_jun2026.npz`).
-- Added hollow-core profile relaxation & collapse checks (`hollow_profile_metrics` and `orbit_smeared_profile` in `profiles.py`, `Jun2026_relaxation.py` -> `profile_relaxation_jun2026.npz`), plus `tests/` unit tests (`76/76` unittest passing).
+- Added hollow-core profile relaxation & collapse checks (`hollow_profile_metrics` and `orbit_smeared_profile` in `profiles.py`, `Jun2026_relaxation.py` -> `profile_relaxation_jun2026.npz`).
+- Added broadband turbulence, intermittency, cross-phase & Reynolds-stress transport analysis (`src/data_analysis/signal/turbulence.py`, `Jun2026_turbulence.py` -> `turbulence_transport_jun2026.npz`), plus `tests/` unit tests (`82/82` unittest passing).
 
 ### Planned Next
 1. Publication/diagnostic figures in `Jun2026_plot.py` summarizing the onset mechanism, dispersion, and nonlinear harmonic coupling across gas puffs and `B0`.

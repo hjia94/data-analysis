@@ -156,6 +156,24 @@ class TestHollowProfileMetrics(unittest.TestCase):
         self.assertTrue(np.all(np.isnan(res_nl["center_late_xy_cm"])))
         self.assertTrue(np.isfinite(res_nl["H_pre_onset"]))
 
+    def test_local_orbit_displacement_removes_radial_bias(self):
+        # Synthetic curved hollow core: f(r) = 1 - 0.65 * exp(-(r / 2.8)^2) wobbling rigidly by dr_true = 1.0 cm
+        r_grid = np.linspace(0.0, 8.0, 321)
+        prof = 1.0 - 0.65 * np.exp(-(r_grid / 2.8) ** 2)
+        dr_true = 1.0
+        phi = np.linspace(0.0, 2.0 * np.pi, 360, endpoint=False)
+        r_test = np.array([2.0, 3.0, 4.0])
+        # Exact linear/weakly-nonlinear RMS of f(sqrt(r^2 + dr^2 - 2 r dr cos phi)) / mean
+        rms_test = np.empty_like(r_test)
+        for i, rt in enumerate(r_test):
+            # Use small-amplitude perturbation check (dr = 0.2 cm) for exact linearization AND dr = 1.0 cm
+            r_orb = np.sqrt(rt ** 2 + dr_true ** 2 - 2.0 * rt * dr_true * np.cos(phi))
+            vals = np.interp(r_orb, r_grid, prof)
+            rms_test[i] = float(np.std(vals) / np.mean(vals))
+        dr_local = jrx._local_orbit_displacement(r_grid, prof, r_test, rms_test)
+        # Local gradient removes the factor-of-3.8 bias (1.55 / 0.93 / 0.41 cm) seen with band-averaged slope
+        np.testing.assert_allclose(dr_local, dr_true, rtol=0.18)
+
 
 if __name__ == "__main__":
     unittest.main()

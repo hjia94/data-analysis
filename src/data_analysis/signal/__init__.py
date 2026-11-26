@@ -37,6 +37,14 @@ from data_analysis.signal.bispectral import (
     shot_phase_consistency,
     summed_bicoherence,
 )
+from data_analysis.signal.turbulence import (
+    FluctuationMoments,
+    ReynoldsProduction,
+    SpectrumModelFit,
+    fit_broadband_spectrum,
+    fluctuation_moments,
+    reynolds_shear_production,
+)
 
 __all__ = [
     "downsample_stride",
@@ -72,4 +80,10 @@ __all__ = [
     "cross_bicoherence",
     "shot_phase_consistency",
     "summed_bicoherence",
+    "FluctuationMoments",
+    "ReynoldsProduction",
+    "SpectrumModelFit",
+    "fit_broadband_spectrum",
+    "fluctuation_moments",
+    "reynolds_shear_production",
 ]
