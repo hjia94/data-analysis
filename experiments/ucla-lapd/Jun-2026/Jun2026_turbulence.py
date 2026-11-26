@@ -766,6 +766,7 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
     r32_phase_rad = np.linspace(-np.pi, np.pi, 65)
     r32_phase_rad = 0.5 * (r32_phase_rad[:-1] + r32_phase_rad[1:])
     ref_f0_ests = []
+    used_f0_ests = []
 
     for bi, (r0, r1) in enumerate(bands):
         mb_mean = (rr_n >= r0) & (rr_n < r1) & np.isfinite(mth_mean)
@@ -839,6 +840,8 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
             bpm = np.mean(bp, axis=0)
             mf = (bf >= RUN32_F0_BAND_HZ[0]) & (bf <= RUN32_F0_BAND_HZ[1])
             f0_est = float(bf[mf][int(np.argmax(bpm[mf]))]) if np.any(mf) else np.nan
+        if np.isfinite(f0_est):
+            used_f0_ests.append(f0_est)
         lintip_stacks = _mach_linear_tip_bracket(recs, kappa, fs, f0_est)
         for tag, key in (("isat0", "isat0_raw"), ("mr", "mr_raw"), ("mt", "mt_raw")):
             st_b = harmonic_steepening(np.vstack([r[key] for r in recs]), fs, f0_est, f0_search_hz=800.0)
@@ -919,7 +922,7 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
         "r32__center_xy_cm": np.array([cx, cy], dtype=float),
         "r32__center_ratio": float(ratio),
         "r32__fs_hz": float(fs),
-        "r32__f0_hz": float(np.median(ref_f0_ests)) if ref_f0_ests else np.nan,
+        "r32__f0_hz": float(np.median(used_f0_ests)) if used_f0_ests else np.nan,
         "r32__band_edges_cm": np.array(bands, dtype=float),
         "r32__r_mids_cm": r_mids,
         "r32__n_pos": n_pos_band,
