@@ -604,3 +604,50 @@ def hollow_profile_metrics(
         radial_edges_cm=r_edges_out,
         radial_profile=r_prof_out,
     )
+
+
+def orbit_smeared_profile(r_cm, prof_r, delta_r_cm, *, n_phi=180):
+    """Azimuthal orbit average of a radial profile displaced rigidly by ``delta_r_cm``.
+
+    Models the apparent time-averaged radial profile produced when an
+    axisymmetric profile ``prof_r(r)`` precesses rigidly in a circular orbit of
+    radius ``delta_r_cm`` (e.g. an ``m = +-1`` rigid-shift mode averaged over
+    many wave periods or random-phase shots)::
+
+        <f>(r) = (1 / 2 pi) * integral_0^{2 pi} f(sqrt(r^2 + dr^2 - 2 r dr cos(phi))) dphi
+
+    At ``r = 0``, ``<f>(0) = f(delta_r)``, so a purely rigid wobble of a hollow
+    core produces apparent central filling even with zero real core transport.
+
+    Args:
+        r_cm: Strictly increasing 1-D non-negative radial grid [cm].
+        prof_r: 1-D radial profile evaluated at ``r_cm``.
+        delta_r_cm: Non-negative rigid orbital displacement amplitude [cm].
+        n_phi: Number of uniform azimuthal quadrature angles in ``[0, 2 pi)``.
+
+    Returns:
+        1-D array of the orbit-smeared profile evaluated on ``r_cm``.
+    """
+    r = np.asarray(r_cm, dtype=float)
+    p = np.asarray(prof_r, dtype=float)
+    dr = float(delta_r_cm)
+    if r.ndim != 1 or p.ndim != 1 or r.size != p.size or r.size < 2:
+        raise ValueError("r_cm and prof_r must be matching 1-D arrays with len >= 2")
+    if not np.all(np.diff(r) > 0.0) or r[0] < 0.0:
+        raise ValueError("r_cm must be strictly increasing and non-negative")
+    if not np.isfinite(dr) or dr < 0.0:
+        raise ValueError(f"delta_r_cm must be finite and >= 0, got {delta_r_cm}")
+    if int(n_phi) < 4:
+        raise ValueError(f"n_phi must be >= 4, got {n_phi}")
+
+    fin = np.isfinite(p)
+    if int(np.sum(fin)) < 2:
+        return np.full_like(p, np.nan, dtype=float)
+    if dr == 0.0:
+        return p.copy()
+
+    rk, pk = r[fin], p[fin]
+    phi = np.linspace(0.0, 2.0 * np.pi, int(n_phi), endpoint=False)
+    r_disp = np.sqrt(np.maximum(r[:, None] ** 2 + dr ** 2 - 2.0 * r[:, None] * dr * np.cos(phi[None, :]), 0.0))
+    sampled = np.interp(r_disp, rk, pk, left=float(pk[0]), right=float(pk[-1]))
+    return np.mean(sampled, axis=1)

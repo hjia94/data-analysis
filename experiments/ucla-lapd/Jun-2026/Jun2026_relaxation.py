@@ -48,7 +48,7 @@ import numpy as np
 from data_analysis.io import open_lapd, parse_gas_puff, parse_shunts, position_shots
 from data_analysis.plasma.flow import find_flow_centre, polar_components
 from data_analysis.plasma.mach import mach_single, time_bin_edges
-from data_analysis.plasma.profiles import hollow_profile_metrics
+from data_analysis.plasma.profiles import hollow_profile_metrics, orbit_smeared_profile
 from data_analysis.signal import (
     clip_time_window,
     detect_onset_time,
@@ -349,9 +349,50 @@ def analyze_mach_line_relaxation(data_dir=DATA_DIR, *, cal_npz=None,
             float(ic_late / ic_pre) if np.isfinite(ic_late) and np.isfinite(ic_pre) and ic_pre > 0 else np.nan
         )
 
-        # Single-shot 10 us onset-aligned traces on unstable Runs 11-14
+        # Single-shot 10 us onset-aligned traces & rigid-orbit smearing test on Runs 11-14
         if rnum in SINGLE_SHOT_RUNS:
-            out.update(_single_shot_onset_aligned(run, rnum, chans, shunts, pos, x_pos, x_center_cm))
+            ss_out = _single_shot_onset_aligned(run, rnum, chans, shunts, pos, x_pos, x_center_cm)
+            out.update(ss_out)
+            # Estimate rigid m=-1 orbital displacement delta_r = sqrt(2)*(dI_rms/I)/|d(ln I)/dr|
+            # and smear the measured pre-onset radial profile to separate orbit smearing from real filling.
+            rms_w = float(ss_out.get(f"ss_{rnum}_wall__post_rms_norm_med", np.nan))
+            slope_pre = float(out[p + "wall_pre_onset_cm"])
+            dr_est = (
+                float(np.sqrt(2.0) * rms_w / abs(slope_pre))
+                if np.isfinite(rms_w) and np.isfinite(slope_pre) and abs(slope_pre) > 0.0
+                else np.nan
+            )
+            h_sm = np.nan
+            smear_factor = np.nan
+            if np.isfinite(dr_est) and wins["pre_onset"] is not None:
+                lo_p, hi_p = wins["pre_onset"]
+                m_pre_t = (t_ms >= lo_p) & (t_ms <= hi_p)
+                if np.any(m_pre_t):
+                    prof_pre_pos = np.nanmedian(isat0[:, m_pre_t], axis=1)
+                    r_fine = np.linspace(0.0, 8.0, 161)
+                    # Build symmetric radial profile from both sides of x_center_cm
+                    r_bins = np.arange(0.0, 8.5, 0.5)
+                    hm_r = hollow_profile_metrics(rr, prof_pre_pos, radial_edges_cm=r_bins)
+                    r_mid = 0.5 * (r_bins[:-1] + r_bins[1:])
+                    ok_r = np.isfinite(hm_r.radial_profile)
+                    if int(np.sum(ok_r)) >= 4:
+                        p_fine = np.interp(r_fine, r_mid[ok_r], hm_r.radial_profile[ok_r])
+                        hm_0 = hollow_profile_metrics(
+                            r_fine, p_fine,
+                            core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                        )
+                        p_sm = orbit_smeared_profile(r_fine, p_fine, dr_est)
+                        hm_sm = hollow_profile_metrics(
+                            r_fine, p_sm,
+                            core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                        )
+                        if np.isfinite(hm_0.hollowness) and hm_0.hollowness > 0.0 and np.isfinite(hm_sm.hollowness):
+                            smear_factor = float(hm_sm.hollowness / hm_0.hollowness)
+                            h_sm = float(h_pre * smear_factor) if np.isfinite(h_pre) else np.nan
+            out[p + "delta_r_orbit_est_cm"] = dr_est
+            out[p + "H_orbit_smeared"] = h_sm
+            out[p + "H_orbit_smeared_over_pre"] = smear_factor
+            out[p + "H_late_over_orbit_smeared"] = _safe_ratio(h_late, h_sm)
 
     return out
 
@@ -520,6 +561,191 @@ def analyze_b0_and_axial_lines(data_dir=DATA_DIR, *, bin_ms=BIN_MS):
 # ============================================================================
 # 4. Shift-immune 2-D planes (Runs 26, 31 P29-R Isat & Run 32 P33 3-D Mach)
 # ============================================================================
+def _safe_ratio(num, den):
+    return float(num / den) if np.isfinite(num) and np.isfinite(den) and den > 0.0 else np.nan
+
+
+def _summarize_2d_plane_windows(x_u, y_u, vals, t_on_ms, *,
+                                rel_rms_late=None, p10_late=None):
+    """Per-window centered 2-D radial hollowness, crash-safe when any window is ``None``.
+
+    Each bias-on / post-off window fits its own 2-D core center ``(xc_k, yc_k)``
+    so slow drifts of the hollow core never bias radial hollowness; ``pre_bias``
+    (flat background) reuses the ``pre_onset`` center. Also evaluates the rigid
+    ``m = -1`` orbit-smearing prediction from ``rel_rms_late`` (if provided) and
+    the instantaneous cycle-trough (10th-percentile) hollowness from ``p10_late``.
+    """
+    nbins = RADIAL_EDGES_CM.size - 1
+    out = {
+        "t_onset_med_ms": float(t_on_ms),
+        "radial_edges_cm": RADIAL_EDGES_CM,
+    }
+
+    # Fit per-window centers for non-flat windows; pre_bias reuses pre_onset center.
+    centers = {}
+    for k in ("pre_onset", "early_post", "late_sat", "post_off"):
+        if k in vals:
+            centers[k] = _find_2d_core_center(x_u, y_u, vals[k])
+        else:
+            centers[k] = (np.nan, np.nan)
+    c_pre = centers["pre_onset"]
+    centers["pre_bias"] = c_pre if np.all(np.isfinite(c_pre)) else (0.0, 0.0)
+
+    out["center_pre_xy_cm"] = np.array(centers["pre_onset"], dtype=float)
+    out["center_late_xy_cm"] = np.array(centers["late_sat"], dtype=float)
+
+    for k in ("pre_bias", "pre_onset", "early_post", "late_sat", "post_off"):
+        xc_k, yc_k = centers[k]
+        out[f"center_{k}_xy_cm"] = np.array([xc_k, yc_k], dtype=float)
+        if k not in vals or not (np.isfinite(xc_k) and np.isfinite(yc_k)):
+            out[f"H_{k}"] = np.nan
+            out[f"ic_{k}"] = np.nan
+            out[f"ir_{k}"] = np.nan
+            out[f"wall_{k}_cm"] = np.nan
+            out[f"r_prof_norm_{k}"] = np.full(nbins, np.nan, dtype=float)
+            continue
+        rr_k = np.hypot(x_u - xc_k, y_u - yc_k)
+        hm = hollow_profile_metrics(
+            rr_k, vals[k],
+            core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM,
+            wall_r_cm=WALL_R_CM, radial_edges_cm=RADIAL_EDGES_CM,
+        )
+        out[f"H_{k}"] = hm.hollowness
+        out[f"ic_{k}"] = hm.core_val
+        out[f"ir_{k}"] = hm.ring_val
+        out[f"wall_{k}_cm"] = hm.wall_inv_scale_cm
+        out[f"r_prof_norm_{k}"] = (
+            hm.radial_profile / hm.ring_val
+            if np.isfinite(hm.ring_val) and hm.ring_val > 0.0
+            else np.full(nbins, np.nan, dtype=float)
+        )
+
+    out["H_late_over_pre"] = _safe_ratio(out["H_late_sat"], out["H_pre_onset"])
+    out["ic_late_over_pre"] = _safe_ratio(out["ic_late_sat"], out["ic_pre_onset"])
+
+    # Rigid m=-1 orbit-smearing forward model (both median and 90th-percentile wall RMS)
+    wall_rms_med = np.nan
+    wall_rms_p90 = np.nan
+    dr_est = np.nan
+    dr_est_p90 = np.nan
+    h_sm = np.nan
+    h_sm_p90 = np.nan
+    smear_factor = np.nan
+    smear_factor_p90 = np.nan
+    if rel_rms_late is not None and "late_sat" in vals and np.all(np.isfinite(centers["late_sat"])):
+        xc_l, yc_l = centers["late_sat"]
+        rr_l = np.hypot(x_u - xc_l, y_u - yc_l)
+        m_wall_l = (rr_l >= WALL_R_CM[0]) & (rr_l <= WALL_R_CM[1]) & np.isfinite(rel_rms_late)
+        if np.any(m_wall_l):
+            wall_rms_med = float(np.median(rel_rms_late[m_wall_l]))
+            wall_rms_p90 = float(np.percentile(rel_rms_late[m_wall_l], 90))
+        slope_pre = float(out["wall_pre_onset_cm"])
+        if np.isfinite(wall_rms_med) and np.isfinite(slope_pre) and abs(slope_pre) > 0.0:
+            dr_est = float(np.sqrt(2.0) * wall_rms_med / abs(slope_pre))
+            dr_est_p90 = float(np.sqrt(2.0) * wall_rms_p90 / abs(slope_pre))
+            r_mid = 0.5 * (RADIAL_EDGES_CM[:-1] + RADIAL_EDGES_CM[1:])
+            p_pre = out["r_prof_norm_pre_onset"]
+            ok_r = np.isfinite(p_pre)
+            if int(np.sum(ok_r)) >= 4:
+                r_fine = np.linspace(0.0, float(RADIAL_EDGES_CM[-1]), 161)
+                p_fine = np.interp(r_fine, r_mid[ok_r], p_pre[ok_r])
+                hm_0 = hollow_profile_metrics(
+                    r_fine, p_fine,
+                    core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                )
+                if np.isfinite(hm_0.hollowness) and hm_0.hollowness > 0.0:
+                    hm_sm = hollow_profile_metrics(
+                        r_fine, orbit_smeared_profile(r_fine, p_fine, dr_est),
+                        core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                    )
+                    hm_sm90 = hollow_profile_metrics(
+                        r_fine, orbit_smeared_profile(r_fine, p_fine, dr_est_p90),
+                        core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM, wall_r_cm=WALL_R_CM,
+                    )
+                    smear_factor = _safe_ratio(hm_sm.hollowness, hm_0.hollowness)
+                    smear_factor_p90 = _safe_ratio(hm_sm90.hollowness, hm_0.hollowness)
+                    if np.isfinite(out["H_pre_onset"]):
+                        h_sm = float(out["H_pre_onset"] * smear_factor) if np.isfinite(smear_factor) else np.nan
+                        h_sm_p90 = float(out["H_pre_onset"] * smear_factor_p90) if np.isfinite(smear_factor_p90) else np.nan
+
+    out["wall_rel_rms_late"] = wall_rms_med
+    out["wall_rel_rms_p90_late"] = wall_rms_p90
+    out["delta_r_orbit_est_cm"] = dr_est
+    out["delta_r_orbit_p90_cm"] = dr_est_p90
+    out["H_orbit_smeared"] = h_sm
+    out["H_orbit_smeared_p90"] = h_sm_p90
+    out["H_orbit_smeared_over_pre"] = smear_factor
+    out["H_orbit_smeared_p90_over_pre"] = smear_factor_p90
+    out["H_late_over_orbit_smeared"] = _safe_ratio(out["H_late_sat"], h_sm)
+    out["H_late_over_orbit_smeared_p90"] = _safe_ratio(out["H_late_sat"], h_sm_p90)
+
+    # Model-free instantaneous cycle-trough core floor inside r <= 3.5 cm (p10 over time)
+    ic_trough_late = np.nan
+    h_trough_late = np.nan
+    if p10_late is not None and "late_sat" in vals and np.all(np.isfinite(centers["late_sat"])):
+        xc_l, yc_l = centers["late_sat"]
+        rr_l = np.hypot(x_u - xc_l, y_u - yc_l)
+        m_in = (rr_l <= 3.5) & np.isfinite(p10_late)
+        if np.any(m_in):
+            # Median of the 5 lowest cycle-trough points inside r <= 3.5 cm
+            ii = np.flatnonzero(m_in)
+            k_low = min(5, ii.size)
+            ic_trough_late = float(np.median(np.sort(p10_late[ii])[:k_low]))
+            h_trough_late = _safe_ratio(out["ir_late_sat"], ic_trough_late)
+    out["ic_trough_late"] = ic_trough_late
+    out["H_trough_late"] = h_trough_late
+    return out
+
+
+def _analyze_mach32_arrays(t32, px, py, mx, my, mz, t_on_ref_ms, *,
+                           t_on_source="matched_run12_35ms"):
+    """Compute centered Run 32 3-D Mach ``M_theta`` and ``M_z`` across onset windows.
+
+    Note: :func:`find_flow_centre` and :func:`polar_components` both take
+    velocity components ``(vx, vy)`` FIRST and positions ``(pos_x, pos_y)``
+    SECOND.
+    """
+    m_fit = (t32 >= 2.5) & (t32 <= 4.5)
+    mx_m = _nanmean_rows(mx[:, m_fit])
+    my_m = _nanmean_rows(my[:, m_fit])
+    xc, yc, ratio = find_flow_centre(mx_m, my_m, px, py)
+    rr = np.hypot(px - xc, py - yc)
+    m_wall = (rr >= ROT_R_CM[0]) & (rr <= ROT_R_CM[1])
+    m_core = rr <= CORE_R_MAX_CM
+    m_ring = (rr >= RING_R_CM[0]) & (rr <= RING_R_CM[1])
+
+    wins32 = _window_bounds(t_on_ref_ms)
+    out = {
+        "mach32__center_xy_cm": np.array([xc, yc], dtype=float),
+        "mach32__center_ratio": float(ratio),
+        "mach32__t_onset_ref_ms": float(t_on_ref_ms),
+        "mach32__t_onset_source": str(t_on_source),
+    }
+    for wname, bounds in wins32.items():
+        if bounds is None:
+            out[f"mach32__M_theta_wall_{wname}"] = np.nan
+            out[f"mach32__M_z_core_{wname}"] = np.nan
+            out[f"mach32__M_z_ring_{wname}"] = np.nan
+            continue
+        m = (t32 >= bounds[0]) & (t32 <= bounds[1])
+        ux = _nanmean_rows(mx[:, m])
+        uy = _nanmean_rows(my[:, m])
+        uz = _nanmean_rows(mz[:, m])
+        _, uth = polar_components(ux, uy, px, py, (xc, yc))
+        out[f"mach32__M_theta_wall_{wname}"] = float(np.nanmedian(uth[m_wall]))
+        out[f"mach32__M_z_core_{wname}"] = float(np.nanmedian(uz[m_core]))
+        out[f"mach32__M_z_ring_{wname}"] = float(np.nanmedian(uz[m_ring]))
+
+    m_pre = out["mach32__M_theta_wall_pre_onset"]
+    m_late = out["mach32__M_theta_wall_late_sat"]
+    out["mach32__M_theta_late_over_pre"] = (
+        float(m_late / m_pre)
+        if np.isfinite(m_pre) and np.isfinite(m_late) and abs(m_pre) > 0.0
+        else np.nan
+    )
+    return out
+
+
 def analyze_2d_planes_relaxation(data_dir=DATA_DIR):
     """2-D azimuthally averaged ``<Isat(r, t)>_theta`` (Runs 26, 31) & 3-D Mach flow (Run 32)."""
     on = np.load(os.path.join(data_dir, jon.OUT_NAME), allow_pickle=True)
@@ -531,52 +757,68 @@ def analyze_2d_planes_relaxation(data_dir=DATA_DIR):
         pos = jiv.read_lp_positions(ifn, motion_group_name=mg)
         x_u, y_u = _pos_xy_per_position(pos)
         tarr_s = _time_seconds(run.time_array(scope_name=scope))
+        dt_s = float(tarr_s[1] - tarr_s[0])
+        step_10us = max(1, int(round(SINGLE_SHOT_DT_S / dt_s)))
         t_on = float(on[f"{rnum}__t_onset_med_ms"])
         wins = _window_bounds(t_on)
         w_idx = {k: clip_time_window(tarr_s, *b) for k, b in wins.items() if b is not None}
 
         npos = x_u.size
         vals = {k: np.full(npos, np.nan, dtype=float) for k in w_idx}
+        rel_rms_late = np.full(npos, np.nan, dtype=float)
+        p10_late = np.full(npos, np.nan, dtype=float)
+        late_bounds = w_idx.get("late_sat")
+
         for p in range(npos):
             sh = position_shots(pos.shot_nums, p, pos.nshot)
             d, _ = run.channel(ch, scope_name=scope, shots=sh)
             if d is None:
                 continue
-            sig = np.nanmean(np.asarray(d, dtype=float), axis=0)
+            arr_sh = np.asarray(d, dtype=float)
+            sig = np.nanmean(arr_sh, axis=0)
             for k, (a, b) in w_idx.items():
                 vals[k][p] = float(np.nanmean(sig[a:b]))
+            if late_bounds is not None:
+                a, b = late_bounds
+                seg = arr_sh[:, a:b]
+                n_ds = seg.shape[1] // step_10us
+                if n_ds >= 10:
+                    # 10 us block-mean suppresses digitizer white noise while keeping ~4 kHz m=-1 fully resolved
+                    ds = seg[:, :n_ds * step_10us].reshape(seg.shape[0], n_ds, step_10us).mean(axis=2)
+                    # Determine positive magnitude sign per position using late mean
+                    sgn = -1.0 if float(np.nanmedian(ds)) < 0.0 else 1.0
+                    ds = sgn * ds
+                    t_lin = np.linspace(-1.0, 1.0, n_ds)
+                    shot_rms, shot_p10 = [], []
+                    for s_i in range(ds.shape[0]):
+                        row = ds[s_i]
+                        if not np.all(np.isfinite(row)):
+                            continue
+                        mu = float(np.mean(row))
+                        if mu <= 0.0:
+                            continue
+                        slope = float(np.dot(t_lin, row - mu) / np.dot(t_lin, t_lin))
+                        resid = row - (mu + slope * t_lin)
+                        shot_rms.append(float(np.std(resid) / mu))
+                        shot_p10.append(float(np.percentile(row, 10)))
+                    if shot_rms:
+                        rel_rms_late[p] = float(np.median(shot_rms))
+                        p10_late[p] = float(np.median(shot_p10))
+
         for k in vals:
-            if float(np.nanmedian(vals[k])) < 0.0:
+            if np.isfinite(np.nanmedian(vals[k])) and float(np.nanmedian(vals[k])) < 0.0:
                 vals[k] = -vals[k]
 
-        xc0, yc0 = _find_2d_core_center(x_u, y_u, vals["pre_onset"])
-        xc1, yc1 = _find_2d_core_center(x_u, y_u, vals["late_sat"])
-        rr = np.hypot(x_u - xc0, y_u - yc0)
-
+        plane_res = _summarize_2d_plane_windows(
+            x_u, y_u, vals, t_on,
+            rel_rms_late=rel_rms_late if late_bounds is not None else None,
+            p10_late=p10_late if late_bounds is not None else None,
+        )
         pfx = f"plane_{rnum}__"
         out[pfx + "b0_g"] = float(b0_g)
         out[pfx + "probe_label"] = label
-        out[pfx + "t_onset_med_ms"] = t_on
-        out[pfx + "center_pre_xy_cm"] = np.array([xc0, yc0], dtype=float)
-        out[pfx + "center_late_xy_cm"] = np.array([xc1, yc1], dtype=float)
-        out[pfx + "radial_edges_cm"] = RADIAL_EDGES_CM
-
-        for k in ("pre_bias", "pre_onset", "early_post", "late_sat", "post_off"):
-            hm = hollow_profile_metrics(
-                rr, vals[k],
-                core_r_max_cm=CORE_R_MAX_CM, ring_r_cm=RING_R_CM,
-                wall_r_cm=WALL_R_CM, radial_edges_cm=RADIAL_EDGES_CM,
-            )
-            out[pfx + f"H_{k}"] = hm.hollowness
-            out[pfx + f"ic_{k}"] = hm.core_val
-            out[pfx + f"ir_{k}"] = hm.ring_val
-            out[pfx + f"wall_{k}_cm"] = hm.wall_inv_scale_cm
-            out[pfx + f"r_prof_norm_{k}"] = (
-                hm.radial_profile / hm.ring_val
-                if np.isfinite(hm.ring_val) and hm.ring_val > 0 else np.full(RADIAL_EDGES_CM.size - 1, np.nan)
-            )
-        out[pfx + "H_late_over_pre"] = float(out[pfx + "H_late_sat"] / out[pfx + "H_pre_onset"])
-        out[pfx + "ic_late_over_pre"] = float(out[pfx + "ic_late_sat"] / out[pfx + "ic_pre_onset"])
+        for k, v in plane_res.items():
+            out[pfx + k] = v
 
     # Run 32 3-D Mach plane (cached 32-mach-flow-data.npz, 800 G, 35 ms puff)
     npz32 = os.path.join(data_dir, "32-mach-flow-data.npz")
@@ -589,37 +831,8 @@ def analyze_2d_planes_relaxation(data_dir=DATA_DIR):
             np.asarray(d32["M_Y"], dtype=float),
             np.asarray(d32["M_Z"], dtype=float),
         )
-        m_fit = (t32 >= 2.5) & (t32 <= 4.5)
-        mx_m = _nanmean_rows(mx[:, m_fit])
-        my_m = _nanmean_rows(my[:, m_fit])
-        xc, yc, _ = find_flow_centre(px, py, mx_m, my_m)
-        rr = np.hypot(px - xc, py - yc)
-        m_wall = (rr >= ROT_R_CM[0]) & (rr <= ROT_R_CM[1])
-        m_core = rr <= CORE_R_MAX_CM
-        m_ring = (rr >= RING_R_CM[0]) & (rr <= RING_R_CM[1])
-
-        # Matched to 35 ms puff (t_onset from Run 12 at 800 G; Run 32 is not in onset_summary)
         t_on_32 = float(on["12__t_onset_med_ms"])
-        wins32 = _window_bounds(t_on_32)
-        out["mach32__center_xy_cm"] = np.array([xc, yc], dtype=float)
-        out["mach32__t_onset_ref_ms"] = t_on_32
-        out["mach32__t_onset_source"] = "matched_run12_35ms"
-        for wname, bounds in wins32.items():
-            if bounds is None:
-                continue
-            m = (t32 >= bounds[0]) & (t32 <= bounds[1])
-            ux = _nanmean_rows(mx[:, m])
-            uy = _nanmean_rows(my[:, m])
-            uz = _nanmean_rows(mz[:, m])
-            _, uth = polar_components(px, py, ux, uy, (xc, yc))
-            out[f"mach32__M_theta_wall_{wname}"] = float(np.nanmedian(uth[m_wall]))
-            out[f"mach32__M_z_core_{wname}"] = float(np.nanmedian(uz[m_core]))
-            out[f"mach32__M_z_ring_{wname}"] = float(np.nanmedian(uz[m_ring]))
-        m_pre = out["mach32__M_theta_wall_pre_onset"]
-        m_late = out["mach32__M_theta_wall_late_sat"]
-        out["mach32__M_theta_late_over_pre"] = (
-            float(m_late / m_pre) if np.isfinite(m_pre) and abs(m_pre) > 0 else np.nan
-        )
+        out.update(_analyze_mach32_arrays(t32, px, py, mx, my, mz, t_on_32))
 
     return out
 
@@ -673,7 +886,7 @@ def print_summary(res):
             f"  {res[p+'H_post_off']:5.2f}"
         )
 
-    print("\n=== 2. Single-Shot 10 us Onset-Aligned Core / Wall / Ring (Runs 11-14) ===")
+    print("\n=== 2. Single-Shot 10 us Onset-Aligned Core / Wall / Ring & Orbit-Smearing (Runs 11-14) ===")
     for rnum in SINGLE_SHOT_RUNS:
         parts = []
         for z in ("core", "wall", "ring"):
@@ -683,7 +896,13 @@ def print_summary(res):
                 f"rms={res[pz+'post_rms_norm_med']*100:.1f}%, "
                 f"max50us={res[pz+'max_50us_jump_med']*100:.1f}%"
             )
-        print(f"  Run {rnum}: " + " | ".join(parts))
+        pm = f"mach_{rnum}__"
+        print(
+            f"  Run {rnum}: " + " | ".join(parts) + "\n"
+            f"          orbit-smear check: dr_est={res[pm+'delta_r_orbit_est_cm']:.2f}cm -> "
+            f"H_sm={res[pm+'H_orbit_smeared']:.2f} (H_sm/pre={res[pm+'H_orbit_smeared_over_pre']:.2f}, "
+            f"H_late/H_sm={res[pm+'H_late_over_orbit_smeared']:.2f})"
+        )
 
     print("\n=== 3. B0-Scan & Axial Localization Lines (P29-R vs P25-R, 35 ms puff) ===")
     for rnum, b0 in B0_LINE_RUNS:
@@ -696,7 +915,7 @@ def print_summary(res):
                 f"Ic_late/pre={res[pfx+'ic_late_over_pre']:.2f})"
             )
 
-    print("\n=== 4. Shift-Immune 2-D Planes (P29-R Isat & P33 3-D Mach) ===")
+    print("\n=== 4. Per-Window Centered 2-D Planes (P29-R Isat & P33 3-D Mach) ===")
     for rnum, _, _, _, label, b0 in ISAT_2D_PLANES:
         pfx = f"plane_{rnum}__"
         c0, c1 = res[pfx + "center_pre_xy_cm"], res[pfx + "center_late_xy_cm"]
@@ -704,11 +923,18 @@ def print_summary(res):
             f"  Run {rnum} ({b0:.0f}G) {label}: ctr ({c0[0]:+.2f},{c0[1]:+.2f})->({c1[0]:+.2f},{c1[1]:+.2f}) cm | "
             f"H: preB={res[pfx+'H_pre_bias']:.2f}, preOn={res[pfx+'H_pre_onset']:.2f}, "
             f"early={res[pfx+'H_early_post']:.2f}, late={res[pfx+'H_late_sat']:.2f} "
-            f"(H_late/pre={res[pfx+'H_late_over_pre']:.2f}, Ic_late/pre={res[pfx+'ic_late_over_pre']:.2f})"
+            f"(H_late/pre={res[pfx+'H_late_over_pre']:.2f}, Ic_late/pre={res[pfx+'ic_late_over_pre']:.2f})\n"
+            f"          orbit-smear: wall_rms={res[pfx+'wall_rel_rms_late']*100:.1f}% (p90={res[pfx+'wall_rel_rms_p90_late']*100:.1f}%), "
+            f"dr_est={res[pfx+'delta_r_orbit_est_cm']:.2f} ({res[pfx+'delta_r_orbit_p90_cm']:.2f}) cm -> "
+            f"H_sm={res[pfx+'H_orbit_smeared']:.2f} ({res[pfx+'H_orbit_smeared_p90']:.2f}) "
+            f"[H_sm/pre={res[pfx+'H_orbit_smeared_over_pre']:.2f} ({res[pfx+'H_orbit_smeared_p90_over_pre']:.2f}), "
+            f"H_late/H_sm={res[pfx+'H_late_over_orbit_smeared']:.2f} ({res[pfx+'H_late_over_orbit_smeared_p90']:.2f})]"
         )
     if "mach32__M_theta_wall_pre_onset" in res:
+        c32 = res["mach32__center_xy_cm"]
         print(
-            f"  Run 32 (800G) P33 Mach plane: M_theta_wall preOn={res['mach32__M_theta_wall_pre_onset']:+.3f} -> "
+            f"  Run 32 (800G) P33 Mach plane: ctr=({c32[0]:+.2f},{c32[1]:+.2f})cm (ratio={res['mach32__center_ratio']:.2f}) | "
+            f"M_theta_wall preOn={res['mach32__M_theta_wall_pre_onset']:+.3f} -> "
             f"early={res['mach32__M_theta_wall_early_post']:+.3f} -> late={res['mach32__M_theta_wall_late_sat']:+.3f} "
             f"(ratio={res['mach32__M_theta_late_over_pre']:.2f}) | "
             f"M_z_core={res['mach32__M_z_core_pre_onset']:+.3f}->{res['mach32__M_z_core_late_sat']:+.3f}"

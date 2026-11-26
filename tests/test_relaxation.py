@@ -9,7 +9,11 @@ WS = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(WS, "src"))
 sys.path.insert(0, os.path.join(WS, "experiments", "ucla-lapd", "Jun-2026"))
 
-from data_analysis.plasma.profiles import HollowProfileMetrics, hollow_profile_metrics
+from data_analysis.plasma.profiles import (
+    HollowProfileMetrics,
+    hollow_profile_metrics,
+    orbit_smeared_profile,
+)
 import Jun2026_relaxation as jrx
 
 
@@ -85,6 +89,72 @@ class TestHollowProfileMetrics(unittest.TestCase):
             np.savez(p, sentinel=np.array(42))
             loaded = jrx.batch_all(data_dir=tmp, overwrite=False)
             self.assertEqual(int(loaded["sentinel"]), 42)
+
+    def test_orbit_smeared_profile_identity_and_apparent_filling(self):
+        r = np.linspace(0.0, 8.0, 161)
+        prof = 1.0 - 0.6 * np.exp(-(r / 2.5) ** 2)
+        # Zero displacement is exact identity
+        np.testing.assert_allclose(orbit_smeared_profile(r, prof, 0.0), prof)
+        # Rigid circular orbit of radius dr raises r=0 to prof(dr) and lowers hollowness
+        dr = 1.5
+        smeared = orbit_smeared_profile(r, prof, dr)
+        self.assertAlmostEqual(smeared[0], float(np.interp(dr, r, prof)), places=6)
+        h0 = hollow_profile_metrics(r, prof).hollowness
+        hs = hollow_profile_metrics(r, smeared).hollowness
+        self.assertLess(hs, h0)
+
+    def test_analyze_mach32_arrays_recovers_offcenter_rotation_and_sign(self):
+        # Synthetic pure counter-clockwise rigid-like rotation about (cx, cy) = (1.0, -0.5)
+        gx, gy = np.meshgrid(np.linspace(-10.0, 10.0, 41), np.linspace(-10.0, 10.0, 41))
+        px, py = gx.ravel(), gy.ravel()
+        cx_true, cy_true = 1.0, -0.5
+        dx, dy = px - cx_true, py - cy_true
+        rr = np.hypot(dx, dy)
+        # Purely azimuthal flow: v_theta = +0.085 (counter-clockwise) -> vx = -v_th * dy/r, vy = +v_th * dx/r
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ux_unit = np.where(rr > 0.0, -dy / rr, 0.0)
+            uy_unit = np.where(rr > 0.0, dx / rr, 0.0)
+        t32 = np.linspace(-1.0, 6.0, 71)
+        amp_t = np.where((t32 >= 0.0) & (t32 <= 5.0), 0.085, 0.0)
+        mx = ux_unit[:, None] * amp_t[None, :]
+        my = uy_unit[:, None] * amp_t[None, :]
+        # Core axial flow = -0.35, ring = -0.15
+        mz_base = np.where(rr <= 2.0, -0.35, -0.15)
+        mz = np.broadcast_to(mz_base[:, None], mx.shape).copy()
+
+        res = jrx._analyze_mach32_arrays(t32, px, py, mx, my, mz, t_on_ref_ms=1.30)
+        np.testing.assert_allclose(res["mach32__center_xy_cm"], [cx_true, cy_true], atol=0.05)
+        self.assertLess(res["mach32__center_ratio"], 0.05)
+        self.assertAlmostEqual(res["mach32__M_theta_wall_pre_onset"], +0.085, places=3)
+        self.assertAlmostEqual(res["mach32__M_theta_wall_late_sat"], +0.085, places=3)
+        self.assertAlmostEqual(res["mach32__M_theta_late_over_pre"], 1.0, places=3)
+        self.assertAlmostEqual(res["mach32__M_z_core_late_sat"], -0.35, places=3)
+        self.assertAlmostEqual(res["mach32__M_z_ring_late_sat"], -0.15, places=3)
+
+    def test_2d_plane_per_window_centering_and_late_onset_no_crash(self):
+        # Rigid hollow core shifts from (0.0, -1.0) pre-onset to (2.0, 1.0) late-bias without filling
+        gx, gy = np.meshgrid(np.linspace(-8.0, 8.0, 17), np.linspace(-8.0, 8.0, 17))
+        xu, yu = gx.ravel(), gy.ravel()
+        vals = {
+            "pre_bias": np.ones_like(xu),
+            "pre_onset": 1.0 - 0.6 * np.exp(-((xu - 0.0) ** 2 + (yu + 1.0) ** 2) / 6.0),
+            "early_post": 1.0 - 0.6 * np.exp(-((xu - 1.0) ** 2 + (yu - 0.0) ** 2) / 6.0),
+            "late_sat": 1.0 - 0.6 * np.exp(-((xu - 2.0) ** 2 + (yu - 1.0) ** 2) / 6.0),
+            "post_off": 1.0 - 0.3 * np.exp(-((xu - 2.0) ** 2 + (yu - 1.0) ** 2) / 6.0),
+        }
+        res = jrx._summarize_2d_plane_windows(xu, yu, vals, t_on_ms=1.40)
+        # Per-window centering must track the 2.83 cm shift and keep H_late == H_preOn!
+        np.testing.assert_allclose(res["center_pre_xy_cm"], [0.0, -1.0], atol=0.1)
+        np.testing.assert_allclose(res["center_late_xy_cm"], [2.0, 1.0], atol=0.1)
+        self.assertAlmostEqual(res["H_late_over_pre"], 1.0, delta=0.01)
+
+        # Late onset (e.g. t_on = 4.20 ms) -> late_sat omitted from vals must NOT crash
+        vals_no_late = {k: v for k, v in vals.items() if k != "late_sat"}
+        res_nl = jrx._summarize_2d_plane_windows(xu, yu, vals_no_late, t_on_ms=4.20)
+        self.assertTrue(np.isnan(res_nl["H_late_sat"]))
+        self.assertTrue(np.isnan(res_nl["H_late_over_pre"]))
+        self.assertTrue(np.all(np.isnan(res_nl["center_late_xy_cm"])))
+        self.assertTrue(np.isfinite(res_nl["H_pre_onset"]))
 
 
 if __name__ == "__main__":
