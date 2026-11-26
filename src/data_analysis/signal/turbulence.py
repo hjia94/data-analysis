@@ -70,9 +70,11 @@ class HarmonicSteepening(NamedTuple):
     a2_a1_med: float
     a3_a1_med: float
     biphase_lock: float            # |<B>| / <|B|> in [0, 1], B = X(2f1) * conj(X(f1))^2
-    biphase_deg: float             # beta = phi_2 - 2*phi_1 in (-180, 180]
-    curvature_comp: float          # (A2/A1) * cos(beta): symmetric peakedness / wall curvature
-    steepening_comp: float         # (A2/A1) * sin(beta): sawtooth steepening (>0 steep rise)
+    biphase_lock_crit: float       # Rayleigh random-phase threshold (~lock_sigma * sqrt(pi/(4N)))
+    biphase_locked: bool           # True when n_shots >= 4 and biphase_lock >= biphase_lock_crit
+    biphase_deg: float             # beta = phi_2 - 2*phi_1 in (-180, 180] (NaN if gated unlocked)
+    curvature_comp: float          # (A2/A1) * cos(beta): symmetric peakedness (NaN if gated unlocked)
+    steepening_comp: float         # (A2/A1) * sin(beta): sawtooth steepening (NaN if gated unlocked)
     skewness_med: float            # harmonic-band waveform skewness S
     hilbert_asymmetry_med: float   # Elgar-Guza skew(Im(hilbert(x))) (<0 steep rise, >0 steep fall)
     slope_ratio_med: float         # p95(dx>0) / p95(-dx[dx<0]) (>1 steep rise, <1 steep fall)
@@ -454,6 +456,8 @@ def harmonic_steepening(
     slope_pct=95.0,
     n_phase_bins=64,
     edge_trim_frac=0.10,
+    lock_sigma=3.0,
+    gate_unlocked=True,
 ):
     """Quantify nonlinear sawtooth steepening vs. symmetric peakedness of a harmonic mode.
 
@@ -470,6 +474,19 @@ def harmonic_steepening(
       tail (``slope_ratio > 1``, ``rise_frac < 0.5``, ``hilbert_asymmetry < 0``).
     - ``beta = -90 deg`` (``sin(beta) = -1``): slow rise / steep falling back
       (``slope_ratio < 1``, ``rise_frac > 0.5``, ``hilbert_asymmetry > 0``).
+
+    Multi-shot phase-locking significance is checked against the Rayleigh
+    random-phase expectation ``E[R] = sqrt(pi / (4 N))``: when ``n_shots >= 4``,
+    ``biphase_lock_crit = min(0.95, lock_sigma * sqrt(pi / (4 N)))`` (at
+    ``lock_sigma = 3.0``, ``~2.66 / sqrt(N)``, Rayleigh ``p < 1e-3``). When
+    ``gate_unlocked=True`` and ``biphase_lock < biphase_lock_crit`` (for
+    ``n_shots >= 4``), ``biphase_deg``, ``curvature_comp``, and
+    ``steepening_comp`` are set to ``NaN`` so random-phase noise is never
+    plotted or tabulated as locked steepening.
+
+    Caveat: if ``f_0`` chirps appreciably across a long analysis window, the
+    ``2 f_0`` spectral line spreads twice as fast as ``f_0``, pulling the
+    single-bin peak ratio ``a2_a1_med`` slightly low.
 
     Also constructs a fundamental-phase-folded cycle waveform normalized per
     shot by ``sqrt(2) * std(x_1)`` so a pure sinusoid maps to ``cos(phase_rad)``
@@ -489,6 +506,12 @@ def harmonic_steepening(
             phase-folded cycle waveform.
         edge_trim_frac: Fraction trimmed from each end after ``sosfiltfilt``
             to eliminate filter boundary transients.
+        lock_sigma: Multiple of the Rayleigh random-phase mean
+            ``sqrt(pi / (4 N))`` required to declare ``biphase_locked=True``
+            (default ``3.0`` -> ``~2.66 / sqrt(N)``).
+        gate_unlocked: When ``True`` (default) and ``n_shots >= 4``, blank
+            ``biphase_deg``, ``curvature_comp``, and ``steepening_comp`` to
+            ``NaN`` whenever ``biphase_lock < biphase_lock_crit``.
 
     Returns:
         :class:`HarmonicSteepening`.
@@ -511,6 +534,8 @@ def harmonic_steepening(
             a2_a1_med=np.nan,
             a3_a1_med=np.nan,
             biphase_lock=np.nan,
+            biphase_lock_crit=np.nan,
+            biphase_locked=False,
             biphase_deg=np.nan,
             curvature_comp=np.nan,
             steepening_comp=np.nan,
@@ -610,13 +635,20 @@ def harmonic_steepening(
         return _empty()
 
     B_arr = np.asarray(B_list, dtype=complex)
+    n_b = int(B_arr.size)
     b_denom = float(np.mean(np.abs(B_arr)))
     b_lock = float(abs(np.mean(B_arr)) / b_denom) if b_denom > 0.0 else np.nan
+    b_crit = float(min(0.95, float(lock_sigma) * np.sqrt(np.pi / (4.0 * n_b)))) if n_b >= 4 else np.nan
+    b_locked = bool(n_b >= 4 and np.isfinite(b_lock) and b_lock >= b_crit)
     beta_deg = float(np.degrees(np.angle(np.mean(B_arr)))) if b_denom > 0.0 else np.nan
     a21_med = float(np.median(a21_l))
     a31_med = float(np.median(a31_l))
     curv = a21_med * float(np.cos(np.radians(beta_deg))) if np.isfinite(beta_deg) else np.nan
     steep = a21_med * float(np.sin(np.radians(beta_deg))) if np.isfinite(beta_deg) else np.nan
+    if gate_unlocked and n_b >= 4 and not b_locked:
+        beta_deg = np.nan
+        curv = np.nan
+        steep = np.nan
 
     if folded_rows:
         fm = np.vstack(folded_rows)
@@ -632,6 +664,8 @@ def harmonic_steepening(
         a2_a1_med=a21_med,
         a3_a1_med=a31_med,
         biphase_lock=b_lock,
+        biphase_lock_crit=b_crit,
+        biphase_locked=b_locked,
         biphase_deg=beta_deg,
         curvature_comp=curv,
         steepening_comp=steep,

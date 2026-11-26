@@ -212,11 +212,56 @@ class TestTurbulenceHelpers(unittest.TestCase):
         # (d) 1-D pure sinusoid & invalid/Nyquist f0 edge cases
         st_1d = harmonic_steepening(np.cos(2.0 * np.pi * f0 * t), fs, f0)
         self.assertEqual(st_1d.n_shots, 1)
+        self.assertFalse(st_1d.biphase_locked)
         self.assertLess(st_1d.a2_a1_med, 0.02)
         self.assertAlmostEqual(st_1d.slope_ratio_med, 1.0, delta=0.05)
         st_bad = harmonic_steepening(np.cos(2.0 * np.pi * f0 * t), fs, 0.3 * fs)
         self.assertEqual(st_bad.n_shots, 0)
         self.assertTrue(np.isnan(st_bad.biphase_deg))
+
+    def test_harmonic_steepening_gates_unlocked_random_biphase_to_nan(self):
+        fs = 100e3
+        t = np.arange(0, 2000) / fs
+        f0 = 4000.0
+        rng = np.random.default_rng(42)
+        nsh = 25
+        # Independent random phase for 2f0 relative to f0 -> unlocked bispectrum
+        rows = []
+        for _ in range(nsh):
+            p1 = rng.uniform(-np.pi, np.pi)
+            p2 = rng.uniform(-np.pi, np.pi)
+            th = 2.0 * np.pi * f0 * t
+            rows.append(10.0 + np.cos(th + p1) + 0.30 * np.cos(2.0 * th + p2))
+        st = harmonic_steepening(np.vstack(rows), fs, f0)
+        self.assertFalse(st.biphase_locked)
+        self.assertLess(st.biphase_lock, st.biphase_lock_crit)
+        self.assertTrue(np.isnan(st.biphase_deg))
+        self.assertTrue(np.isnan(st.curvature_comp))
+        self.assertTrue(np.isnan(st.steepening_comp))
+        # Disabling gating still returns finite raw numbers for diagnostics
+        st_raw = harmonic_steepening(np.vstack(rows), fs, f0, gate_unlocked=False)
+        self.assertFalse(st_raw.biphase_locked)
+        self.assertTrue(np.isfinite(st_raw.biphase_deg))
+
+    def test_mach_sinusoid_log_baseline_catches_fake_velocity_steepening(self):
+        # Pure sinusoidal tips (20% / 20%, 20 deg phase lag) -> M = -(K_H/2) ln(I_+/I_-)
+        # produces fake ~0.10 sin(beta) steepening, while geometric-mean Isat_0 stays ~0.
+        fs = 100e3
+        t = np.arange(0, 2000) / fs
+        w = 2.0 * np.pi * 4000.0
+        lag = np.radians(20.0)
+        xp = np.tile(1.0 + 0.20 * np.cos(w * t), (6, 1))
+        xm = np.tile(1.0 + 0.20 * np.cos(w * t + lag), (6, 1))
+        yp = np.tile(1.0 + 0.20 * np.cos(w * t + 0.5), (6, 1))
+        ym = np.tile(1.0 + 0.20 * np.cos(w * t + 0.5 + lag), (6, 1))
+        recs = [{"tips_raw": {"X+": xp, "X-": xm, "Y+": yp, "Y-": ym}, "ur": 1.0, "ut": 0.0}]
+        base = jtb._mach_sinusoid_log_baseline(recs, {"X": 1.0, "Y": 1.0}, fs, 4000.0)
+        self.assertIsNotNone(base)
+        st_mr = harmonic_steepening(base["mr"], fs, 4000.0)
+        st_is = harmonic_steepening(base["isat0"], fs, 4000.0, gate_unlocked=False)
+        self.assertAlmostEqual(st_mr.a2_a1_med, 0.10, delta=0.015)
+        self.assertAlmostEqual(abs(st_mr.steepening_comp), 0.10, delta=0.015)
+        self.assertAlmostEqual(abs(st_is.steepening_comp), 0.0, delta=0.01)
 
     def test_plot_turbulence_steepening_smoke(self):
         import matplotlib
@@ -249,6 +294,7 @@ class TestTurbulenceHelpers(unittest.TestCase):
             synth[f"r32__steep_{tag}_biphase_deg"] = np.full(5, 80.0)
             synth[f"r32__steep_{tag}_steepening_comp"] = np.full(5, 0.3)
             synth[f"r32__steep_{tag}_slope_ratio"] = np.full(5, 2.0)
+            synth[f"r32__steep_base_{tag}_steepening_comp"] = np.full(5, 0.02)
 
         with tempfile.TemporaryDirectory() as tmp:
             npz_p = os.path.join(tmp, jtb.OUT_NAME)

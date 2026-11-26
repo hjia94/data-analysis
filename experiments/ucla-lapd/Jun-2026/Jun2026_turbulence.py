@@ -244,6 +244,8 @@ def analyze_stationary_spectra_and_moments(data_dir=DATA_DIR, *, max_shots=DEFAU
         out[p + "a2_a1_med"] = steep.a2_a1_med
         out[p + "a3_a1_med"] = steep.a3_a1_med
         out[p + "biphase_lock"] = steep.biphase_lock
+        out[p + "biphase_lock_crit"] = steep.biphase_lock_crit
+        out[p + "biphase_locked"] = bool(steep.biphase_locked)
         out[p + "biphase_deg"] = steep.biphase_deg
         out[p + "curvature_comp"] = steep.curvature_comp
         out[p + "steepening_comp"] = steep.steepening_comp
@@ -329,6 +331,8 @@ def analyze_radial_moments(data_dir=DATA_DIR, *, x_center_cm=DEFAULT_X_CENTER_CM
         a21_v = np.full(nr, np.nan, dtype=float)
         a31_v = np.full(nr, np.nan, dtype=float)
         blk_v = np.full(nr, np.nan, dtype=float)
+        bcr_v = np.full(nr, np.nan, dtype=float)
+        blc_v = np.zeros(nr, dtype=bool)
         bet_v = np.full(nr, np.nan, dtype=float)
         crv_v = np.full(nr, np.nan, dtype=float)
         stp_v = np.full(nr, np.nan, dtype=float)
@@ -348,6 +352,8 @@ def analyze_radial_moments(data_dir=DATA_DIR, *, x_center_cm=DEFAULT_X_CENTER_CM
             a21_v[ii] = st.a2_a1_med
             a31_v[ii] = st.a3_a1_med
             blk_v[ii] = st.biphase_lock
+            bcr_v[ii] = st.biphase_lock_crit
+            blc_v[ii] = bool(st.biphase_locked)
             bet_v[ii] = st.biphase_deg
             crv_v[ii] = st.curvature_comp
             stp_v[ii] = st.steepening_comp
@@ -361,6 +367,8 @@ def analyze_radial_moments(data_dir=DATA_DIR, *, x_center_cm=DEFAULT_X_CENTER_CM
         out[pr + "a2_a1"] = a21_v
         out[pr + "a3_a1"] = a31_v
         out[pr + "biphase_lock"] = blk_v
+        out[pr + "biphase_lock_crit"] = bcr_v
+        out[pr + "biphase_locked"] = blc_v
         out[pr + "biphase_deg"] = bet_v
         out[pr + "curvature_comp"] = crv_v
         out[pr + "steepening_comp"] = stp_v
@@ -624,7 +632,52 @@ def _compute_mach_transport_at_position(ch_data, kappa, dx_cm, dy_cm, fs_hz,
         "isat0_raw": isat0,
         "mr_raw": mr,
         "mt_raw": mt,
+        "tips_raw": {"X+": xp, "X-": xm, "Y+": yp, "Y-": ym},
+        "ur": ur,
+        "ut": ut,
     }
+
+
+def _mach_sinusoid_log_baseline(recs, kappa, fs_hz, f0_hz):
+    """Pure-1f0-sinusoid tip surrogate measuring fake steepening from M = -(K_H/2) ln(I_+/I_-).
+
+    Replaces each Mach tip trace with its exact DC mean plus narrowband 1f0
+    fundamental only (zero intrinsic tip 2f0), applies the exact same
+    :func:`mach_single` log-ratio and polar projection, and returns the
+    resulting ``(isat0, mr, mt)`` stacks.
+    """
+    if not recs or not np.isfinite(f0_hz) or f0_hz <= 0.0:
+        return None
+    f_lo = max(500.0, 0.65 * float(f0_hz))
+    f_hi = min(1.35 * float(f0_hz), 0.45 * float(fs_hz))
+    if not (0.0 < f_lo < f_hi < 0.5 * float(fs_hz)):
+        return None
+    sos_f1 = signal.butter(4, [f_lo, f_hi], btype="bandpass", fs=float(fs_hz), output="sos")
+
+    out = {"isat0": [], "mr": [], "mt": []}
+    for r in recs:
+        tips = r["tips_raw"]
+        sin_d = {}
+        ok = True
+        for tip in ("X+", "X-", "Y+", "Y-"):
+            arr = tips[tip]
+            mu = np.mean(arr, axis=1, keepdims=True)
+            tsin = mu + signal.sosfiltfilt(sos_f1, arr - mu, axis=1)
+            if not np.all(np.isfinite(tsin)) or np.any(tsin <= 0.0):
+                ok = False
+                break
+            sin_d[tip] = tsin
+        if not ok:
+            continue
+        mx_s = mach_single(sin_d["X+"] / sin_d["X-"], kappa["X"])
+        my_s = mach_single(sin_d["Y+"] / sin_d["Y-"], kappa["Y"])
+        ur, ut = r["ur"], r["ut"]
+        out["isat0"].append((sin_d["X+"] * sin_d["X-"] * sin_d["Y+"] * sin_d["Y-"]) ** 0.25)
+        out["mr"].append(mx_s * ur + my_s * ut)
+        out["mt"].append(-mx_s * ut + my_s * ur)
+    if not out["mr"]:
+        return None
+    return {k: np.vstack(v) for k, v in out.items()}
 
 
 def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
@@ -688,12 +741,18 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
 
     # Collect wall [2.5, 4.5) cm positions for 4-quadrant Cartesian-artifact audit
     quad_th_deg, quad_crt, quad_cnr = [], [], []
-    # Band-level harmonic steepening on density (isat0) and velocity (mr, mt)
+    # Band-level harmonic steepening on density (isat0) and velocity (mr, mt),
+    # plus pure-sinusoid-tip log-ratio instrument baseline for M = -(K_H/2) ln(I_+/I_-).
     steep_tags = ("isat0", "mr", "mt")
-    steep_metrics = ("a2_a1", "biphase_lock", "biphase_deg", "curvature_comp",
-                     "steepening_comp", "skewness", "hilbert_asymmetry",
-                     "slope_ratio", "rise_frac")
+    steep_metrics = ("a2_a1", "biphase_lock", "biphase_lock_crit", "biphase_deg",
+                     "curvature_comp", "steepening_comp", "skewness",
+                     "hilbert_asymmetry", "slope_ratio", "rise_frac")
     r32_steep = {f"{t}_{m}": np.full(nb, np.nan, dtype=float) for t in steep_tags for m in steep_metrics}
+    r32_steep_locked = {t: np.zeros(nb, dtype=bool) for t in steep_tags}
+    base_metrics = ("a2_a1", "biphase_lock", "biphase_deg", "curvature_comp",
+                    "steepening_comp", "slope_ratio")
+    r32_base = {f"{t}_{m}": np.full(nb, np.nan, dtype=float) for t in steep_tags for m in base_metrics}
+    r32_excess_steep = {t: np.full(nb, np.nan, dtype=float) for t in steep_tags}
     r32_folded = {t: np.full((nb, 64), np.nan, dtype=float) for t in steep_tags}
     r32_phase_rad = np.linspace(-np.pi, np.pi, 65)
     r32_phase_rad = 0.5 * (r32_phase_rad[:-1] + r32_phase_rad[1:])
@@ -761,11 +820,23 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
         rs_bb_band[bi] = float(np.mean([r["rs_bb"] for r in recs]))
         c_rt_band[bi] = float(np.median([r["c_rt"] for r in recs]))
 
-        f0_est = float(np.median(ref_f0_ests)) if ref_f0_ests else 4200.0
+        if ref_f0_ests:
+            f0_est = float(np.median(ref_f0_ests))
+        else:
+            # Estimate f0 directly from band Isat_0 Welch PSD rather than a hardcoded fallback.
+            is_stack = np.vstack([r["isat0_raw"] for r in recs])
+            bf, bp = signal.welch(is_stack - np.mean(is_stack, axis=1, keepdims=True),
+                                  fs=fs, nperseg=min(256, is_stack.shape[1]), axis=1)
+            bpm = np.mean(bp, axis=0)
+            mf = (bf >= RUN32_F0_BAND_HZ[0]) & (bf <= RUN32_F0_BAND_HZ[1])
+            f0_est = float(bf[mf][int(np.argmax(bpm[mf]))]) if np.any(mf) else np.nan
+        base_stacks = _mach_sinusoid_log_baseline(recs, kappa, fs, f0_est)
         for tag, key in (("isat0", "isat0_raw"), ("mr", "mr_raw"), ("mt", "mt_raw")):
             st_b = harmonic_steepening(np.vstack([r[key] for r in recs]), fs, f0_est, f0_search_hz=800.0)
             r32_steep[f"{tag}_a2_a1"][bi] = st_b.a2_a1_med
             r32_steep[f"{tag}_biphase_lock"][bi] = st_b.biphase_lock
+            r32_steep[f"{tag}_biphase_lock_crit"][bi] = st_b.biphase_lock_crit
+            r32_steep_locked[tag][bi] = bool(st_b.biphase_locked)
             r32_steep[f"{tag}_biphase_deg"][bi] = st_b.biphase_deg
             r32_steep[f"{tag}_curvature_comp"][bi] = st_b.curvature_comp
             r32_steep[f"{tag}_steepening_comp"][bi] = st_b.steepening_comp
@@ -775,6 +846,16 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
             r32_steep[f"{tag}_rise_frac"][bi] = st_b.rise_frac_med
             r32_folded[tag][bi] = st_b.folded_wave
             r32_phase_rad = st_b.phase_rad
+            if base_stacks is not None:
+                sb = harmonic_steepening(base_stacks[tag], fs, f0_est, f0_search_hz=800.0, gate_unlocked=False)
+                r32_base[f"{tag}_a2_a1"][bi] = sb.a2_a1_med
+                r32_base[f"{tag}_biphase_lock"][bi] = sb.biphase_lock
+                r32_base[f"{tag}_biphase_deg"][bi] = sb.biphase_deg
+                r32_base[f"{tag}_curvature_comp"][bi] = sb.curvature_comp
+                r32_base[f"{tag}_steepening_comp"][bi] = sb.steepening_comp
+                r32_base[f"{tag}_slope_ratio"][bi] = sb.slope_ratio_med
+                if np.isfinite(st_b.steepening_comp) and np.isfinite(sb.steepening_comp):
+                    r32_excess_steep[tag][bi] = st_b.steepening_comp - sb.steepening_comp
 
         # Physical m=-1 phase Phi(r) in cos(-theta + Phi(r) - omega*t):
         # hilbert(cos(omega*t - psi)) = exp(+i*(omega*t - psi)) -> an*conj(ar) = exp(-i*(psi - psi_ref))
@@ -831,7 +912,7 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
         "r32__center_xy_cm": np.array([cx, cy], dtype=float),
         "r32__center_ratio": float(ratio),
         "r32__fs_hz": float(fs),
-        "r32__f0_hz": float(np.median(ref_f0_ests)) if ref_f0_ests else 4200.0,
+        "r32__f0_hz": float(np.median(ref_f0_ests)) if ref_f0_ests else np.nan,
         "r32__band_edges_cm": np.array(bands, dtype=float),
         "r32__r_mids_cm": r_mids,
         "r32__n_pos": n_pos_band,
@@ -864,6 +945,12 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
     }
     for k_st, v_st in r32_steep.items():
         out32[f"r32__steep_{k_st}"] = v_st
+    for t_st, v_lk in r32_steep_locked.items():
+        out32[f"r32__steep_{t_st}_biphase_locked"] = v_lk
+    for k_bs, v_bs in r32_base.items():
+        out32[f"r32__steep_base_{k_bs}"] = v_bs
+    for t_st, v_ex in r32_excess_steep.items():
+        out32[f"r32__steep_excess_{t_st}_steepening_comp"] = v_ex
     for t_st, v_fld in r32_folded.items():
         out32[f"r32__steep_{t_st}_folded_waves"] = v_fld
     return out32
@@ -972,14 +1059,16 @@ def print_summary(res):
                 f"{res[p+'hilbert_asymmetry_med']:+5.2f}   {res[p+'slope_ratio_med']:5.2f}   {res[p+'rise_frac_med']:.3f}"
             )
     if "r32__steep_mr_biphase_deg" in res:
-        print("  Run 32 wall steepening ([2.5,3.5), [3.5,4.5), [4.5,5.5) cm):")
-        for bi in (1, 2, 3):
+        print("  Run 32 wall steepening vs. pure-sinusoid-tip log-ratio baseline:")
+        for bi in range(len(bands)):
             b0, b1 = bands[bi, 0], bands[bi, 1]
             parts = []
             for tag, lbl in (("isat0", "Isat0"), ("mr", "M_r"), ("mt", "M_th")):
+                stp = float(res[f"r32__steep_{tag}_steepening_comp"][bi])
+                bst = float(res[f"r32__steep_base_{tag}_steepening_comp"][bi]) if f"r32__steep_base_{tag}_steepening_comp" in res else np.nan
                 parts.append(
                     f"{lbl}: beta={res[f'r32__steep_{tag}_biphase_deg'][bi]:+5.1f}d, "
-                    f"steep={res[f'r32__steep_{tag}_steepening_comp'][bi]:+.2f}, "
+                    f"steep={stp:+.2f}(base {bst:+.2f}), "
                     f"slp={res[f'r32__steep_{tag}_slope_ratio'][bi]:.2f}"
                 )
             print(f"    [{b0:.1f},{b1:.1f}) cm: " + " | ".join(parts))
