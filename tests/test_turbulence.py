@@ -243,22 +243,46 @@ class TestTurbulenceHelpers(unittest.TestCase):
         self.assertFalse(st_raw.biphase_locked)
         self.assertTrue(np.isfinite(st_raw.biphase_deg))
 
-    def test_mach_sinusoid_log_baseline_catches_fake_velocity_steepening(self):
-        # Pure sinusoidal tips (20% / 20%, 20 deg phase lag) -> M = -(K_H/2) ln(I_+/I_-)
-        # produces fake ~0.10 sin(beta) steepening, while geometric-mean Isat_0 stays ~0.
+    def test_mach_linear_tip_bracket_exponential_vs_linear_tip_models(self):
+        # Verify BOTH sides of the Mach model-dependence bracket:
+        # (a) Under Hutchinson's exponential law I_+- = n * exp(-+ M / K_H), a pure
+        #     sinusoidal M + 20% sinusoidal density wave yields 0.000 measured M
+        #     steepening (exact density cancellation), while the linear-tip bracket
+        #     reads ~0.09 (proving the bracket must NOT be subtracted).
+        # (b) Under linear sinusoidal tips (20% / 20%, 20 deg lag), the bracket
+        #     reproduces ~0.10 apparent M steepening while geometric-mean Isat_0 ~ 0.
+        from data_analysis.plasma.mach import K_HUTCHINSON, mach_single
+
         fs = 100e3
         t = np.arange(0, 2000) / fs
         w = 2.0 * np.pi * 4000.0
+        n_t = 1.0 + 0.20 * np.cos(w * t)
+        m_true = 0.15 * np.sin(w * t)
+        # mach_single: M = -(K_H / 2) * ln(I_+/I_-) -> I_+- = n * exp(-+ M / K_H)
+        xp_h = np.tile(n_t * np.exp(-m_true / K_HUTCHINSON), (6, 1))
+        xm_h = np.tile(n_t * np.exp(+m_true / K_HUTCHINSON), (6, 1))
+        yp_h = np.tile(n_t, (6, 1))
+        ym_h = np.tile(n_t, (6, 1))
+        m_meas = mach_single(xp_h / xm_h, 1.0)
+        st_meas = harmonic_steepening(m_meas, fs, 4000.0, gate_unlocked=False)
+        self.assertLess(st_meas.a2_a1_med, 0.005)
+        self.assertAlmostEqual(abs(st_meas.steepening_comp), 0.0, delta=0.005)
+
+        recs_h = [{"tips_raw": {"X+": xp_h, "X-": xm_h, "Y+": yp_h, "Y-": ym_h}, "ur": 1.0, "ut": 0.0}]
+        br_h = jtb._mach_linear_tip_bracket(recs_h, {"X": 1.0, "Y": 1.0}, fs, 4000.0)
+        st_br_h = harmonic_steepening(br_h["mr"], fs, 4000.0, gate_unlocked=False)
+        self.assertGreater(abs(st_br_h.steepening_comp), 0.06)
+
         lag = np.radians(20.0)
-        xp = np.tile(1.0 + 0.20 * np.cos(w * t), (6, 1))
-        xm = np.tile(1.0 + 0.20 * np.cos(w * t + lag), (6, 1))
-        yp = np.tile(1.0 + 0.20 * np.cos(w * t + 0.5), (6, 1))
-        ym = np.tile(1.0 + 0.20 * np.cos(w * t + 0.5 + lag), (6, 1))
-        recs = [{"tips_raw": {"X+": xp, "X-": xm, "Y+": yp, "Y-": ym}, "ur": 1.0, "ut": 0.0}]
-        base = jtb._mach_sinusoid_log_baseline(recs, {"X": 1.0, "Y": 1.0}, fs, 4000.0)
-        self.assertIsNotNone(base)
-        st_mr = harmonic_steepening(base["mr"], fs, 4000.0)
-        st_is = harmonic_steepening(base["isat0"], fs, 4000.0, gate_unlocked=False)
+        xp_l = np.tile(1.0 + 0.20 * np.cos(w * t), (6, 1))
+        xm_l = np.tile(1.0 + 0.20 * np.cos(w * t + lag), (6, 1))
+        yp_l = np.tile(1.0 + 0.20 * np.cos(w * t + 0.5), (6, 1))
+        ym_l = np.tile(1.0 + 0.20 * np.cos(w * t + 0.5 + lag), (6, 1))
+        recs_l = [{"tips_raw": {"X+": xp_l, "X-": xm_l, "Y+": yp_l, "Y-": ym_l}, "ur": 1.0, "ut": 0.0}]
+        br_l = jtb._mach_linear_tip_bracket(recs_l, {"X": 1.0, "Y": 1.0}, fs, 4000.0)
+        self.assertIsNotNone(br_l)
+        st_mr = harmonic_steepening(br_l["mr"], fs, 4000.0)
+        st_is = harmonic_steepening(br_l["isat0"], fs, 4000.0, gate_unlocked=False)
         self.assertAlmostEqual(st_mr.a2_a1_med, 0.10, delta=0.015)
         self.assertAlmostEqual(abs(st_mr.steepening_comp), 0.10, delta=0.015)
         self.assertAlmostEqual(abs(st_is.steepening_comp), 0.0, delta=0.01)
@@ -294,7 +318,7 @@ class TestTurbulenceHelpers(unittest.TestCase):
             synth[f"r32__steep_{tag}_biphase_deg"] = np.full(5, 80.0)
             synth[f"r32__steep_{tag}_steepening_comp"] = np.full(5, 0.3)
             synth[f"r32__steep_{tag}_slope_ratio"] = np.full(5, 2.0)
-            synth[f"r32__steep_base_{tag}_steepening_comp"] = np.full(5, 0.02)
+            synth[f"r32__steep_linear_tip_{tag}_steepening_comp"] = np.full(5, 0.02)
 
         with tempfile.TemporaryDirectory() as tmp:
             npz_p = os.path.join(tmp, jtb.OUT_NAME)

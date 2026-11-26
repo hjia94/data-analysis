@@ -478,11 +478,14 @@ def harmonic_steepening(
     Multi-shot phase-locking significance is checked against the Rayleigh
     random-phase expectation ``E[R] = sqrt(pi / (4 N))``: when ``n_shots >= 4``,
     ``biphase_lock_crit = min(0.95, lock_sigma * sqrt(pi / (4 N)))`` (at
-    ``lock_sigma = 3.0``, ``~2.66 / sqrt(N)``, Rayleigh ``p < 1e-3``). When
-    ``gate_unlocked=True`` and ``biphase_lock < biphase_lock_crit`` (for
-    ``n_shots >= 4``), ``biphase_deg``, ``curvature_comp``, and
-    ``steepening_comp`` are set to ``NaN`` so random-phase noise is never
-    plotted or tabulated as locked steepening.
+    ``lock_sigma = 3.0``, ``~2.66 / sqrt(N)``, Rayleigh ``p < 1e-3``; note that
+    for small ensembles such as ``N = 10`` this ``0.84`` cutoff is strict and
+    may gate real but modest locking — pass a smaller ``lock_sigma`` or
+    ``gate_unlocked=False`` to inspect raw values). When ``gate_unlocked=True``
+    and ``biphase_lock < biphase_lock_crit`` (for ``n_shots >= 4``),
+    ``biphase_deg``, ``curvature_comp``, and ``steepening_comp`` are set to
+    ``NaN`` so random-phase noise is never plotted or tabulated as locked
+    steepening.
 
     Caveat: if ``f_0`` chirps appreciably across a long analysis window, the
     ``2 f_0`` spectral line spreads twice as fast as ``f_0``, pulling the

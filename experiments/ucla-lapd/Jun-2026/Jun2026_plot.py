@@ -722,8 +722,8 @@ def plot_turbulence_steepening(npz_path=None, *, data_dir=None,
             beta = float(res[f"r32__steep_{tag}_biphase_deg"][bi])
             stp = float(res[f"r32__steep_{tag}_steepening_comp"][bi])
             slp = float(res[f"r32__steep_{tag}_slope_ratio"][bi])
-            bkey = f"r32__steep_base_{tag}_steepening_comp"
-            bstr = f" (log-base {float(res[bkey][bi]):+.2f})" if (bkey in res and np.isfinite(res[bkey][bi])) else ""
+            bkey = f"r32__steep_linear_tip_{tag}_steepening_comp"
+            bstr = f" (lin-tip {float(res[bkey][bi]):+.2f})" if (bkey in res and np.isfinite(res[bkey][bi])) else ""
             ax.plot(ph32, w, lw=2.3, color=col,
                     label=rf"{lbl}: $\beta={beta:+.0f}^\circ$, sin={stp:+.2f}{bstr}, slp={slp:.2f}$\times$")
     ax.axhline(0.0, color="0.75", lw=0.8)
