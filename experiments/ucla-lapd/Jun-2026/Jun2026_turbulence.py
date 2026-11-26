@@ -316,57 +316,85 @@ def _resample_pair_common_grid(t_a_s, sig_a, t_b_s, sig_b, t_lo_ms=0.0, t_hi_ms=
     return t_grid, a_arr, b_arr
 
 
-def _per_shot_ramp_masks(t_grid_s, isat_arr):
-    """Detect per-shot onset ``t_on_k`` and 50%-of-peak ramp end ``t_50_k`` -> boolean masks.
+def _per_shot_ramp_masks(t_grid_s, isat_arr, f_band_hz):
+    """Detect per-shot onset ``t_on_k`` plus Hilbert ``t_50_k`` & ``t_90_k`` -> non-overlapping masks.
 
-    Returns ``(mask_grow, mask_early, mask_late, t_on_ms, ramp_dur_ms)`` where:
+    Uses the narrowband ``f_band_hz`` Hilbert amplitude envelope (lightly
+    smoothed over 50 us) instead of the broad 0.5 ms Hann window to locate the
+    50% (``t_50_k``) and 90% (``t_90_k``) crossings of each shot's post-onset
+    peak so fast ramps (``gamma ~ 5-10 ms^-1``) are resolved cleanly:
+
     - ``mask_grow`` covers ``[t_on_k - 0.10, t_50_k] ms`` (strictly rising ramp
-      before 50% of peak envelope, clamped to ``[0.15, 0.45] ms`` after ``t_on_k``),
-    - ``mask_early`` covers ``[t_50_k + 0.10, min(4.8, t_50_k + 0.80)] ms``,
-    - ``mask_late`` covers ``[max(t_on_k + 1.0, 3.0), 4.8] ms``.
+      below 50% of peak amplitude),
+    - ``mask_early`` covers ``[t_90_k + 0.05, min(4.8, t_90_k + 0.75)] ms``
+      (strictly after saturation is reached at 90% of peak, preventing ramp
+      leakage into ``early_sat``),
+    - ``mask_late`` covers ``[max(t_90_k + 0.80, 3.0), 4.8] ms``.
+
+    Returns ``(mask_grow, mask_early, mask_late, t_on_ms, ramp_dur_ms, t_90_ms)``.
     """
     nsh, nt = isat_arr.shape
     t_ms = t_grid_s * 1e3
+    fs_hz = 1.0 / float(t_grid_s[1] - t_grid_s[0])
     m_grow = np.zeros((nsh, nt), dtype=bool)
     m_early = np.zeros((nsh, nt), dtype=bool)
     m_late = np.zeros((nsh, nt), dtype=bool)
     t_ons = np.full(nsh, np.nan, dtype=float)
     ramp_durs = np.full(nsh, np.nan, dtype=float)
+    t_90s = np.full(nsh, np.nan, dtype=float)
 
     t_env, env = sliding_detrended_rms(isat_arr, t_grid_s, win_s=jon.WIN_S, step_s=jon.STEP_S)
-    t_env_ms = t_env * 1e3
     t_on_s = detect_onset_time(
         t_env, env, threshold=jon.ONSET_THRESH,
         t_min=jon.T_MIN_ONSET_MS * 1e-3, sustain=jon.SUSTAIN_BINS,
     )
+
+    # High-time-resolution Hilbert amplitude envelope in f_band_hz (50 us light smoothing)
+    sos = signal.butter(2, [float(f_band_hz[0]), float(f_band_hz[1])],
+                        btype="bandpass", fs=fs_hz, output="sos")
+    det = isat_arr - np.mean(isat_arr, axis=1, keepdims=True)
+    env_h = np.abs(signal.hilbert(signal.sosfiltfilt(sos, det, axis=1), axis=1))
+    k_sm = max(1, int(round(5e-5 * fs_hz)))
+    if k_sm > 1:
+        kern = np.ones(k_sm, dtype=float) / float(k_sm)
+        env_h = np.apply_along_axis(lambda r: np.convolve(r, kern, mode="same"), 1, env_h)
+
     for k in range(nsh):
         if not np.isfinite(t_on_s[k]):
             continue
         ton_ms = float(t_on_s[k]) * 1e3
         t_ons[k] = ton_ms
-        # Find 50% of post-onset peak envelope on this shot
-        m_after = (t_env_ms >= ton_ms) & (t_env_ms <= 4.8) & np.isfinite(env[k])
+        m_after = (t_ms >= ton_ms) & (t_ms <= 4.8) & np.isfinite(env_h[k])
         if not np.any(m_after):
             continue
-        env_pk = float(np.max(env[k, m_after]))
         idx_a = np.flatnonzero(m_after)
-        hit50 = idx_a[env[k, idx_a] >= 0.5 * env_pk]
-        t50_raw = float(t_env_ms[hit50[0]]) if hit50.size else (ton_ms + 0.25)
-        # Keep ramp strictly inside [ton + 0.15, ton + 0.45] ms so it has >= 0.25 ms (~1 cycle)
-        # while staying on the rising edge rather than saturating.
-        t50_ms = float(np.clip(t50_raw, ton_ms + 0.15, min(4.7, ton_ms + 0.45)))
-        ramp_durs[k] = t50_ms - ton_ms
+        env_pk = float(np.max(env_h[k, idx_a]))
+        if env_pk <= 0.0:
+            continue
 
-        m_grow[k] = (t_ms >= max(0.2, ton_ms - 0.10)) & (t_ms <= t50_ms)
-        early_lo = t50_ms + 0.10
-        early_hi = min(4.8, t50_ms + 0.80)
+        hit50 = idx_a[env_h[k, idx_a] >= 0.50 * env_pk]
+        hit90 = idx_a[env_h[k, idx_a] >= 0.90 * env_pk]
+        if hit50.size == 0 or hit90.size == 0:
+            continue
+        t50_ms = float(t_ms[hit50[0]])
+        t90_ms = float(t_ms[hit90[0]])
+        if t90_ms < t50_ms:
+            t90_ms = t50_ms
+        ramp_durs[k] = t50_ms - ton_ms
+        t_90s[k] = t90_ms
+
+        grow_lo = max(0.2, ton_ms - 0.10)
+        if t50_ms - grow_lo >= 0.08:
+            m_grow[k] = (t_ms >= grow_lo) & (t_ms <= t50_ms)
+        early_lo = t90_ms + 0.05
+        early_hi = min(4.8, t90_ms + 0.75)
         if early_hi - early_lo >= 0.20:
             m_early[k] = (t_ms >= early_lo) & (t_ms <= early_hi)
-        late_lo = max(ton_ms + 1.0, 3.0)
+        late_lo = max(t90_ms + 0.80, 3.0)
         if 4.8 - late_lo >= 0.30:
             m_late[k] = (t_ms >= late_lo) & (t_ms <= 4.8)
 
-    return m_grow, m_early, m_late, t_ons, ramp_durs
+    return m_grow, m_early, m_late, t_ons, ramp_durs, t_90s
 
 
 def analyze_growth_vs_sat_crossphase(data_dir=DATA_DIR, *, max_shots=60,
@@ -397,9 +425,11 @@ def analyze_growth_vs_sat_crossphase(data_dir=DATA_DIR, *, max_shots=60,
         _, _, i4_g = _resample_pair_common_grid(tm_s, isat_raw, tb_rel_s, i4_raw)
         _, _, v2_g = _resample_pair_common_grid(tm_s, isat_raw, tb_rel_s, v2_raw)
 
-        m_grow, m_early, m_late, t_ons, ramp_durs = _per_shot_ramp_masks(t_grid, isat_g)
+        m_grow, m_early, m_late, t_ons, ramp_durs, t_90s = _per_shot_ramp_masks(t_grid, isat_g, f_band)
         n_unstable = int(np.sum(np.isfinite(t_ons)))
+        t_on_ps_med = float(np.nanmedian(t_ons)) if n_unstable else np.nan
         ramp_med = float(np.nanmedian(ramp_durs)) if np.any(np.isfinite(ramp_durs)) else np.nan
+        t90_med = float(np.nanmedian(t_90s)) if np.any(np.isfinite(t_90s)) else np.nan
 
         pairs = (
             ("isat_i2", isat_g, i2_g),
@@ -417,6 +447,8 @@ def analyze_growth_vs_sat_crossphase(data_dir=DATA_DIR, *, max_shots=60,
             p = f"xph_{rnum}_{tag}__"
             out[p + "gas_puff_ms"] = float(puff)
             out[p + "t_onset_med_ms"] = t_on
+            out[p + "t_on_per_shot_med_ms"] = t_on_ps_med
+            out[p + "t_90_med_ms"] = t90_med
             out[p + "n_unstable_shots"] = n_unstable
             out[p + "ramp_dur_med_ms"] = ramp_med
             out[p + "plv_grow"] = plv_g
@@ -768,7 +800,8 @@ def print_summary(res):
         p0 = f"xph_{rnum}_isat_i2__"
         print(
             f"  Run {rnum} ({puff:.0f}ms, n_unst={int(res[p0+'n_unstable_shots'])}, "
-            f"ramp_med={res[p0+'ramp_dur_med_ms']:.2f}ms):"
+            f"t_on={res[p0+'t_on_per_shot_med_ms']:.2f}ms [cat {res[p0+'t_onset_med_ms']:.2f}ms], "
+            f"t50-ton={res[p0+'ramp_dur_med_ms']:.2f}ms, t90={res[p0+'t_90_med_ms']:.2f}ms):"
         )
         for tag in ("isat_i2", "isat_i4", "isat_v2", "i2_i4"):
             p = f"xph_{rnum}_{tag}__"

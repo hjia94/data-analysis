@@ -132,6 +132,31 @@ class TestTurbulenceHelpers(unittest.TestCase):
         self.assertAlmostEqual(phi_g, 0.0, delta=3.0)
         self.assertAlmostEqual(phi_s, +60.0, delta=3.0)
 
+    def test_per_shot_ramp_masks_early_sat_does_not_overlap_fast_ramp(self):
+        # Fast exponential ramp (gamma = 10 ms^-1) reaching saturation around t = 1.6 ms:
+        # 0 deg during growth (amp < 0.85 * peak), +60 deg once saturated (amp >= 0.85 * peak).
+        fs = 100e3
+        t_s = np.arange(0, 490) / fs
+        t_ms = t_s * 1e3
+        w = 2.0 * np.pi * 4000.0
+        # DC baseline = 1.0, relative AC amplitude grows 0.002 -> 0.20 (100x) at gamma = 10 ms^-1
+        rel_amp = np.minimum(0.002 * np.exp(10.0 * (t_ms - 1.15)), 0.20)
+        phi_rad = np.where(rel_amp < 0.17, 0.0, np.radians(60.0))
+        sig_a = np.tile(1.0 + rel_amp * np.cos(w * t_s), (6, 1))
+        sig_b = np.tile(1.0 + rel_amp * np.cos(w * t_s + phi_rad), (6, 1))
+        f_band = (2500.0, 5500.0)
+
+        m_grow, m_early, m_late, t_ons, ramp_durs, t_90s = jtb._per_shot_ramp_masks(t_s, sig_a, f_band)
+        self.assertTrue(np.all(np.isfinite(t_ons)))
+        # Hilbert t_90 must land at/after saturation (~1.60 ms) so early_sat sees pure +60 deg!
+        self.assertGreater(float(np.median(t_90s)), 1.55)
+        _, phi_g, _ = amplitude_normalized_cross_phase(sig_a, sig_b, fs, f_band, mask=m_grow)
+        _, phi_e, _ = amplitude_normalized_cross_phase(sig_a, sig_b, fs, f_band, mask=m_early)
+        _, phi_s, _ = amplitude_normalized_cross_phase(sig_a, sig_b, fs, f_band, mask=m_late)
+        self.assertAlmostEqual(phi_g, 0.0, delta=5.0)
+        self.assertAlmostEqual(phi_e, +60.0, delta=5.0)
+        self.assertAlmostEqual(phi_s, +60.0, delta=5.0)
+
     def test_batch_all_respects_overwrite_false(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, jtb.OUT_NAME)
