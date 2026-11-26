@@ -8,27 +8,36 @@ drift-wave literature (Pace et al. 2008; Maggs & Morales 2011; Friedman et al.
    Quantifies the coherent harmonic power fraction (``1..4 f_0``), compares
    exponential (Lorentzian-pulse ``P(f) ~ exp(-f/f_e)``) vs. power-law
    (``P(f) ~ f^-alpha``) continuum fits strictly above the per-run pre-bias
-   background noise floor, and measures per-shot skewness and excess kurtosis.
+   **ambient plasma** PSD (``[-1.5, -0.2] ms`` while the main discharge is on,
+   not digitizer dark noise; block-mean downsampling provides ~`-10 dB`
+   aliasing rejection at ``1.5x`` Nyquist, adequate for steep ``alpha ~ 3–4.6``
+   tails), and measures per-shot skewness and excess kurtosis.
 2. **Radial intermittency polarity across the hollow wall (Runs 11–14):**
    Tracks flow-cancelled ``Isat_0`` skewness and excess kurtosis across
    ``core (r=0)``, ``inner_wall (r=2.5 cm)``, ``outer_wall (r=4.0 cm)``, and
    ``ring (r=6.0 cm)`` — confirming inverted hollow-column skewness polarity
    (``S > 0`` on the low-density inner wall, ``S < 0`` on the outer wall) with
    strongly negative wave-like kurtosis at peak coherent saturation.
-3. **Linear-growth vs. saturated cross-phase evolution (Runs 01–04):**
-   Compares ``Isat(P33)`` vs. Port-35 ``I_2"``, ``I_4"``, and ``V_2"``
-   (``biasscope``, ``t_offset = 12.0 ms``) plus same-scope ``I_2"`` vs.
-   ``I_4"`` between linear growth and nonlinear saturation using block-mean
-   anti-aliased downsampling onto a common 100 kHz grid.
-4. **Direct radial particle flux, Reynolds stress & spiral-sign verification
-   (Run 32, 6-tip Mach plane at P33, 800 G, 35 ms):**
+3. **Per-shot amplitude-normalized linear-growth vs. early- & late-saturation
+   cross-phase evolution (Runs 01–04):**
+   Aligns each shot to its own onset ``t_on_k`` and 50%-of-peak ramp end
+   ``t_50_k`` and uses amplitude-normalized analytic-signal unit phasors
+   (:func:`amplitude_normalized_cross_phase`) so the saturated tail cannot
+   dominate the ramp by ``|A(t)|^2``, comparing ``Isat(P33)`` vs. Port-35
+   ``I_2"``, ``I_4"``, ``V_2"`` (plus same-scope ``I_2"`` vs. ``I_4"``).
+4. **Direct Reynolds stress, spiral-sign verification & finite-tip flux-artifact
+   benchmark (Run 32, 6-tip Mach plane at P33, 800 G, 35 ms):**
    Across five radial annuli ``[1.5, 7.0) cm`` about the fitted flow center,
    computes simultaneous ``<dn/n * dM_r>``, ``<dM_r * dM_theta>`` (including a
    4-quadrant check on ``[2.5, 4.5) cm`` ruling out Cartesian cross-talk), the
    direct ``Isat_0`` radial phase spiral ``m * dPhi/dr`` (proving
    ``<dM_r * dM_theta> > 0`` has the opposite sign to finite-probe-size
-   ``grad(n)`` contamination), and cylindrical shear-flow energy production
-   ``P_shear = -<dM_r * dM_theta> * r * d(M_theta / r) / dr``.
+   ``grad(n)`` contamination and is 10–12x larger on the outer shear layer),
+   cylindrical shear-flow energy production
+   ``P_shear = -<dM_r * dM_theta> * r * d(M_theta / r) / dr``, AND an explicit
+   benchmark of the finite-tip ``grad(n)`` artifact
+   ``-(d / 2 K) * d<(dn/n)^2>/dr`` against measured ``<dn/n * dM_r>`` (which
+   shows raw Mach-probe radial flux is gradient-confounded at ``1–10x``).
 
 Note: No run in Jun-2026 carries a simultaneous floating-potential ``Vf``
 channel alongside fixed-bias ``Isat``; turbulent particle flux and Reynolds
@@ -50,12 +59,15 @@ from scipy import signal
 
 from data_analysis.io import open_lapd, parse_shunts, position_shots
 from data_analysis.plasma.flow import find_flow_centre, polar_components
-from data_analysis.plasma.mach import mach_single
+from data_analysis.plasma.mach import K_HUTCHINSON, mach_single
 from data_analysis.signal import (
+    amplitude_normalized_cross_phase,
     clip_time_window,
+    detect_onset_time,
     fit_broadband_spectrum,
     fluctuation_moments,
     reynolds_shear_production,
+    sliding_detrended_rms,
 )
 from data_analysis.utils import merge_save_npz
 
@@ -277,21 +289,16 @@ def analyze_radial_moments(data_dir=DATA_DIR, *, x_center_cm=DEFAULT_X_CENTER_CM
 
 
 # ============================================================================
-# 3. Linear-growth vs. saturated cross-phase (Isat vs Port-35 discs)
+# 3. Per-shot amplitude-normalized growth -> early-sat -> late-sat cross-phase
 # ============================================================================
-def _aligned_window_csd(t_a_s, sig_a, t_b_s, sig_b, t_lo_ms, t_hi_ms, f_target_hz,
-                        *, target_fs_hz=TARGET_FS_TRANSPORT_HZ):
-    """Anti-aliased block-mean resample + Welch coherence, cross-phase & local peak freq."""
-    if t_hi_ms - t_lo_ms < 0.25:
-        return np.nan, np.nan, np.nan
+def _resample_pair_common_grid(t_a_s, sig_a, t_b_s, sig_b, t_lo_ms=0.0, t_hi_ms=4.9,
+                               *, target_fs_hz=TARGET_FS_TRANSPORT_HZ):
+    """Block-mean downsample two channels onto a common uniform time grid [s]."""
     pad = 0.05
     ia0, ia1 = clip_time_window(t_a_s, t_lo_ms - pad, t_hi_ms + pad)
     ib0, ib1 = clip_time_window(t_b_s, t_lo_ms - pad, t_hi_ms + pad)
     ta_seg = t_a_s[ia0:ia1]
     tb_seg = t_b_s[ib0:ib1]
-    if ta_seg.size < 4 or tb_seg.size < 4:
-        return np.nan, np.nan, np.nan
-
     step_a = max(1, int(round((1.0 / target_fs_hz) / float(ta_seg[1] - ta_seg[0]))))
     step_b = max(1, int(round((1.0 / target_fs_hz) / float(tb_seg[1] - tb_seg[0]))))
     ta_ds = _blockmean_1d(ta_seg, step_a)
@@ -300,39 +307,71 @@ def _aligned_window_csd(t_a_s, sig_a, t_b_s, sig_b, t_lo_ms, t_hi_ms, f_target_h
     sa_ds = _blockmean_2d(np.asarray(sig_a[:nsh, ia0:ia1], dtype=float), step_a)
     sb_ds = _blockmean_2d(np.asarray(sig_b[:nsh, ib0:ib1], dtype=float), step_b)
 
-    dt_out = 1.0 / float(target_fs_hz)
-    t_grid = np.arange(t_lo_ms * 1e-3, t_hi_ms * 1e-3, dt_out)
-    if t_grid.size < 16:
-        return np.nan, np.nan, np.nan
-
+    t_grid = np.arange(t_lo_ms * 1e-3, t_hi_ms * 1e-3, 1.0 / float(target_fs_hz))
     a_arr = np.empty((nsh, t_grid.size), dtype=float)
     b_arr = np.empty((nsh, t_grid.size), dtype=float)
     for k in range(nsh):
         a_arr[k] = np.interp(t_grid, ta_ds, sa_ds[k])
         b_arr[k] = np.interp(t_grid, tb_ds, sb_ds[k])
-    a_arr -= np.mean(a_arr, axis=1, keepdims=True)
-    b_arr -= np.mean(b_arr, axis=1, keepdims=True)
+    return t_grid, a_arr, b_arr
 
-    nper = min(128, t_grid.size)
-    ff, paa = signal.welch(a_arr, fs=target_fs_hz, nperseg=nper, axis=1)
-    _, pbb = signal.welch(b_arr, fs=target_fs_hz, nperseg=nper, axis=1)
-    _, pab = signal.csd(a_arr, b_arr, fs=target_fs_hz, nperseg=nper, axis=1)
-    Paa, Pbb, Pab = np.mean(paa, axis=0), np.mean(pbb, axis=0), np.mean(pab, axis=0)
 
-    # Pick local peak within +-1.5 kHz of f_target_hz so small frequency chirps don't miss the mode
-    m_loc = (ff >= max(1500.0, f_target_hz - 1500.0)) & (ff <= f_target_hz + 1500.0)
-    if not np.any(m_loc):
-        return np.nan, np.nan, np.nan
-    idx_loc = np.flatnonzero(m_loc)
-    kf = int(idx_loc[int(np.argmax(Paa[idx_loc]))])
-    coh = float(np.abs(Pab[kf]) ** 2 / max(float(Paa[kf] * Pbb[kf]), 1e-30))
-    phi_deg = float(np.degrees(np.angle(Pab[kf])))
-    return coh, phi_deg, float(ff[kf])
+def _per_shot_ramp_masks(t_grid_s, isat_arr):
+    """Detect per-shot onset ``t_on_k`` and 50%-of-peak ramp end ``t_50_k`` -> boolean masks.
+
+    Returns ``(mask_grow, mask_early, mask_late, t_on_ms, ramp_dur_ms)`` where:
+    - ``mask_grow`` covers ``[t_on_k - 0.10, t_50_k] ms`` (strictly rising ramp
+      before 50% of peak envelope, clamped to ``[0.15, 0.45] ms`` after ``t_on_k``),
+    - ``mask_early`` covers ``[t_50_k + 0.10, min(4.8, t_50_k + 0.80)] ms``,
+    - ``mask_late`` covers ``[max(t_on_k + 1.0, 3.0), 4.8] ms``.
+    """
+    nsh, nt = isat_arr.shape
+    t_ms = t_grid_s * 1e3
+    m_grow = np.zeros((nsh, nt), dtype=bool)
+    m_early = np.zeros((nsh, nt), dtype=bool)
+    m_late = np.zeros((nsh, nt), dtype=bool)
+    t_ons = np.full(nsh, np.nan, dtype=float)
+    ramp_durs = np.full(nsh, np.nan, dtype=float)
+
+    t_env, env = sliding_detrended_rms(isat_arr, t_grid_s, win_s=jon.WIN_S, step_s=jon.STEP_S)
+    t_env_ms = t_env * 1e3
+    t_on_s = detect_onset_time(
+        t_env, env, threshold=jon.ONSET_THRESH,
+        t_min=jon.T_MIN_ONSET_MS * 1e-3, sustain=jon.SUSTAIN_BINS,
+    )
+    for k in range(nsh):
+        if not np.isfinite(t_on_s[k]):
+            continue
+        ton_ms = float(t_on_s[k]) * 1e3
+        t_ons[k] = ton_ms
+        # Find 50% of post-onset peak envelope on this shot
+        m_after = (t_env_ms >= ton_ms) & (t_env_ms <= 4.8) & np.isfinite(env[k])
+        if not np.any(m_after):
+            continue
+        env_pk = float(np.max(env[k, m_after]))
+        idx_a = np.flatnonzero(m_after)
+        hit50 = idx_a[env[k, idx_a] >= 0.5 * env_pk]
+        t50_raw = float(t_env_ms[hit50[0]]) if hit50.size else (ton_ms + 0.25)
+        # Keep ramp strictly inside [ton + 0.15, ton + 0.45] ms so it has >= 0.25 ms (~1 cycle)
+        # while staying on the rising edge rather than saturating.
+        t50_ms = float(np.clip(t50_raw, ton_ms + 0.15, min(4.7, ton_ms + 0.45)))
+        ramp_durs[k] = t50_ms - ton_ms
+
+        m_grow[k] = (t_ms >= max(0.2, ton_ms - 0.10)) & (t_ms <= t50_ms)
+        early_lo = t50_ms + 0.10
+        early_hi = min(4.8, t50_ms + 0.80)
+        if early_hi - early_lo >= 0.20:
+            m_early[k] = (t_ms >= early_lo) & (t_ms <= early_hi)
+        late_lo = max(ton_ms + 1.0, 3.0)
+        if 4.8 - late_lo >= 0.30:
+            m_late[k] = (t_ms >= late_lo) & (t_ms <= 4.8)
+
+    return m_grow, m_early, m_late, t_ons, ramp_durs
 
 
 def analyze_growth_vs_sat_crossphase(data_dir=DATA_DIR, *, max_shots=60,
                                      biasscope_offset_ms=jmo.BIASSCOPE_OFFSET_MS):
-    """Compare ``Isat(P33)`` vs. Port-35 disc currents/voltage across growth -> saturation."""
+    """Per-shot amplitude-normalized ``Isat`` vs. Port-35 cross-phase: linear ramp -> early sat -> late sat."""
     on = np.load(os.path.join(data_dir, jon.OUT_NAME), allow_pickle=True)
     out = {}
 
@@ -341,6 +380,7 @@ def analyze_growth_vs_sat_crossphase(data_dir=DATA_DIR, *, max_shots=60,
         run = open_lapd(ifn)
         t_on = float(on[f"{rnum}__t_onset_med_ms"])
         f0 = float(on[f"{rnum}__f_peak_hz"])
+        f_band = (max(1500.0, f0 - 1500.0), f0 + 1500.0)
         tm_s = _time_seconds(run.time_array(scope_name="machscope"))
         tb_rel_s = _time_seconds(run.time_array(scope_name="biasscope")) - float(biasscope_offset_ms) * 1e-3
 
@@ -353,32 +393,40 @@ def analyze_growth_vs_sat_crossphase(data_dir=DATA_DIR, *, max_shots=60,
         i4_raw, _ = run.channel("C2", scope_name="biasscope", shots=sh)
         v2_raw, _ = run.channel("C4", scope_name="biasscope", shots=sh)
 
-        w_grow = (max(0.3, t_on - 0.05), min(4.8, t_on + 0.75))
-        w_sat = (max(t_on + 1.0, 3.0), 4.8) if t_on < 3.6 else (np.nan, np.nan)
+        t_grid, isat_g, i2_g = _resample_pair_common_grid(tm_s, isat_raw, tb_rel_s, i2_raw)
+        _, _, i4_g = _resample_pair_common_grid(tm_s, isat_raw, tb_rel_s, i4_raw)
+        _, _, v2_g = _resample_pair_common_grid(tm_s, isat_raw, tb_rel_s, v2_raw)
+
+        m_grow, m_early, m_late, t_ons, ramp_durs = _per_shot_ramp_masks(t_grid, isat_g)
+        n_unstable = int(np.sum(np.isfinite(t_ons)))
+        ramp_med = float(np.nanmedian(ramp_durs)) if np.any(np.isfinite(ramp_durs)) else np.nan
 
         pairs = (
-            ("isat_i2", tm_s, isat_raw, tb_rel_s, i2_raw),
-            ("isat_i4", tm_s, isat_raw, tb_rel_s, i4_raw),
-            ("isat_v2", tm_s, isat_raw, tb_rel_s, v2_raw),
-            ("i2_i4", tb_rel_s, i2_raw, tb_rel_s, i4_raw),  # same-scope control!
+            ("isat_i2", isat_g, i2_g),
+            ("isat_i4", isat_g, i4_g),
+            ("isat_v2", isat_g, v2_g),
+            ("i2_i4", i2_g, i4_g),  # same-scope control!
         )
-        for tag, ta, sa, tb, sb in pairs:
-            cg, pg, fg = _aligned_window_csd(ta, sa, tb, sb, *w_grow, f0)
-            if np.all(np.isfinite(w_sat)):
-                cs, ps, fs_pk = _aligned_window_csd(ta, sa, tb, sb, *w_sat, f0)
-            else:
-                cs, ps, fs_pk = np.nan, np.nan, np.nan
-            shift = _wrap_deg(ps - pg) if (np.isfinite(ps) and np.isfinite(pg)) else np.nan
+        for tag, sa, sb in pairs:
+            plv_g, phi_g, _ = amplitude_normalized_cross_phase(sa, sb, TARGET_FS_TRANSPORT_HZ, f_band, mask=m_grow)
+            plv_e, phi_e, _ = amplitude_normalized_cross_phase(sa, sb, TARGET_FS_TRANSPORT_HZ, f_band, mask=m_early)
+            plv_s, phi_s, _ = amplitude_normalized_cross_phase(sa, sb, TARGET_FS_TRANSPORT_HZ, f_band, mask=m_late)
+
+            shift_gs = _wrap_deg(phi_s - phi_g) if (np.isfinite(phi_s) and np.isfinite(phi_g)) else np.nan
+            shift_es = _wrap_deg(phi_s - phi_e) if (np.isfinite(phi_s) and np.isfinite(phi_e)) else np.nan
             p = f"xph_{rnum}_{tag}__"
             out[p + "gas_puff_ms"] = float(puff)
             out[p + "t_onset_med_ms"] = t_on
-            out[p + "coh_grow"] = cg
-            out[p + "phi_grow_deg"] = pg
-            out[p + "f_grow_hz"] = fg
-            out[p + "coh_sat"] = cs
-            out[p + "phi_sat_deg"] = ps
-            out[p + "f_sat_hz"] = fs_pk
-            out[p + "phi_shift_deg"] = shift
+            out[p + "n_unstable_shots"] = n_unstable
+            out[p + "ramp_dur_med_ms"] = ramp_med
+            out[p + "plv_grow"] = plv_g
+            out[p + "phi_grow_deg"] = phi_g
+            out[p + "plv_early_sat"] = plv_e
+            out[p + "phi_early_sat_deg"] = phi_e
+            out[p + "plv_sat"] = plv_s
+            out[p + "phi_sat_deg"] = phi_s
+            out[p + "phi_shift_grow_to_sat_deg"] = shift_gs
+            out[p + "phi_shift_early_to_sat_deg"] = shift_es
     return out
 
 
@@ -600,6 +648,19 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
     # Cylindrical shear-flow energy transfer P_shear = -<dM_r dM_theta> * r*d(M_theta/r)/dr
     prod = reynolds_shear_production(r_mids, rs_f0_band, mth_band)
 
+    # Finite-probe-size grad(n) artifact benchmark for typical Mach tip separations d = 0.3, 0.5 cm.
+    # Under mach.py's convention M = -(K_H / 2) * ln(I_+ / (kappa I_-)) with K_H = 0.45:
+    #   dM_grad,r = -(K_H / 2) * d * d(dn/n)/dr
+    #   <dn/n * dM_grad,r>   = -(K_H / 4) * d * d<(dn/n)^2>/dr
+    #   <dM_grad,r * dM_g,t> = +(K_H * d / 2)^2 * (m * dPhi/dr / r) * <(dn/n)^2>
+    dn2 = dn_band ** 2
+    ddn2_dr = np.gradient(dn2, r_mids)
+    flux_grad_d0p3 = -(K_HUTCHINSON / 4.0) * 0.3 * ddn2_dr
+    flux_grad_d0p5 = -(K_HUTCHINSON / 4.0) * 0.5 * ddn2_dr
+    rs_grad_d0p3 = ((K_HUTCHINSON * 0.3 / 2.0) ** 2) * (m_times_dphi_dr / r_mids) * dn2
+    rs_grad_d0p5 = ((K_HUTCHINSON * 0.5 / 2.0) ** 2) * (m_times_dphi_dr / r_mids) * dn2
+    flux_confounded = bool(np.any(np.abs(flux_grad_d0p3) >= 0.5 * np.abs(flux_f0_band)))
+
     # 4-quadrant wall audit on [2.5, 4.5) cm
     q_th = np.array(quad_th_deg, dtype=float)
     q_crt = np.array(quad_crt, dtype=float)
@@ -629,9 +690,14 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
         "r32__mt_rms": mt_band,
         "r32__flux_nr_f0": flux_f0_band,
         "r32__flux_nr_bb": flux_bb_band,
+        "r32__flux_grad_art_d0p3": flux_grad_d0p3,
+        "r32__flux_grad_art_d0p5": flux_grad_d0p5,
+        "r32__flux_grad_confounded": flux_confounded,
         "r32__c_nr_med": c_nr_band,
         "r32__rs_rt_f0": rs_f0_band,
         "r32__rs_rt_bb": rs_bb_band,
+        "r32__rs_grad_art_d0p3": rs_grad_d0p3,
+        "r32__rs_grad_art_d0p5": rs_grad_d0p5,
         "r32__c_rt_med": c_rt_band,
         "r32__p_shear_local": prod.p_shear_local,
         "r32__p_shear_integrated": prod.p_shear_integrated,
@@ -697,33 +763,39 @@ def print_summary(res):
             parts.append(f"{z}: S={res[pz+'skewness_med']:+.2f}, K={res[pz+'excess_kurtosis_med']:+.2f}")
         print(f"  Run {rnum} ({puff:.0f}ms): " + " | ".join(parts))
 
-    print("\n=== 3. Linear-Growth -> Saturated Cross-Phase Evolution (Runs 01-04) ===")
+    print("\n=== 3. Per-Shot Amplitude-Normalized Cross-Phase: Linear Ramp -> Early Sat -> Late Sat (Runs 01-04) ===")
     for rnum, puff in CROSSPHASE_RUNS:
-        print(f"  Run {rnum} ({puff:.0f}ms):")
+        p0 = f"xph_{rnum}_isat_i2__"
+        print(
+            f"  Run {rnum} ({puff:.0f}ms, n_unst={int(res[p0+'n_unstable_shots'])}, "
+            f"ramp_med={res[p0+'ramp_dur_med_ms']:.2f}ms):"
+        )
         for tag in ("isat_i2", "isat_i4", "isat_v2", "i2_i4"):
             p = f"xph_{rnum}_{tag}__"
             print(
-                f"    {tag:7s}: grow(coh={res[p+'coh_grow']:.2f}, phi={res[p+'phi_grow_deg']:+6.1f}d, f={res[p+'f_grow_hz']*1e-3:.2f}k) -> "
-                f"sat(coh={res[p+'coh_sat']:.2f}, phi={res[p+'phi_sat_deg']:+6.1f}d, f={res[p+'f_sat_hz']*1e-3:.2f}k) | "
-                f"shift={res[p+'phi_shift_deg']:+5.1f}d"
+                f"    {tag:7s}: grow(PLV={res[p+'plv_grow']:.2f}, phi={res[p+'phi_grow_deg']:+6.1f}d) -> "
+                f"early(PLV={res[p+'plv_early_sat']:.2f}, phi={res[p+'phi_early_sat_deg']:+6.1f}d) -> "
+                f"sat(PLV={res[p+'plv_sat']:.2f}, phi={res[p+'phi_sat_deg']:+6.1f}d) | "
+                f"dphi(g->s)={res[p+'phi_shift_grow_to_sat_deg']:+5.1f}d, dphi(e->s)={res[p+'phi_shift_early_to_sat_deg']:+5.1f}d"
             )
 
-    print("\n=== 4. Run 32 Direct Radial Particle Flux, Reynolds Stress & Shear Production ===")
+    print("\n=== 4. Run 32 Reynolds Stress, Shear Production & Finite-Tip Flux-Artifact Benchmark ===")
     c32 = res["r32__center_xy_cm"]
     print(
         f"  Flow center=({c32[0]:+.2f},{c32[1]:+.2f}) cm (ratio={res['r32__center_ratio']:.2f}) | "
         f"Spiral dPhi/dr={res['r32__dphi_dr_rad_cm']:+.2f} rad/cm -> m*dPhi/dr={res['r32__m_times_dphi_dr_rad_cm']:+.2f} rad/cm\n"
         f"  Wall [2.5,4.5) cm 4-quadrant c_rt medians: {np.round(res['r32__wall_quad_c_rt_med'], 2)} | "
-        f"Integrated P_shear = {res['r32__p_shear_integrated']:+.3e} (negative => wave feeds mean flow)"
+        f"Integrated P_shear = {res['r32__p_shear_integrated']:+.3e} (negative => wave feeds mean flow) | "
+        f"flux_grad_confounded={bool(res['r32__flux_grad_confounded'])}"
     )
     bands = res["r32__band_edges_cm"]
     for i in range(len(bands)):
         print(
             f"  [{bands[i,0]:.1f},{bands[i,1]:.1f}) cm (n={int(res['r32__n_pos'][i]):2d}): "
-            f"dn={res['r32__dn_rms'][i]*100:4.1f}% | <dn*dMr>={res['r32__flux_nr_f0'][i]:+.2e} (c={res['r32__c_nr_med'][i]:+.2f}) | "
-            f"<dMr*dMt>={res['r32__rs_rt_f0'][i]:+.2e} (c={res['r32__c_rt_med'][i]:+.2f}) | "
-            f"shear={res['r32__shear_per_cm'][i]:+.4f} -> P_sh={res['r32__p_shear_local'][i]:+.2e} | "
-            f"Phi={res['r32__phi_spiral_deg'][i]:+6.1f}d"
+            f"dn={res['r32__dn_rms'][i]*100:4.1f}% | <dn*dMr>={res['r32__flux_nr_f0'][i]:+.2e} "
+            f"(grad_art@0.3cm={res['r32__flux_grad_art_d0p3'][i]:+.2e}) | "
+            f"<dMr*dMt>={res['r32__rs_rt_f0'][i]:+.2e} (art={res['r32__rs_grad_art_d0p3'][i]:+.2e}, c={res['r32__c_rt_med'][i]:+.2f}) | "
+            f"shear={res['r32__shear_per_cm'][i]:+.4f} -> P_sh={res['r32__p_shear_local'][i]:+.2e}"
         )
 
 

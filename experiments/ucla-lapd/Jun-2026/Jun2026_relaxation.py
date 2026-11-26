@@ -571,9 +571,14 @@ def _local_orbit_displacement(r_grid, prof_grid, r_samples, rms_samples, *, min_
     Divides each sample's relative RMS by the *local* radial log-gradient at
     that exact radius rather than a band-averaged slope, eliminating radial
     bias across curved hollow walls. Returns an upper-bound displacement array
-    (``NaN`` where the local gradient is below ``min_grad_cm`` or inputs are
-    non-finite), because non-rigid density perturbations, harmonics, and noise
-    can only inflate ``rms_samples``.
+    in the small-to-moderate wobble regime (``delta_r << r``), because
+    non-rigid density perturbations, harmonics, and noise can only inflate
+    ``rms_samples``. Note: once ``delta_r`` approaches ``r`` (e.g.
+    ``delta_r = 1.5 cm`` at ``r = 2 cm``), first-order Taylor linearization
+    underestimates ``delta_r``, so it is no longer a strict upper bound near
+    the core (on Run 26, measured ``delta_r ~ 0.7 cm << r = 2-4.5 cm`` stays
+    well inside the linear regime). Returns ``NaN`` where the local gradient is
+    below ``min_grad_cm`` or inputs are non-finite.
     """
     rg = np.asarray(r_grid, dtype=float)
     pg = np.asarray(prof_grid, dtype=float)

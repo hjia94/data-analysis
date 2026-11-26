@@ -18,7 +18,10 @@ Provides:
 from typing import NamedTuple
 
 import numpy as np
-from scipy import stats
+from scipy import signal, stats
+
+# np.trapz was renamed np.trapezoid in numpy 2.0; fall back for numpy < 2.0.
+trapezoid = getattr(np, "trapezoid", None) or np.trapz
 
 
 class SpectrumModelFit(NamedTuple):
@@ -74,8 +77,10 @@ def fit_broadband_spectrum(
     Args:
         freqs_hz: 1-D frequency axis [Hz].
         psd: 1-D power spectral density (same length as ``freqs_hz``).
-        bg_psd: Optional background/pre-bias PSD on the same grid; when given,
-            only bins with ``psd > snr_min * bg_psd`` enter the continuum fit.
+        bg_psd: Optional reference/background PSD on the same grid (e.g.
+            pre-bias ambient plasma turbulence, not necessarily instrument dark
+            noise); when given, only bins with ``psd > snr_min * bg_psd`` enter
+            the continuum fit.
         total_band_hz: ``(f_lo, f_hi)`` [Hz] used for ``coh_harmonic_frac``.
         f_min_hz, f_max_hz: Continuum fit bounds [Hz]. When ``harmonic_f0_hz``
             is finite, the lower bound is raised to at least
@@ -291,7 +296,7 @@ def reynolds_shear_production(r_cm, reynolds_stress, mean_v_theta):
     shear = r * domega_dr
     p_local = -rs * shear
     ok = np.isfinite(p_local)
-    p_int = float(np.trapezoid(p_local[ok] * r[ok], r[ok])) if int(np.sum(ok)) >= 2 else np.nan
+    p_int = float(trapezoid(p_local[ok] * r[ok], r[ok])) if int(np.sum(ok)) >= 2 else np.nan
     return ReynoldsProduction(
         r_cm=r,
         omega_per_cm=omega,
@@ -299,3 +304,115 @@ def reynolds_shear_production(r_cm, reynolds_stress, mean_v_theta):
         p_shear_local=p_local,
         p_shear_integrated=p_int,
     )
+
+
+def amplitude_normalized_cross_phase(
+    sig_a,
+    sig_b,
+    fs_hz,
+    f_band_hz,
+    *,
+    mask=None,
+    min_amp_frac=0.05,
+    filter_order=2,
+):
+    """Amplitude-normalized cross-phase and phase-locking value (PLV) in a frequency band.
+
+    Unlike standard Welch CSD (which weights every time sample by ``|A(t)|^2``
+    and is therefore dominated by the saturated end of a growing ramp), this
+    truncates each shot at its last masked sample and applies an identical
+    causal Butterworth bandpass (``sosfilt``) to both channels before forming
+    the unit-phasor average of the analytic signals::
+
+        Z_unit = mean( conj(z_a(t)) * z_b(t) / (|z_a(t)| * |z_b(t)|) )
+
+    Because both channels share the identical causal filter phase response
+    (which cancels in ``conj(z_a) * z_b``) and the trace is truncated at the
+    end of ``mask``, future saturated power can never leak backward into an
+    earlier weak linear-growth ramp. The sign convention
+    ``angle(conj(z_a) * z_b)`` matches ``scipy.signal.csd(sig_a, sig_b)``
+    (``phi_b - phi_a``).
+
+    Args:
+        sig_a, sig_b: Matching 1-D ``(nt,)`` or 2-D ``(nshot, nt)`` signals.
+        fs_hz: Sampling rate [Hz].
+        f_band_hz: ``(f_lo, f_hi)`` bandpass corners [Hz] (must satisfy
+            ``0 < f_lo < f_hi < fs_hz / 2``).
+        mask: Optional boolean array of shape ``(nt,)`` or ``(nshot, nt)``
+            selecting samples to include (e.g. a per-shot linear growth ramp).
+        min_amp_frac: Exclude samples where ``|z_a| < min_amp_frac * peak_a``
+            or ``|z_b| < min_amp_frac * peak_b`` inside the masked region so
+            near-zero noise does not dilute phase locking.
+        filter_order: Causal Butterworth bandpass order (applied identically
+            to both channels via ``sosfilt``).
+
+    Returns:
+        ``(plv, phi_deg, n_samples)`` where ``plv = |Z_unit| in [0, 1]`` and
+        ``phi_deg = degrees(angle(Z_unit))`` in ``(-180, 180]``. Returns
+        ``(NaN, NaN, 0)`` if no valid samples survive masking.
+    """
+    a = np.asarray(sig_a, dtype=float)
+    b = np.asarray(sig_b, dtype=float)
+    if a.shape != b.shape or a.ndim not in (1, 2):
+        raise ValueError(f"sig_a and sig_b must have matching 1-D or 2-D shapes, got {a.shape} vs {b.shape}")
+    if a.ndim == 1:
+        a = a[None, :]
+        b = b[None, :]
+    nshot, nt = a.shape
+    if nt < 16:
+        return np.nan, np.nan, 0
+
+    sos = signal.butter(int(filter_order), [float(f_band_hz[0]), float(f_band_hz[1])],
+                        btype="bandpass", fs=float(fs_hz), output="sos")
+    fin = np.isfinite(a) & np.isfinite(b)
+
+    if mask is None:
+        sel = fin.copy()
+    else:
+        m = np.asarray(mask, dtype=bool)
+        if m.ndim == 1 and m.size == nt:
+            sel = fin & m[None, :]
+        elif m.shape == (nshot, nt):
+            sel = fin & m
+        else:
+            raise ValueError(f"mask shape {m.shape} incompatible with signal shape {(nshot, nt)}")
+
+    unit_phasors = []
+    for k in range(nshot):
+        mk = sel[k]
+        idx_k = np.flatnonzero(mk)
+        if idx_k.size == 0:
+            continue
+        # Truncate strictly at the last masked sample so no future saturated samples enter
+        # either the bandpass filter or the Hilbert transform.
+        end_k = int(idx_k[-1]) + 1
+        if end_k < 16:
+            continue
+        fk = fin[k, :end_k]
+        ak = a[k, :end_k]
+        bk = b[k, :end_k]
+        ak0 = np.where(fk, ak - float(np.mean(ak[fk])), 0.0)
+        bk0 = np.where(fk, bk - float(np.mean(bk[fk])), 0.0)
+        af = signal.sosfilt(sos, ak0)
+        bf = signal.sosfilt(sos, bk0)
+        za = signal.hilbert(af)
+        zb = signal.hilbert(bf)
+        aa = np.abs(za)
+        ab = np.abs(zb)
+
+        mk_sub = mk[:end_k]
+        pa = float(np.max(aa[mk_sub]))
+        pb = float(np.max(ab[mk_sub]))
+        if pa <= 0.0 or pb <= 0.0:
+            continue
+        keep = mk_sub & (aa >= float(min_amp_frac) * pa) & (ab >= float(min_amp_frac) * pb)
+        if not np.any(keep):
+            continue
+        z_k = (np.conj(za[keep]) * zb[keep]) / (aa[keep] * ab[keep])
+        unit_phasors.append(z_k)
+
+    if not unit_phasors:
+        return np.nan, np.nan, 0
+    all_z = np.concatenate(unit_phasors)
+    z_mean = complex(np.mean(all_z))
+    return float(abs(z_mean)), float(np.degrees(np.angle(z_mean))), int(all_z.size)

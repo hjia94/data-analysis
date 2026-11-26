@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(WS, "src"))
 sys.path.insert(0, os.path.join(WS, "experiments", "ucla-lapd", "Jun-2026"))
 
 from data_analysis.signal import (
+    amplitude_normalized_cross_phase,
     fit_broadband_spectrum,
     fluctuation_moments,
     reynolds_shear_production,
@@ -106,6 +107,30 @@ class TestTurbulenceHelpers(unittest.TestCase):
         self.assertAlmostEqual(rec["c_nr"], 0.0, delta=0.05)
         self.assertAlmostEqual(rec["c_rt"], +1.0, delta=0.05)
         self.assertGreater(rec["rs_f0"], 0.0)
+
+    def test_amplitude_normalized_cross_phase_separates_growth_from_saturation(self):
+        # Exact synthetic test: exponential ramp (gamma = 10 ms^-1) with 0 deg cross-phase during
+        # growth (t < 1.5 ms) and +60 deg cross-phase in saturation (t >= 1.8 ms).
+        fs = 100e3
+        t_s = np.arange(0, 450) / fs  # 0..4.5 ms
+        t_ms = t_s * 1e3
+        w = 2.0 * np.pi * 4000.0
+        amp = np.minimum(0.01 * np.exp(10.0 * (t_ms - 1.0)), 1.0)
+        # Smooth phase switch from 0 deg on [1.0, 1.45] ms to +60 deg for t >= 1.8 ms
+        phi_rad = np.where(t_ms < 1.50, 0.0, np.where(t_ms >= 1.80, np.radians(60.0),
+                           np.radians(60.0) * (t_ms - 1.50) / 0.30))
+        sig_a = np.tile(amp * np.cos(w * t_s), (4, 1))
+        sig_b = np.tile(amp * np.cos(w * t_s + phi_rad), (4, 1))
+
+        m_grow = (t_ms >= 1.05) & (t_ms <= 1.45)
+        m_sat = (t_ms >= 2.20) & (t_ms <= 4.00)
+        plv_g, phi_g, _ = amplitude_normalized_cross_phase(sig_a, sig_b, fs, (2500.0, 5500.0), mask=m_grow)
+        plv_s, phi_s, _ = amplitude_normalized_cross_phase(sig_a, sig_b, fs, (2500.0, 5500.0), mask=m_sat)
+
+        self.assertGreater(plv_g, 0.98)
+        self.assertGreater(plv_s, 0.98)
+        self.assertAlmostEqual(phi_g, 0.0, delta=3.0)
+        self.assertAlmostEqual(phi_s, +60.0, delta=3.0)
 
     def test_batch_all_respects_overwrite_false(self):
         with tempfile.TemporaryDirectory() as tmp:
