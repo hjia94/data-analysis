@@ -52,11 +52,28 @@ class TestSpindownAndPedersen(unittest.TestCase):
             np.sqrt(1.4e19 / 5e18),
             places=6,
         )
-        # Simon-Hoh magnetization ratio nu_in / Omega_ci << 1
-        self.assertLess(cold["nu_in_over_omega_ci"], 2e-3)
-        # Poulos current-penetration length shrinks dramatically in cold collisional plasma
-        self.assertGreater(hot["l_pen_poulos_m"], 25.0)
-        self.assertLess(cold["l_pen_poulos_m"], 10.0)
+        # Ion-neutral Pedersen conductivity falls well short of sigma_p_req in both regimes
+        self.assertLess(hot["sigma_p_in_over_req"], 0.05)
+        self.assertLess(cold["sigma_p_in_over_req"], 0.25)
+        # Parallel shorting beats ion-neutral Pedersen in both regimes
+        self.assertLess(hot["pedersen_to_parallel"], 0.02)
+        self.assertLess(cold["pedersen_to_parallel"], 0.5)
+        # Missing i_tot_a stays NaN (no silent default)
+        nan_i = pedersen_closure_diagnostics(
+            i_tot_a=np.nan, er_v_m=85.0, ne_m3=1.4e19, te_ev=0.6, b0_t=0.08, nu_in_s=2000.0,
+        )
+        self.assertTrue(np.isnan(nan_i["sigma_p_req_s_m"]))
+        self.assertTrue(np.isnan(nan_i["sigma_p_in_over_req"]))
+
+    def test_excursion_peak_finder_handles_both_signs(self):
+        t = np.linspace(5.1, 6.0, 19)
+        base = 0.02
+        y_pos = base + 0.05 * np.exp(-((t - 5.25) / 0.1) ** 2)
+        y_neg = base - 0.05 * np.exp(-((t - 5.30) / 0.1) ** 2)
+        kp = jsd._find_excursion_peak(t, y_pos, base, 5.15, 5.70)
+        kn = jsd._find_excursion_peak(t, y_neg, base, 5.15, 5.70)
+        self.assertAlmostEqual(t[kp], 5.25, places=6)
+        self.assertAlmostEqual(t[kn], 5.30, places=6)
 
     def test_jun2026_spindown_batch_all_respects_overwrite_false(self):
         with tempfile.TemporaryDirectory() as tmp:

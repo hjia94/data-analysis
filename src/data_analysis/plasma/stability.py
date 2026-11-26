@@ -403,23 +403,30 @@ def pedersen_closure_diagnostics(i_tot_a: float, er_v_m: float, ne_m3: float,
                                  l_par_m: float = 14.0,
                                  nu_in_s: float | None = None,
                                  mu: float = 4.0, Z: int = 1) -> dict:
-    """Evaluate Alfvén transit time, Poulos (2019) Pedersen closure, and Simon-Hoh ratio.
+    """Evaluate Alfvén transit time, Poulos (2019) Pedersen closure, and parallel-shorting ratio.
 
-    Given total bias-plate current ``i_tot_a`` [A], radial electric field
-    ``er_v_m`` [V/m], wall density ``ne_m3`` [m^-3], electron temperature
-    ``te_ev`` [eV], and guide field ``b0_t`` [T]:
+    Given total bias-plate current ``i_tot_a`` [A] (may be ``NaN`` if unknown),
+    radial electric field ``er_v_m`` [V/m], wall density ``ne_m3`` [m^-3],
+    electron temperature ``te_ev`` [eV], and guide field ``b0_t`` [T]:
 
     - ``v_alfven_m_s`` and ``tau_alfven_s = l_par_m / v_alfven_m_s``
     - ``omega_ci_rad_s = Z * e * B_0 / m_i``
     - Required uniform radial Pedersen conductivity ``sigma_p_req_s_m = J_r / E_r``
-      (with ``J_r = I_tot / (2 * pi * r_wall * L_par)``) and equivalent collision
+      (with ``J_r = |I_tot| / (2 * pi * r_wall * L_par)``) and equivalent collision
       rate ``nu_in_ped_req_s = sigma_p_req * B_0^2 / (n_e * m_i)``
     - Spitzer parallel conductivity ``sigma_par_s_m = 1 / eta_par``
-    - When ``nu_in_s`` (e.g., upper bound from post-bias Mach relaxation) is given:
-      ``nu_in_over_omega_ci`` (Simon-Hoh magnetization ratio), classical
-      ion-neutral Pedersen conductivity ``sigma_p_in_s_m = (n_e * m_i / B_0^2) * nu_in_s``,
-      and Poulos (2019) axial current-penetration length
-      ``l_pen_poulos_m = r_wall_m * sqrt(sigma_par / sigma_p_in)``.
+    - When ``nu_in_s`` is finite and positive:
+      ``nu_in_over_omega_ci``, classical ion-neutral Pedersen conductivity
+      ``sigma_p_in_s_m = (n_e * m_i / B_0^2) * nu_in_s``, current-closure
+      fraction ``sigma_p_in_over_req = sigma_p_in / sigma_p_req``, Poulos (2019)
+      penetration length ``l_pen_poulos_m = r_wall_m * sqrt(sigma_par / sigma_p_in)``,
+      and cross-field vs. parallel-shorting ratio
+      ``pedersen_to_parallel = (l_par_m / (pi * l_pen_poulos_m))^2``.
+
+    **Bound direction note:** When ``nu_in_s`` is an *upper bound* on true
+    ``nu_in``, ``sigma_p_in_s_m``, ``sigma_p_in_over_req``, ``nu_in_over_omega_ci``,
+    and ``pedersen_to_parallel`` are all *upper bounds*, while ``l_pen_poulos_m``
+    is a *lower bound*.
     """
     if ne_m3 <= 0.0 or te_ev <= 0.0 or b0_t <= 0.0 or r_wall_m <= 0.0 or l_par_m <= 0.0:
         raise ValueError("ne_m3, te_ev, b0_t, r_wall_m, and l_par_m must be strictly positive")
@@ -433,8 +440,12 @@ def pedersen_closure_diagnostics(i_tot_a: float, er_v_m: float, ne_m3: float,
     eta_par = 0.51 * M_ELECTRON * nu_ei / (float(ne_m3) * E_CHARGE ** 2)
     sigma_par = 1.0 / eta_par
 
-    j_r = abs(float(i_tot_a)) / (2.0 * np.pi * float(r_wall_m) * float(l_par_m))
-    sigma_p_req = (j_r / abs(float(er_v_m))) if abs(float(er_v_m)) > 0.0 else np.nan
+    if np.isfinite(i_tot_a):
+        j_r = abs(float(i_tot_a)) / (2.0 * np.pi * float(r_wall_m) * float(l_par_m))
+        sigma_p_req = (j_r / abs(float(er_v_m))) if (np.isfinite(er_v_m) and abs(float(er_v_m)) > 0.0) else np.nan
+    else:
+        j_r = np.nan
+        sigma_p_req = np.nan
     nu_in_ped_req = (
         sigma_p_req * (float(b0_t) ** 2) / (float(ne_m3) * mi)
         if np.isfinite(sigma_p_req) else np.nan
@@ -449,22 +460,28 @@ def pedersen_closure_diagnostics(i_tot_a: float, er_v_m: float, ne_m3: float,
         "sigma_p_req_s_m": float(sigma_p_req),
         "nu_in_ped_req_s": float(nu_in_ped_req),
     }
-    if nu_in_s is not None and float(nu_in_s) > 0.0:
+    if nu_in_s is not None and np.isfinite(nu_in_s) and float(nu_in_s) > 0.0:
         nu = float(nu_in_s)
         sigma_p_in = (float(ne_m3) * mi / (float(b0_t) ** 2)) * nu
         l_pen = float(r_wall_m) * float(np.sqrt(sigma_par / sigma_p_in))
+        frac = (sigma_p_in / sigma_p_req) if (np.isfinite(sigma_p_req) and sigma_p_req > 0.0) else np.nan
+        ped_par = (float(l_par_m) / (np.pi * l_pen)) ** 2
         out.update({
             "nu_in_s": nu,
             "nu_in_over_omega_ci": float(nu / omega_ci),
             "sigma_p_in_s_m": float(sigma_p_in),
+            "sigma_p_in_over_req": float(frac),
             "l_pen_poulos_m": float(l_pen),
+            "pedersen_to_parallel": float(ped_par),
         })
     else:
         out.update({
             "nu_in_s": np.nan,
             "nu_in_over_omega_ci": np.nan,
             "sigma_p_in_s_m": np.nan,
+            "sigma_p_in_over_req": np.nan,
             "l_pen_poulos_m": np.nan,
+            "pedersen_to_parallel": np.nan,
         })
     return out
 
