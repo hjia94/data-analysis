@@ -397,6 +397,78 @@ def biased_sheath_parameters(i_disc_a: float, area_m2: float, r_ext_ohm: float,
     }
 
 
+def pedersen_closure_diagnostics(i_tot_a: float, er_v_m: float, ne_m3: float,
+                                 te_ev: float, b0_t: float, *,
+                                 r_wall_m: float = 0.035,
+                                 l_par_m: float = 14.0,
+                                 nu_in_s: float | None = None,
+                                 mu: float = 4.0, Z: int = 1) -> dict:
+    """Evaluate Alfvén transit time, Poulos (2019) Pedersen closure, and Simon-Hoh ratio.
+
+    Given total bias-plate current ``i_tot_a`` [A], radial electric field
+    ``er_v_m`` [V/m], wall density ``ne_m3`` [m^-3], electron temperature
+    ``te_ev`` [eV], and guide field ``b0_t`` [T]:
+
+    - ``v_alfven_m_s`` and ``tau_alfven_s = l_par_m / v_alfven_m_s``
+    - ``omega_ci_rad_s = Z * e * B_0 / m_i``
+    - Required uniform radial Pedersen conductivity ``sigma_p_req_s_m = J_r / E_r``
+      (with ``J_r = I_tot / (2 * pi * r_wall * L_par)``) and equivalent collision
+      rate ``nu_in_ped_req_s = sigma_p_req * B_0^2 / (n_e * m_i)``
+    - Spitzer parallel conductivity ``sigma_par_s_m = 1 / eta_par``
+    - When ``nu_in_s`` (e.g., upper bound from post-bias Mach relaxation) is given:
+      ``nu_in_over_omega_ci`` (Simon-Hoh magnetization ratio), classical
+      ion-neutral Pedersen conductivity ``sigma_p_in_s_m = (n_e * m_i / B_0^2) * nu_in_s``,
+      and Poulos (2019) axial current-penetration length
+      ``l_pen_poulos_m = r_wall_m * sqrt(sigma_par / sigma_p_in)``.
+    """
+    if ne_m3 <= 0.0 or te_ev <= 0.0 or b0_t <= 0.0 or r_wall_m <= 0.0 or l_par_m <= 0.0:
+        raise ValueError("ne_m3, te_ev, b0_t, r_wall_m, and l_par_m must be strictly positive")
+    mi = float(mu) * M_PROTON
+    omega_ci = float(Z) * E_CHARGE * float(b0_t) / mi
+    v_a = float(b0_t) / float(np.sqrt(MU_0 * float(ne_m3) * mi))
+    tau_a = float(l_par_m) / v_a
+
+    scales = local_drift_scales(float(ne_m3) * 1e-6, float(te_ev), float(b0_t) * 1e4, mu=mu, Z=Z)
+    nu_ei = float(scales["nu_ei_s"])
+    eta_par = 0.51 * M_ELECTRON * nu_ei / (float(ne_m3) * E_CHARGE ** 2)
+    sigma_par = 1.0 / eta_par
+
+    j_r = abs(float(i_tot_a)) / (2.0 * np.pi * float(r_wall_m) * float(l_par_m))
+    sigma_p_req = (j_r / abs(float(er_v_m))) if abs(float(er_v_m)) > 0.0 else np.nan
+    nu_in_ped_req = (
+        sigma_p_req * (float(b0_t) ** 2) / (float(ne_m3) * mi)
+        if np.isfinite(sigma_p_req) else np.nan
+    )
+
+    out = {
+        "v_alfven_m_s": float(v_a),
+        "tau_alfven_s": float(tau_a),
+        "omega_ci_rad_s": float(omega_ci),
+        "j_r_a_m2": float(j_r),
+        "sigma_par_s_m": float(sigma_par),
+        "sigma_p_req_s_m": float(sigma_p_req),
+        "nu_in_ped_req_s": float(nu_in_ped_req),
+    }
+    if nu_in_s is not None and float(nu_in_s) > 0.0:
+        nu = float(nu_in_s)
+        sigma_p_in = (float(ne_m3) * mi / (float(b0_t) ** 2)) * nu
+        l_pen = float(r_wall_m) * float(np.sqrt(sigma_par / sigma_p_in))
+        out.update({
+            "nu_in_s": nu,
+            "nu_in_over_omega_ci": float(nu / omega_ci),
+            "sigma_p_in_s_m": float(sigma_p_in),
+            "l_pen_poulos_m": float(l_pen),
+        })
+    else:
+        out.update({
+            "nu_in_s": np.nan,
+            "nu_in_over_omega_ci": np.nan,
+            "sigma_p_in_s_m": np.nan,
+            "l_pen_poulos_m": np.nan,
+        })
+    return out
+
+
 def solve_axial_braginskii_bvp(state: LocalPlasmaState, k_perp_m: float, *,
                                l_par_m: float = 14.0, sheath_lambda: float = 3.7,
                                bc: str = "conducting_1", nu_in_s: float = 0.0,

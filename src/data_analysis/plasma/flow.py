@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import numpy as np
+from scipy.optimize import curve_fit
 from scipy.signal import savgol_filter
 
 
@@ -257,3 +258,65 @@ def radial_flow_shear(r_cm, v_theta_km_s, *, smooth_window=1, polyorder=2,
         omega_rad_s=np.moveaxis(omega, 0, axis),
         gamma_E_s=np.moveaxis(gamma_e, 0, axis),
     )
+
+
+def fit_exponential_relaxation(t, y, *, t_start: float | None = None,
+                               t_end: float | None = None,
+                               tau_bounds: tuple[float, float] = (1e-3, 1e2),
+                               offset_init: float | None = None,
+                               min_points: int = 4) -> dict:
+    """Fit ``y(t) = amp * exp(-(t - t0) / tau) + offset`` over ``[t_start, t_end]``.
+
+    Diagnostic-agnostic exponential relaxation fitter for flow spin-down or
+    profile-decay traces. Time ``t`` and ``tau_bounds`` share the caller's
+    time units (e.g., ms -> ``rate = 1/tau`` in ``ms^-1``). Returns a dict with
+    ``amp``, ``tau``, ``rate``, ``offset``, ``r2``, ``n_points``, ``t0``, and
+    ``t_end`` (all NaN if fewer than ``min_points`` finite samples exist or if
+    the nonlinear fit fails).
+    """
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if t.shape != y.shape or t.ndim != 1:
+        raise ValueError("t and y must be 1-D arrays of equal length")
+    lo = float(t[0]) if t_start is None else float(t_start)
+    hi = float(t[-1]) if t_end is None else float(t_end)
+    mask = (t >= lo) & (t <= hi) & np.isfinite(t) & np.isfinite(y)
+    n = int(np.sum(mask))
+    if n < min_points:
+        return {
+            "amp": np.nan, "tau": np.nan, "rate": np.nan, "offset": np.nan,
+            "r2": np.nan, "n_points": n, "t0": lo, "t_end": hi,
+        }
+    tw = t[mask]
+    yw = y[mask]
+    t0 = float(tw[0])
+    dt_span = max(float(tw[-1] - tw[0]), 1e-12)
+    tau_min, tau_max = float(tau_bounds[0]), float(tau_bounds[1])
+    c0 = float(yw[-1]) if offset_init is None else float(offset_init)
+    a0 = float(yw[0] - c0)
+    tau0 = float(np.clip(0.3 * dt_span, tau_min, tau_max))
+    y_span = max(float(np.ptp(yw)), abs(a0), 1e-6)
+    try:
+        popt, _ = curve_fit(
+            lambda tt, a, tau, c: a * np.exp(-(tt - t0) / tau) + c,
+            tw, yw, p0=[a0, tau0, c0],
+            bounds=(
+                [-10.0 * y_span, tau_min, float(np.min(yw)) - 5.0 * y_span],
+                [+10.0 * y_span, tau_max, float(np.max(yw)) + 5.0 * y_span],
+            ),
+            maxfev=8000,
+        )
+        amp, tau, offset = float(popt[0]), float(popt[1]), float(popt[2])
+        pred = amp * np.exp(-(tw - t0) / tau) + offset
+        ss_res = float(np.sum((yw - pred) ** 2))
+        ss_tot = float(np.sum((yw - float(np.mean(yw))) ** 2))
+        r2 = (1.0 - ss_res / ss_tot) if ss_tot > 0.0 else np.nan
+        return {
+            "amp": amp, "tau": tau, "rate": 1.0 / tau, "offset": offset,
+            "r2": float(r2), "n_points": n, "t0": t0, "t_end": float(tw[-1]),
+        }
+    except Exception:
+        return {
+            "amp": np.nan, "tau": np.nan, "rate": np.nan, "offset": np.nan,
+            "r2": np.nan, "n_points": n, "t0": t0, "t_end": float(tw[-1]),
+        }
