@@ -468,3 +468,139 @@ def local_drift_scales(ne_cm3, te_ev, b0_g, *, mu=4.0, Z=1,
             out["omega_star_p_rad_s"] = out["omega_star_n_rad_s"] + out["omega_star_T_rad_s"]
 
     return out
+
+
+class HollowProfileMetrics(NamedTuple):
+    """Summary metrics for a hollow radial density or ion-saturation profile.
+
+    Attributes:
+        core_val: Median profile value in ``r <= core_r_max_cm``.
+        ring_val: Median profile value in ``ring_r_cm[0] <= r <= ring_r_cm[1]``.
+        hollowness: ``ring_val / core_val`` (``NaN`` when ``core_val <= 0``,
+            ``ring_val <= 0``, or either band has no finite samples).
+        wall_inv_scale_cm: Linear least-squares slope ``d(ln f)/dr`` [``cm^-1``]
+            across positive finite samples in ``wall_r_cm[0] <= r <= wall_r_cm[1]``
+            (``NaN`` when fewer than 2 distinct valid radii exist).
+        radial_edges_cm: Optional 1-D radial bin edges [``cm``], or ``None``.
+        radial_profile: Optional bin-median radial profile of shape
+            ``(nbins,)`` or ``(nbins, nt)``, or ``None``.
+    """
+    core_val: np.ndarray | float
+    ring_val: np.ndarray | float
+    hollowness: np.ndarray | float
+    wall_inv_scale_cm: np.ndarray | float
+    radial_edges_cm: np.ndarray | None
+    radial_profile: np.ndarray | None
+
+
+def _safe_median_1d(vals):
+    fin = vals[np.isfinite(vals)]
+    return float(np.median(fin)) if fin.size else np.nan
+
+
+def hollow_profile_metrics(
+    r_cm,
+    prof,
+    *,
+    core_r_max_cm=2.0,
+    ring_r_cm=(4.5, 7.0),
+    wall_r_cm=(1.5, 4.5),
+    radial_edges_cm=None,
+):
+    """Quantify radial hollowness and inner-wall log gradient of a 1-D or 2-D profile.
+
+    Works identically for 1-D line cuts (``r_cm = |x - x_c|``) and scattered
+    2-D plane scans (``r_cm = hypot(x - x_c, y - y_c)``).
+
+    Args:
+        r_cm: 1-D non-negative radial coordinate array of shape ``(npos,)`` [cm].
+        prof: Positive plasma profile (``ne``, ``Isat``, etc.) of shape
+            ``(npos,)`` or ``(npos, nt)``.
+        core_r_max_cm: Outer radius of the hollow core band [cm].
+        ring_r_cm: ``(r_lo, r_hi)`` [cm] of the surrounding dense ring.
+        wall_r_cm: ``(r_lo, r_hi)`` [cm] of the inner-wall gradient band.
+        radial_edges_cm: Optional monotonic 1-D radial bin edges [cm] for
+            azimuthally averaged radial profiles.
+
+    Returns:
+        :class:`HollowProfileMetrics`. Scalars are returned when ``prof`` is
+        1-D; 1-D ``(nt,)`` arrays are returned when ``prof`` is 2-D.
+    """
+    r = np.asarray(r_cm, dtype=float)
+    p = np.asarray(prof, dtype=float)
+    if r.ndim != 1 or r.size == 0:
+        raise ValueError("r_cm must be a non-empty 1-D array")
+    if p.ndim not in (1, 2) or p.shape[0] != r.size:
+        raise ValueError(
+            f"prof must have shape ({r.size},) or ({r.size}, nt), got {p.shape}"
+        )
+
+    is_1d = p.ndim == 1
+    p2 = p[:, None] if is_1d else p
+    nt = p2.shape[1]
+
+    m_core = np.isfinite(r) & (r >= 0.0) & (r <= float(core_r_max_cm))
+    m_ring = np.isfinite(r) & (r >= float(ring_r_cm[0])) & (r <= float(ring_r_cm[1]))
+    m_wall = np.isfinite(r) & (r >= float(wall_r_cm[0])) & (r <= float(wall_r_cm[1]))
+
+    core_arr = np.full(nt, np.nan, dtype=float)
+    ring_arr = np.full(nt, np.nan, dtype=float)
+    slope_arr = np.full(nt, np.nan, dtype=float)
+
+    r_wall = r[m_wall]
+    p_wall = p2[m_wall]
+
+    for j in range(nt):
+        if np.any(m_core):
+            core_arr[j] = _safe_median_1d(p2[m_core, j])
+        if np.any(m_ring):
+            ring_arr[j] = _safe_median_1d(p2[m_ring, j])
+
+        if r_wall.size >= 2:
+            col = p_wall[:, j]
+            ok = np.isfinite(col) & (col > 0.0)
+            if int(np.sum(ok)) >= 2:
+                rv = r_wall[ok]
+                r_centered = rv - float(np.mean(rv))
+                denom = float(np.dot(r_centered, r_centered))
+                if denom > 0.0:
+                    yv = np.log(col[ok])
+                    slope_arr[j] = float(np.dot(r_centered, yv - float(np.mean(yv))) / denom)
+
+    valid_h = np.isfinite(core_arr) & np.isfinite(ring_arr) & (core_arr > 0.0) & (ring_arr > 0.0)
+    h_arr = np.where(valid_h, ring_arr / np.where(valid_h, core_arr, 1.0), np.nan)
+
+    r_edges_out = None
+    r_prof_out = None
+    if radial_edges_cm is not None:
+        r_edges_out = np.asarray(radial_edges_cm, dtype=float)
+        if r_edges_out.ndim != 1 or r_edges_out.size < 2 or not np.all(np.diff(r_edges_out) > 0.0):
+            raise ValueError("radial_edges_cm must be a strictly increasing 1-D array with len >= 2")
+        nbins = r_edges_out.size - 1
+        r_prof = np.full((nbins, nt), np.nan, dtype=float)
+        for b in range(nbins):
+            lo, hi = float(r_edges_out[b]), float(r_edges_out[b + 1])
+            mb = np.isfinite(r) & (r >= lo) & (r <= hi if b == nbins - 1 else r < hi)
+            if not np.any(mb):
+                continue
+            for j in range(nt):
+                r_prof[b, j] = _safe_median_1d(p2[mb, j])
+        r_prof_out = r_prof[:, 0] if is_1d else r_prof
+
+    if is_1d:
+        return HollowProfileMetrics(
+            core_val=float(core_arr[0]),
+            ring_val=float(ring_arr[0]),
+            hollowness=float(h_arr[0]),
+            wall_inv_scale_cm=float(slope_arr[0]),
+            radial_edges_cm=r_edges_out,
+            radial_profile=r_prof_out,
+        )
+    return HollowProfileMetrics(
+        core_val=core_arr,
+        ring_val=ring_arr,
+        hollowness=h_arr,
+        wall_inv_scale_cm=slope_arr,
+        radial_edges_cm=r_edges_out,
+        radial_profile=r_prof_out,
+    )
