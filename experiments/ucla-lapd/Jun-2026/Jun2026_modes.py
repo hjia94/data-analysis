@@ -80,7 +80,9 @@ DEFAULT_BDOT_CAL = r"D:\data\LAPD\BDOT CALIBRATION\Bdot-10T-C16\C16-bdot-calibra
 DEFAULT_BDOT_AREA_M2 = None
 DEFAULT_BDOT_GAIN = None
 DEFAULT_BDOT_ATTEN_DB = None
-DEFAULT_BDOT_CHANNEL_SIGNS = (+1, +1, +1)
+# Matches Jun2026_bdot_2d.DEFAULT_CHANNEL_SIGNS: uniquely verified from Maxwell
+# div/curl, By->Pz cross-talk cancellation, DC turn-on/off Ampère's law, and core dB_z.
+DEFAULT_BDOT_CHANNEL_SIGNS = (-1, -1, +1)
 
 # LAPD magnetic field polarity: +1 -> B_0 along +z so outward E_r > 0 gives
 # clockwise E x B rotation (v_theta < 0, matching the observed m = -1 mode).

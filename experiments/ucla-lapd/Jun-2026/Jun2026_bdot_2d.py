@@ -49,8 +49,10 @@ from scipy.constants import mu_0
 from data_analysis.io import open_lapd, parse_bdot_gain, position_shots
 from data_analysis.plasma.bdot import (
     BdotCalibration,
+    inverse_area_matrix,
     load_bdot_calibration,
     phasor_voltage_to_b,
+    voltage_to_bdot,
 )
 from data_analysis.plasma.fields import (
     circular_polarization,
@@ -84,16 +86,34 @@ DEFAULT_WINDOW = "hann"
 DEFAULT_B_SIGN_Z = +1             # B0 along +z (North = West x Up)
 DEFAULT_BY_SIGN = +1              # applied sign on By (+1 as-wired, -1 inverted)
 DEFAULT_ON_POLARITY_MISMATCH = "raise"  # "raise" | "flip" | "ignore"
-DEFAULT_ABS_COIL_POLARITY_VERIFIED = False  # True once one in-plane coil abs sign is bench-verified
+# Verified in-situ from Run 26 DC bias turn-on/off step: I_int = -25.8 A / +22.1 A
+# (conventional J_z < 0 for electrons into +z Port 35, div/curl = 0.176) and core
+# diamagnetic dB_z = +0.25 G / -0.29 G under DEFAULT_CHANNEL_SIGNS = (-1, -1, +1).
+DEFAULT_ABS_COIL_POLARITY_VERIFIED = True
 DEFAULT_MJ_GAMMA2_MIN = 0.5       # transverse B-dot coherence threshold on current-bearing interior
 DEFAULT_GRID_STEP_CM = 1.0
 DEFAULT_BDOT_CAL = r"D:\data\LAPD\BDOT CALIBRATION\Bdot-10T-C16\C16-bdot-calibration.npz"
 DEFAULT_BDOT_AREA_M2 = None       # bare coil area [m^2]: scalar, (3,), or (3, 3)
 DEFAULT_BDOT_GAIN = None          # None: auto-read from HDF5 P28 chain when calibrated (1.0 uncalibrated)
 DEFAULT_BDOT_ATTEN_DB = None      # None: auto-read from HDF5 P28 chain when bdot_gain is None (else 0.0)
-DEFAULT_CHANNEL_SIGNS = (+1, +1, +1)  # pre-inversion hardware polarity on (C1, C2, C3)
+# Pre-inversion hardware polarity on (C1, C2, C3) relative to the C16 bench frame:
+# uniquely determined by (1) Maxwell div/curl = 0.330, (2) By->Pz cross-talk cancellation
+# (|<Bz By*>|: 0.85 -> 0.38, |Bz|/|B_perp| = 0.134), (3) DC bias turn-on Ampère's law
+# (I_int = -25.8 A vs +22.1 A at turn-off), and (4) core diamagnetic dB_z = +0.25 G / -0.29 G.
+DEFAULT_CHANNEL_SIGNS = (-1, -1, +1)
 JUN2026_BDOT_SIGNAL_CHAIN = "2.5BLP => X10 => 2.5BLP => X100"
 JUN2026_BDOT_GAIN = 1000.0
+
+# In-situ DC bias-step reconstruction defaults (turn-on at t = 0 ms, turn-off at t = 5 ms)
+DEFAULT_DC_ON_STEP_MS = 0.0
+DEFAULT_DC_OFF_STEP_MS = 5.0
+DEFAULT_DC_ON_BASE_MS = (-0.40, -0.05)
+DEFAULT_DC_ON_WIN_MS = (-0.02, 0.40)
+DEFAULT_DC_OFF_BASE_MS = (5.50, 6.50)
+DEFAULT_DC_OFF_WIN_MS = (4.98, 5.25)
+DEFAULT_DC_SENS_DUR_MS = (0.25, 0.40)         # post-step duration sweep for window-width sensitivity
+DEFAULT_DC_CENTER_XY_CM = (0.0, 0.0)          # Port-35 concentric electrode axis
+DC_ELECTRODE_RADII_CM = (2.54, 5.08, 7.62)    # 2", 4", 6" plate outer radii (1", 2", 3")
 
 
 class Bdot2DRunSpec(NamedTuple):
@@ -247,6 +267,50 @@ def _apply_bdot_calibration(
             raise ValueError(f"probe_to_lab must have shape (3, 3), got {R.shape}")
         B = np.einsum("ij,j...->i...", R, B)
     return B[0], B[1], B[2], True
+
+
+def _apply_bdot_time_calibration(
+    v_scope,
+    *,
+    bdot_cal=None,
+    bdot_area_m2=None,
+    bdot_gain=1.0,
+    bdot_atten_db=0.0,
+    channel_signs=DEFAULT_CHANNEL_SIGNS,
+    probe_to_lab=None,
+):
+    """Convert time-domain scope B-dot voltages ``(3, ...)`` -> ``(bdot [T/s], calibrated)``.
+
+    Applies the exact same pre-inversion signal conditioning (``channel_signs``,
+    ``bdot_gain``, ``bdot_atten_db``), static 3x3 ``A^-1`` matrix, and optional
+    ``probe_to_lab`` transform as :func:`_apply_bdot_calibration`. When neither
+    ``bdot_cal`` nor ``bdot_area_m2`` is given, returns uncalibrated probe-level
+    voltages ``v_coil`` [V] with ``calibrated=False``.
+    """
+    v_arr = np.asarray(v_scope, dtype=float)
+    if v_arr.ndim < 1 or v_arr.shape[0] != 3:
+        raise ValueError(f"v_scope must have 3 coil channels on axis 0, got shape {v_arr.shape}")
+    signs = np.asarray(channel_signs, dtype=float)
+    if signs.shape != (3,) or not np.all(np.isin(signs, (-1.0, +1.0))):
+        raise ValueError(f"channel_signs must be 3 values in {{-1, +1}}, got {channel_signs!r}")
+    eff_gain = float(bdot_gain) * (10.0 ** (-float(bdot_atten_db) / 20.0))
+    if eff_gain <= 0.0:
+        raise ValueError(f"effective bdot gain must be > 0, got {eff_gain}")
+
+    v_coil = (signs.reshape((3,) + (1,) * (v_arr.ndim - 1)) * v_arr) / eff_gain
+
+    cal_obj, _, _ = _resolve_bdot_calibration(bdot_cal, bdot_area_m2)
+    if cal_obj is None:
+        return v_coil, False
+
+    inv_area = inverse_area_matrix(cal_obj, gain=1.0, mode="static")
+    bdot = voltage_to_bdot(v_coil, inv_area)
+    if probe_to_lab is not None:
+        R = np.asarray(probe_to_lab, dtype=float)
+        if R.shape != (3, 3):
+            raise ValueError(f"probe_to_lab must have shape (3, 3), got {R.shape}")
+        bdot = np.einsum("ij,j...->i...", R, bdot)
+    return bdot, True
 
 
 def analyze_harmonic_fields(x_cm, y_cm, Bx, By, Bz, LP, g2_Bx, g2_By, g2_Bz, g2_LP, *,
@@ -427,6 +491,254 @@ def analyze_harmonic_fields(x_cm, y_cm, Bx, By, Bz, LP, g2_Bx, g2_By, g2_Bz, g2_
     }
 
 
+def _stokes_box_current(Bx, By, dx_m, dy_m, *, calibrated=True):
+    """Counter-clockwise boundary integral ``oint B_perp . dl (/ mu_0)`` around the outer grid box."""
+    bot = np.trapezoid(Bx[0, :], dx=dx_m)
+    right = np.trapezoid(By[:, -1], dx=dy_m)
+    top = -np.trapezoid(Bx[-1, :], dx=dx_m)
+    left = -np.trapezoid(By[:, 0], dx=dy_m)
+    circ = float(bot + right + top + left)
+    return (circ / mu_0) if calibrated else circ
+
+
+def _analyze_single_dc_step(bdot, t_s, base_ms, win_ms, dx_m, dy_m, XX, YY, RR, int_mask, *,
+                            calibrated=True, by_sign=DEFAULT_BY_SIGN, polarity_sign=-1.0):
+    """Integrate one baseline-subtracted DC bias step -> 2-D ``dB``, ``Jz``, div/curl, currents, ``dBz``."""
+    ib0, ib1 = clip_time_window(t_s, base_ms[0], base_ms[1])
+    iw0, iw1 = clip_time_window(t_s, win_ms[0], win_ms[1])
+    if ib1 <= ib0:
+        raise ValueError(f"baseline window {base_ms} ms selects no samples in t_s")
+    if iw1 <= iw0 + 1:
+        raise ValueError(f"integration window {win_ms} ms selects fewer than 2 samples in t_s")
+
+    dt_s = float(t_s[1] - t_s[0])
+    base = np.mean(bdot[..., ib0:ib1], axis=-1, keepdims=True)
+    dB = np.trapezoid(bdot[..., iw0:iw1] - base, dx=dt_s, axis=-1)  # (3, ny, nx)
+    dB = np.asarray(dB, dtype=float)
+    dB[1] = float(by_sign) * dB[1]
+
+    interior = slice(1, -1)
+    _, _, curl_z = curl(dB[0], dB[1], 0, dx_m, dy_m, None, axes=(-1, -2, -3))
+    div_perp = divergence_2d(dB[0], dB[1], dx_m, dy_m, axes=(-1, -2))
+    rms_div = float(np.sqrt(np.nanmean(div_perp[interior, interior] ** 2)))
+    rms_curl = float(np.sqrt(np.nanmean(curl_z[interior, interior] ** 2)))
+    div_curl = rms_div / rms_curl if rms_curl > 0.0 else np.nan
+
+    _, _, curl_z_alt = curl(dB[0], -dB[1], 0, dx_m, dy_m, None, axes=(-1, -2, -3))
+    div_perp_alt = divergence_2d(dB[0], -dB[1], dx_m, dy_m, axes=(-1, -2))
+    rms_div_a = float(np.sqrt(np.nanmean(div_perp_alt[interior, interior] ** 2)))
+    rms_curl_a = float(np.sqrt(np.nanmean(curl_z_alt[interior, interior] ** 2)))
+    div_curl_alt = rms_div_a / rms_curl_a if rms_curl_a > 0.0 else np.nan
+
+    Jz = (curl_z / mu_0) if calibrated else curl_z
+    cell_area = dx_m * dy_m
+    r2, r4, r6 = DC_ELECTRODE_RADII_CM
+    m2 = int_mask & (RR <= r2)
+    m4 = int_mask & (RR > r2) & (RR <= r4)
+    m6 = int_mask & (RR > r4) & (RR <= r6)
+    core_m = RR <= r2
+    wall_m = (RR > r2) & (RR <= r4)
+
+    I_int = float(np.nansum(Jz[int_mask]) * cell_area)
+    I_2in = float(np.nansum(Jz[m2]) * cell_area) if np.any(m2) else np.nan
+    I_4in = float(np.nansum(Jz[m4]) * cell_area) if np.any(m4) else np.nan
+    I_6in = float(np.nansum(Jz[m6]) * cell_area) if np.any(m6) else np.nan
+    I_stokes = _stokes_box_current(dB[0], dB[1], dx_m, dy_m, calibrated=calibrated)
+
+    dBz_core = float(np.nanmedian(dB[2][core_m])) if np.any(core_m) else np.nan
+    dBz_wall = float(np.nanmedian(dB[2][wall_m])) if np.any(wall_m) else np.nan
+
+    w = np.where(np.isfinite(Jz[int_mask]), np.maximum(polarity_sign * Jz[int_mask], 0.0), 0.0)
+    wsum = float(np.sum(w))
+    if wsum > 0.0:
+        centroid = np.array([
+            float(np.sum(w * XX[int_mask]) / wsum),
+            float(np.sum(w * YY[int_mask]) / wsum),
+        ], dtype=float)
+    else:
+        centroid = np.array([np.nan, np.nan], dtype=float)
+
+    return {
+        "dB": dB,
+        "Jz": Jz,
+        "div_B_perp": div_perp,
+        "div_curl": div_curl,
+        "div_curl_flipped": div_curl_alt,
+        "I_int": I_int,
+        "I_2in": I_2in,
+        "I_4in": I_4in,
+        "I_6in": I_6in,
+        "I_stokes": I_stokes,
+        "dBz_core": dBz_core,
+        "dBz_wall": dBz_wall,
+        "centroid_cm": centroid,
+    }
+
+
+def analyze_dc_bias_steps(
+    x_cm,
+    y_cm,
+    t_s,
+    bdot,
+    *,
+    calibrated=True,
+    on_win_ms=DEFAULT_DC_ON_WIN_MS,
+    on_base_ms=DEFAULT_DC_ON_BASE_MS,
+    off_win_ms=DEFAULT_DC_OFF_WIN_MS,
+    off_base_ms=DEFAULT_DC_OFF_BASE_MS,
+    on_step_ms=DEFAULT_DC_ON_STEP_MS,
+    off_step_ms=DEFAULT_DC_OFF_STEP_MS,
+    sens_dur_ms=DEFAULT_DC_SENS_DUR_MS,
+    center_xy_cm=DEFAULT_DC_CENTER_XY_CM,
+    by_sign=DEFAULT_BY_SIGN,
+):
+    """Pure-array 2-D DC bias turn-on/turn-off step reconstruction and polarity proof.
+
+    Integrates calibrated gridded ``bdot(3, ny, nx, nt)`` [T/s] (or uncalibrated
+    probe voltages [V] when ``calibrated=False``) across the bias turn-on and
+    turn-off steps to reconstruct 2-D ``dB_on``, ``dB_off``, ``Jz = (curl dB)_z / mu_0``,
+    Maxwell ``div/curl`` ratios, area-integrated currents over the disjoint Port-35
+    concentric electrode footprints (``2"``: ``r <= 2.54 cm``, ``4"``: ``2.54 < r <= 5.08 cm``,
+    ``6"``: ``5.08 < r <= 7.62 cm``) and ``15x15`` interior, core/wall median
+    diamagnetic ``dB_z``, and integration-window sensitivity.
+
+    Checks all four in-situ absolute-polarity criteria for electrons collected
+    into positively biased ``+z`` Port 35 with core pressure hollowing:
+    ``I_int_on < 0``, ``I_int_off > 0``, ``dBz_core_on > 0``, ``dBz_core_off < 0``.
+    """
+    if by_sign not in (+1, -1):
+        raise ValueError(f"by_sign must be +1 or -1, got {by_sign!r}")
+    x_cm = np.asarray(x_cm, dtype=float)
+    y_cm = np.asarray(y_cm, dtype=float)
+    t_s = np.asarray(t_s, dtype=float)
+    bdot = np.asarray(bdot, dtype=float)
+    if bdot.shape != (3, y_cm.size, x_cm.size, t_s.size):
+        raise ValueError(
+            f"bdot must have shape (3, {y_cm.size}, {x_cm.size}, {t_s.size}), got {bdot.shape}"
+        )
+    if x_cm.size < 3 or y_cm.size < 3:
+        raise ValueError("x_cm and y_cm must have at least 3 grid points for interior curl/div")
+
+    dx_m = float(np.median(np.diff(x_cm))) * 1e-2
+    dy_m = float(np.median(np.diff(y_cm))) * 1e-2
+    XX, YY = np.meshgrid(x_cm, y_cm)
+    cx, cy = float(center_xy_cm[0]), float(center_xy_cm[1])
+    RR = np.hypot(XX - cx, YY - cy)
+    int_mask = np.zeros_like(RR, dtype=bool)
+    int_mask[1:-1, 1:-1] = True
+
+    on = _analyze_single_dc_step(
+        bdot, t_s, on_base_ms, on_win_ms, dx_m, dy_m, XX, YY, RR, int_mask,
+        calibrated=calibrated, by_sign=by_sign, polarity_sign=-1.0,
+    )
+    off = _analyze_single_dc_step(
+        bdot, t_s, off_base_ms, off_win_ms, dx_m, dy_m, XX, YY, RR, int_mask,
+        calibrated=calibrated, by_sign=by_sign, polarity_sign=+1.0,
+    )
+
+    sens_durs = np.asarray(sens_dur_ms, dtype=float)
+    n_sens = sens_durs.size
+    sens_I_on = np.full(n_sens, np.nan, dtype=float)
+    sens_I_off = np.full(n_sens, np.nan, dtype=float)
+    sens_dc_on = np.full(n_sens, np.nan, dtype=float)
+    sens_dc_off = np.full(n_sens, np.nan, dtype=float)
+    sens_bz_on = np.full(n_sens, np.nan, dtype=float)
+    sens_bz_off = np.full(n_sens, np.nan, dtype=float)
+    for idx_s, dur in enumerate(sens_durs):
+        s_on = _analyze_single_dc_step(
+            bdot, t_s, on_base_ms, (float(on_win_ms[0]), float(on_step_ms) + float(dur)),
+            dx_m, dy_m, XX, YY, RR, int_mask,
+            calibrated=calibrated, by_sign=by_sign, polarity_sign=-1.0,
+        )
+        s_off = _analyze_single_dc_step(
+            bdot, t_s, off_base_ms, (float(off_win_ms[0]), float(off_step_ms) + float(dur)),
+            dx_m, dy_m, XX, YY, RR, int_mask,
+            calibrated=calibrated, by_sign=by_sign, polarity_sign=+1.0,
+        )
+        sens_I_on[idx_s] = s_on["I_int"]
+        sens_I_off[idx_s] = s_off["I_int"]
+        sens_dc_on[idx_s] = s_on["div_curl"]
+        sens_dc_off[idx_s] = s_off["div_curl"]
+        sens_bz_on[idx_s] = s_on["dBz_core"]
+        sens_bz_off[idx_s] = s_off["dBz_core"]
+
+    pol_i_on = bool(np.isfinite(on["I_int"]) and (on["I_int"] < 0.0))
+    pol_i_off = bool(np.isfinite(off["I_int"]) and (off["I_int"] > 0.0))
+    pol_bz_on = bool(np.isfinite(on["dBz_core"]) and (on["dBz_core"] > 0.0))
+    pol_bz_off = bool(np.isfinite(off["dBz_core"]) and (off["dBz_core"] < 0.0))
+    pol_ok = bool(pol_i_on and pol_i_off and pol_bz_on and pol_bz_off)
+    pol_bz_sens_ok = bool(
+        n_sens > 0
+        and np.all(np.isfinite(sens_bz_on)) and np.all(sens_bz_on > 0.0)
+        and np.all(np.isfinite(sens_bz_off)) and np.all(sens_bz_off < 0.0)
+    )
+
+    return {
+        "on_win_ms": np.asarray(on_win_ms, dtype=float),
+        "on_base_ms": np.asarray(on_base_ms, dtype=float),
+        "off_win_ms": np.asarray(off_win_ms, dtype=float),
+        "off_base_ms": np.asarray(off_base_ms, dtype=float),
+        "center_xy_cm": np.array([cx, cy], dtype=float),
+        "electrode_radii_cm": np.asarray(DC_ELECTRODE_RADII_CM, dtype=float),
+        "by_sign_used": int(by_sign),
+        "dB_on": on["dB"],
+        "dB_off": off["dB"],
+        "Jz_on": on["Jz"],
+        "Jz_off": off["Jz"],
+        "div_B_perp_on": on["div_B_perp"],
+        "div_B_perp_off": off["div_B_perp"],
+        "div_curl_on": on["div_curl"],
+        "div_curl_on_flipped": on["div_curl_flipped"],
+        "div_curl_off": off["div_curl"],
+        "div_curl_off_flipped": off["div_curl_flipped"],
+        "I_int_on": on["I_int"],
+        "I_int_off": off["I_int"],
+        "I_2in_on": on["I_2in"],
+        "I_2in_off": off["I_2in"],
+        "I_4in_on": on["I_4in"],
+        "I_4in_off": off["I_4in"],
+        "I_6in_on": on["I_6in"],
+        "I_6in_off": off["I_6in"],
+        "I_stokes_on": on["I_stokes"],
+        "I_stokes_off": off["I_stokes"],
+        "jz_on_centroid_cm": on["centroid_cm"],
+        "jz_off_centroid_cm": off["centroid_cm"],
+        "dBz_core_on": on["dBz_core"],
+        "dBz_core_off": off["dBz_core"],
+        "dBz_wall_on": on["dBz_wall"],
+        "dBz_wall_off": off["dBz_wall"],
+        "polarity_i_on_ok": pol_i_on,
+        "polarity_i_off_ok": pol_i_off,
+        "polarity_dbz_on_ok": pol_bz_on,
+        "polarity_dbz_off_ok": pol_bz_off,
+        "polarity_consistent": pol_ok,
+        "polarity_dbz_sens_consistent": pol_bz_sens_ok,
+        "sens_dur_ms": sens_durs,
+        "sens_I_int_on": sens_I_on,
+        "sens_I_int_off": sens_I_off,
+        "sens_div_curl_on": sens_dc_on,
+        "sens_div_curl_off": sens_dc_off,
+        "sens_dBz_core_on": sens_bz_on,
+        "sens_dBz_core_off": sens_bz_off,
+    }
+
+
+def _grid_position_index(pos_obj, shot_to_idx, grid_step_cm=DEFAULT_GRID_STEP_CM):
+    """Map motion-list positions onto snapped ``(ux, uy)`` coordinates and shot-index lists."""
+    px = np.round(pos_obj.pos_array["x"][::pos_obj.nshot][:pos_obj.npos] / grid_step_cm) * grid_step_cm
+    py = np.round(pos_obj.pos_array["y"][::pos_obj.nshot][:pos_obj.npos] / grid_step_cm) * grid_step_cm
+    ux = np.unique(px)
+    uy = np.unique(py)
+    pos_indices = []
+    for p_i in range(pos_obj.npos):
+        sh = position_shots(pos_obj.shot_nums, p_i, pos_obj.nshot)
+        idx = [shot_to_idx[int(s)] for s in sh if int(s) in shot_to_idx]
+        ix = int(np.searchsorted(ux, px[p_i]))
+        iy = int(np.searchsorted(uy, py[p_i]))
+        pos_indices.append((iy, ix, idx))
+    return ux, uy, pos_indices
+
+
 def _grid_reference_locked_channel(stack, ref_seg, pos_obj, shot_to_idx, dt_sig, dt_ref,
                                    freqs, *, t0_offset_s=0.0,
                                    grid_step_cm=DEFAULT_GRID_STEP_CM,
@@ -441,19 +753,7 @@ def _grid_reference_locked_channel(stack, ref_seg, pos_obj, shot_to_idx, dt_sig,
 
     seg = np.asarray(stack, dtype=float)
     seg = seg - seg.mean(axis=1, keepdims=True)
-    px = np.round(pos_obj.pos_array["x"][::pos_obj.nshot][:pos_obj.npos] / grid_step_cm) * grid_step_cm
-    py = np.round(pos_obj.pos_array["y"][::pos_obj.nshot][:pos_obj.npos] / grid_step_cm) * grid_step_cm
-    ux = np.unique(px)
-    uy = np.unique(py)
-
-    # Pre-index positions -> shot indices once across harmonics
-    pos_indices = []
-    for p_i in range(pos_obj.npos):
-        sh = position_shots(pos_obj.shot_nums, p_i, pos_obj.nshot)
-        idx = [shot_to_idx[int(s)] for s in sh if int(s) in shot_to_idx]
-        ix = int(np.searchsorted(ux, px[p_i]))
-        iy = int(np.searchsorted(uy, py[p_i]))
-        pos_indices.append((iy, ix, idx))
+    ux, uy, pos_indices = _grid_position_index(pos_obj, shot_to_idx, grid_step_cm=grid_step_cm)
 
     out = {}
     for f in freqs:
@@ -479,6 +779,103 @@ def _grid_reference_locked_channel(stack, ref_seg, pos_obj, shot_to_idx, dt_sig,
     return ux, uy, out
 
 
+def _dc_time_span_indices(t_s, on_base_ms, on_win_ms, off_base_ms, off_win_ms,
+                          on_step_ms, off_step_ms, sens_dur_ms):
+    """Minimal contiguous index slice ``(i0, i1)`` covering all requested DC windows."""
+    pts = [on_base_ms[0], on_base_ms[1], on_win_ms[0], on_win_ms[1],
+           off_base_ms[0], off_base_ms[1], off_win_ms[0], off_win_ms[1]]
+    for dur in sens_dur_ms:
+        pts.append(float(on_step_ms) + float(dur))
+        pts.append(float(off_step_ms) + float(dur))
+    t_lo = max(float(t_s[0] * 1e3), min(pts) - 0.05)
+    t_hi = min(float(t_s[-1] * 1e3), max(pts) + 0.05)
+    return clip_time_window(t_s, t_lo, t_hi)
+
+
+def analyze_run_dc_bias_steps(
+    spec,
+    data_dir=DATA_DIR,
+    *,
+    by_sign=DEFAULT_BY_SIGN,
+    bdot_cal=_UNSET,
+    bdot_area_m2=DEFAULT_BDOT_AREA_M2,
+    bdot_gain=DEFAULT_BDOT_GAIN,
+    bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
+    channel_signs=DEFAULT_CHANNEL_SIGNS,
+    probe_to_lab=None,
+    on_win_ms=DEFAULT_DC_ON_WIN_MS,
+    on_base_ms=DEFAULT_DC_ON_BASE_MS,
+    off_win_ms=DEFAULT_DC_OFF_WIN_MS,
+    off_base_ms=DEFAULT_DC_OFF_BASE_MS,
+    on_step_ms=DEFAULT_DC_ON_STEP_MS,
+    off_step_ms=DEFAULT_DC_OFF_STEP_MS,
+    sens_dur_ms=DEFAULT_DC_SENS_DUR_MS,
+    center_xy_cm=DEFAULT_DC_CENTER_XY_CM,
+    grid_step_cm=DEFAULT_GRID_STEP_CM,
+):
+    """Shot-averaged 2-D DC bias turn-on/off step reconstruction for one run (Run 26 or 31)."""
+    run_num = spec.run_num if isinstance(spec, Bdot2DRunSpec) else str(spec)
+    ifn = _run_ifn(data_dir, run_num)
+    cal_obj, _, _ = _resolve_bdot_calibration(bdot_cal, bdot_area_m2)
+
+    run = open_lapd(ifn)
+    parsed_chain = _read_bdot_chain(run)
+    gain_used, atten_used = _resolve_bdot_gain(
+        parsed_chain,
+        calibrated=(cal_obj is not None),
+        bdot_gain=bdot_gain,
+        bdot_atten_db=bdot_atten_db,
+        run_num=run_num,
+    )
+
+    pos_b = jiv.read_lp_positions(ifn, motion_group_name=BDOT_MOTION_GROUP)
+    tb = run.time_array(scope_name="bdotscope")
+    idc0, idc1 = _dc_time_span_indices(
+        tb, on_base_ms, on_win_ms, off_base_ms, off_win_ms,
+        on_step_ms, off_step_ms, sens_dur_ms,
+    )
+    t_sub = tb[idc0:idc1]
+
+    all_shots = np.asarray(run.shots(scope_name="bdotscope"), dtype=int)
+    shot_to_idx = {int(s): i for i, s in enumerate(all_shots)}
+    shots_list = all_shots.tolist()
+    ux, uy, pos_indices = _grid_position_index(pos_b, shot_to_idx, grid_step_cm=grid_step_cm)
+
+    v_grid = np.full((3, uy.size, ux.size, t_sub.size), np.nan, dtype=float)
+    for ci, (ch, _) in enumerate(BDOT_CHANNELS):
+        st, _ = run.channel(ch, scope_name="bdotscope", shots=shots_list)
+        st_sub = st[:, idc0:idc1]
+        for iy, ix, idx in pos_indices:
+            if idx:
+                v_grid[ci, iy, ix, :] = np.mean(st_sub[idx, :], axis=0)
+
+    bdot_sub, cal_flag = _apply_bdot_time_calibration(
+        v_grid,
+        bdot_cal=cal_obj if isinstance(cal_obj, BdotCalibration) else None,
+        bdot_area_m2=None if isinstance(cal_obj, BdotCalibration) else cal_obj,
+        bdot_gain=gain_used,
+        bdot_atten_db=atten_used,
+        channel_signs=channel_signs,
+        probe_to_lab=probe_to_lab,
+    )
+    res = analyze_dc_bias_steps(
+        ux, uy, t_sub, bdot_sub,
+        calibrated=cal_flag,
+        on_win_ms=on_win_ms,
+        on_base_ms=on_base_ms,
+        off_win_ms=off_win_ms,
+        off_base_ms=off_base_ms,
+        on_step_ms=on_step_ms,
+        off_step_ms=off_step_ms,
+        sens_dur_ms=sens_dur_ms,
+        center_xy_cm=center_xy_cm,
+        by_sign=by_sign,
+    )
+    res["n_shots_per_pos"] = int(pos_b.nshot)
+    res["n_pos"] = int(pos_b.npos)
+    return res
+
+
 def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
                 tmin_ms=DEFAULT_TMIN_MS, tmax_ms=DEFAULT_TMAX_MS,
                 window=DEFAULT_WINDOW, b_sign_z=DEFAULT_B_SIGN_Z,
@@ -490,8 +887,17 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
                 bdot_gain=DEFAULT_BDOT_GAIN,
                 bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
                 channel_signs=DEFAULT_CHANNEL_SIGNS,
-                probe_to_lab=None):
-    """Extract 2-D complex B-dot & LP phasors, ``J_par``, and polarization for one run."""
+                probe_to_lab=None,
+                include_dc=True,
+                dc_on_win_ms=DEFAULT_DC_ON_WIN_MS,
+                dc_on_base_ms=DEFAULT_DC_ON_BASE_MS,
+                dc_off_win_ms=DEFAULT_DC_OFF_WIN_MS,
+                dc_off_base_ms=DEFAULT_DC_OFF_BASE_MS,
+                dc_on_step_ms=DEFAULT_DC_ON_STEP_MS,
+                dc_off_step_ms=DEFAULT_DC_OFF_STEP_MS,
+                dc_sens_dur_ms=DEFAULT_DC_SENS_DUR_MS,
+                dc_center_xy_cm=DEFAULT_DC_CENTER_XY_CM):
+    """Extract 2-D complex B-dot & LP phasors, ``J_par``, polarization, and DC bias steps for one run."""
     ifn = _run_ifn(data_dir, spec.run_num)
     f0 = (float(onset_table[spec.run_num]["f_peak_hz"])
           if (onset_table and spec.run_num in onset_table and np.isfinite(onset_table[spec.run_num]["f_peak_hz"]))
@@ -536,15 +942,32 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
     ref_seg = np.asarray(st_ref[:, il0:il1], dtype=float)
     ref_seg = ref_seg - ref_seg.mean(axis=1, keepdims=True)
 
+    ux_b, uy_b, pos_indices_b = _grid_position_index(pos_b, shot_to_idx)
+    if include_dc:
+        idc0, idc1 = _dc_time_span_indices(
+            tb, dc_on_base_ms, dc_on_win_ms, dc_off_base_ms, dc_off_win_ms,
+            dc_on_step_ms, dc_off_step_ms, dc_sens_dur_ms,
+        )
+        t_dc = tb[idc0:idc1]
+        v_dc_grid = np.full((3, uy_b.size, ux_b.size, t_dc.size), np.nan, dtype=float)
+    else:
+        idc0 = idc1 = 0
+        t_dc = v_dc_grid = None
+
     bdot_grids = {}
     ux = uy = None
-    for ch, name in BDOT_CHANNELS:
+    for ci, (ch, name) in enumerate(BDOT_CHANNELS):
         st, _ = run.channel(ch, scope_name="bdotscope", shots=shots_list)
         ux, uy, res_f = _grid_reference_locked_channel(
             st[:, ib0:ib1], ref_seg, pos_b, shot_to_idx, dtb, dtl, freqs,
             t0_offset_s=t0_offset_s, window=window,
         )
         bdot_grids[name] = res_f
+        if include_dc:
+            st_sub = st[:, idc0:idc1]
+            for iy, ix, idx in pos_indices_b:
+                if idx:
+                    v_dc_grid[ci, iy, ix, :] = np.mean(st_sub[idx, :], axis=0)
 
     lp_scope, lp_ch = LP_SCOPE_CHAN
     st_lp, _ = run.channel(lp_ch, scope_name=lp_scope, shots=shots_list)
@@ -594,6 +1017,34 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
         out[f"{h_lbl}__freq_hz"] = float(f_hz)
         for k, v in h_res.items():
             out[f"{h_lbl}__{k}"] = v
+
+    if include_dc:
+        bdot_dc, cal_dc = _apply_bdot_time_calibration(
+            v_dc_grid,
+            bdot_cal=cal_obj if isinstance(cal_obj, BdotCalibration) else None,
+            bdot_area_m2=None if isinstance(cal_obj, BdotCalibration) else cal_obj,
+            bdot_gain=gain_used,
+            bdot_atten_db=atten_used,
+            channel_signs=channel_signs,
+            probe_to_lab=probe_to_lab,
+        )
+        dc_res = analyze_dc_bias_steps(
+            ux, uy, t_dc, bdot_dc,
+            calibrated=cal_dc,
+            on_win_ms=dc_on_win_ms,
+            on_base_ms=dc_on_base_ms,
+            off_win_ms=dc_off_win_ms,
+            off_base_ms=dc_off_base_ms,
+            on_step_ms=dc_on_step_ms,
+            off_step_ms=dc_off_step_ms,
+            sens_dur_ms=dc_sens_dur_ms,
+            center_xy_cm=dc_center_xy_cm,
+            by_sign=by_sign,
+        )
+        dc_res["n_shots_per_pos"] = int(pos_b.nshot)
+        dc_res["n_pos"] = int(pos_b.npos)
+        for k, v in dc_res.items():
+            out[f"dc__{k}"] = v
 
     return out
 
@@ -658,6 +1109,28 @@ def _run_settings_mismatch(npz_data, run_num, want):
     return diffs
 
 
+def _pack_npz_entries(prefix, mapping):
+    """Pack a dict of Python/NumPy scalars & arrays under ``{prefix}__{k}``."""
+    packed = {}
+    for k, v in mapping.items():
+        if v is None:
+            continue
+        key = f"{prefix}__{k}"
+        if isinstance(v, np.ndarray):
+            packed[key] = v
+        elif isinstance(v, str):
+            packed[key] = np.str_(v)
+        elif isinstance(v, (bool, np.bool_)):
+            packed[key] = np.bool_(v)
+        elif isinstance(v, (int, np.integer)):
+            packed[key] = np.int64(v)
+        elif isinstance(v, (float, np.floating)):
+            packed[key] = np.float64(v)
+        else:
+            packed[key] = np.asarray(v)
+    return packed
+
+
 def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
               tmin_ms=DEFAULT_TMIN_MS, tmax_ms=DEFAULT_TMAX_MS,
               window=DEFAULT_WINDOW, b_sign_z=DEFAULT_B_SIGN_Z,
@@ -682,9 +1155,6 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
         abs_coil_polarity_verified, bdot_cal, bdot_area_m2, bdot_gain,
         bdot_atten_db=bdot_atten_db, channel_signs=channel_signs,
     )
-
-    if overwrite and runs is None and os.path.isfile(out_path):
-        os.remove(out_path)
 
     existing_runs = set()
     drop_keys = []
@@ -741,36 +1211,131 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
             channel_signs=channel_signs, probe_to_lab=probe_to_lab,
         )
         p = spec.run_num
-        for k, v in res.items():
-            if isinstance(v, str):
-                payload[f"{p}__{k}"] = np.str_(v)
-            elif isinstance(v, (bool, np.bool_)):
-                payload[f"{p}__{k}"] = np.bool_(v)
-            elif isinstance(v, (int, np.integer)):
-                payload[f"{p}__{k}"] = np.int64(v)
-            elif isinstance(v, (float, np.floating)):
-                payload[f"{p}__{k}"] = np.float64(v)
-            else:
-                payload[f"{p}__{k}"] = np.asarray(v)
-        for sk, sv in want.items():
-            if sv is None:
-                continue
-            if isinstance(sv, np.ndarray):
-                payload[f"{p}__{sk}"] = sv
-            elif isinstance(sv, bool):
-                payload[f"{p}__{sk}"] = np.bool_(sv)
-            elif isinstance(sv, int):
-                payload[f"{p}__{sk}"] = np.int64(sv)
-            elif isinstance(sv, str):
-                payload[f"{p}__{sk}"] = np.str_(sv)
-            else:
-                payload[f"{p}__{sk}"] = np.float64(sv)
+        payload.update(_pack_npz_entries(p, res))
+        payload.update(_pack_npz_entries(p, want))
         ran_any = True
 
     if ran_any or not os.path.isfile(out_path):
         stale_keys = [k for k in drop_keys if k not in payload]
         merge_save_npz(out_path, payload, drop_keys=stale_keys)
         print(f"\nWrote {out_path}")
+    return out_path
+
+
+def batch_dc_bias_steps(
+    data_dir=DATA_DIR,
+    runs=None,
+    out_path=None,
+    *,
+    by_sign=DEFAULT_BY_SIGN,
+    bdot_cal=_UNSET,
+    bdot_area_m2=DEFAULT_BDOT_AREA_M2,
+    bdot_gain=DEFAULT_BDOT_GAIN,
+    bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
+    channel_signs=DEFAULT_CHANNEL_SIGNS,
+    probe_to_lab=None,
+    on_win_ms=DEFAULT_DC_ON_WIN_MS,
+    on_base_ms=DEFAULT_DC_ON_BASE_MS,
+    off_win_ms=DEFAULT_DC_OFF_WIN_MS,
+    off_base_ms=DEFAULT_DC_OFF_BASE_MS,
+    on_step_ms=DEFAULT_DC_ON_STEP_MS,
+    off_step_ms=DEFAULT_DC_OFF_STEP_MS,
+    sens_dur_ms=DEFAULT_DC_SENS_DUR_MS,
+    center_xy_cm=DEFAULT_DC_CENTER_XY_CM,
+    overwrite=False,
+):
+    """Persist ``{run}__dc__*`` bias-step keys into ``bdot_2d_jun2026.npz`` via :func:`merge_save_npz`.
+
+    Preserves all existing ``h1``/``h2`` and metadata keys in ``out_path``
+    without removing the file.
+    """
+    specs = (BDOT_2D_RUNS if runs is None
+             else tuple(BDOT_2D_RUN_MAP[r] for r in runs))
+    out_path = out_path or os.path.join(data_dir, OUT_NAME)
+    cal_obj, _, probe_id = _resolve_bdot_calibration(bdot_cal, bdot_area_m2)
+    dc_want = {
+        "by_sign_used": int(by_sign),
+        "bdot_calibrated": bool(cal_obj is not None),
+        "bdot_probe_id": str(probe_id),
+        "bdot_channel_signs": np.asarray(channel_signs, dtype=np.int64),
+    }
+
+    existing_dc_runs = set()
+    drop_keys = []
+    if os.path.isfile(out_path):
+        with np.load(out_path) as d:
+            existing_dc_runs = {
+                k.split("__", 1)[0] for k in d.files if k.endswith("__dc__I_int_on")
+            }
+            if overwrite:
+                prefixes = tuple(f"{s.run_num}__dc__" for s in specs)
+                drop_keys = [k for k in d.files if k.startswith(prefixes)]
+                existing_dc_runs -= {s.run_num for s in specs}
+            else:
+                for spec in specs:
+                    if spec.run_num not in existing_dc_runs:
+                        continue
+                    diffs = []
+                    for field, val in dc_want.items():
+                        k_dc = f"{spec.run_num}__dc__{field}"
+                        k_run = f"{spec.run_num}__{'by_sign' if field == 'by_sign_used' else field}"
+                        k_use = k_dc if k_dc in d.files else (k_run if k_run in d.files else None)
+                        if k_use is None:
+                            continue
+                        if isinstance(val, np.ndarray):
+                            got = np.asarray(d[k_use])
+                            if got.shape != val.shape or not np.allclose(got, val, rtol=1e-6, atol=1e-12):
+                                diffs.append(f"{field}: stored {got.tolist()} != {val.tolist()}")
+                        elif isinstance(val, bool):
+                            if bool(d[k_use]) != val:
+                                diffs.append(f"{field}: stored {bool(d[k_use])} != {val}")
+                        elif isinstance(val, int):
+                            if int(d[k_use]) != val:
+                                diffs.append(f"{field}: stored {int(d[k_use])} != {val}")
+                        elif isinstance(val, str):
+                            if str(d[k_use]) != val:
+                                diffs.append(f"{field}: stored {str(d[k_use])!r} != {val!r}")
+                    if diffs:
+                        raise ValueError(
+                            f"{out_path}: stored DC step for run '{spec.run_num}' differs "
+                            f"from requested settings ({'; '.join(diffs)}); "
+                            "pass overwrite=True to regenerate"
+                        )
+
+    payload = {
+        "updated": np.str_(datetime.datetime.now().isoformat(timespec="seconds")),
+    }
+    ran_any = False
+    for spec in specs:
+        if spec.run_num in existing_dc_runs:
+            continue
+        dc_res = analyze_run_dc_bias_steps(
+            spec,
+            data_dir=data_dir,
+            by_sign=by_sign,
+            bdot_cal=bdot_cal,
+            bdot_area_m2=bdot_area_m2,
+            bdot_gain=bdot_gain,
+            bdot_atten_db=bdot_atten_db,
+            channel_signs=channel_signs,
+            probe_to_lab=probe_to_lab,
+            on_win_ms=on_win_ms,
+            on_base_ms=on_base_ms,
+            off_win_ms=off_win_ms,
+            off_base_ms=off_base_ms,
+            on_step_ms=on_step_ms,
+            off_step_ms=off_step_ms,
+            sens_dur_ms=sens_dur_ms,
+            center_xy_cm=center_xy_cm,
+        )
+        payload.update(_pack_npz_entries(f"{spec.run_num}__dc", dc_res))
+        payload.update(_pack_npz_entries(f"{spec.run_num}__dc", dc_want))
+        ran_any = True
+
+    if ran_any or not os.path.isfile(out_path):
+        stale_keys = [k for k in drop_keys if k not in payload]
+        merge_save_npz(out_path, payload, drop_keys=stale_keys)
+        print(f"\nMerged DC bias-step keys into {out_path}")
     return out_path
 
 
@@ -789,6 +1354,7 @@ def print_summary(npz_path=None):
             b_scale = 1e4 if cal else 1e6
             j_unit = "A/m^2" if cal else "uV*s/cm"
             j_scale = 1.0 if cal else 1e4
+            i_unit = "A" if cal else "V*s*m"
             pol_note = "" if abs_pol else " [mod 180d: abs coil sign unverified]"
             print(
                 f"\nRun {r} ({float(d[f'{r}__b0_g']):.0f} G, f0={float(d[f'{r}__f0_hz']):.1f} Hz, "
@@ -815,8 +1381,61 @@ def print_summary(npz_path=None):
                         f"|Jz|={float(d[pfx+zn+'_jz_rms'])*j_scale:6.1f} {j_unit}  "
                         f"|LP|={float(d[pfx+zn+'_lp_rms'])*1e3:6.2f} mV"
                     )
+            dpfx = f"{r}__dc__"
+            if (dpfx + "I_int_on") in d.files:
+                nsh = int(d[dpfx + "n_shots_per_pos"]) if (dpfx + "n_shots_per_pos") in d.files else -1
+                pol_dc = bool(d[dpfx + "polarity_consistent"])
+                pol_bz_sens = (
+                    bool(d[dpfx + "polarity_dbz_sens_consistent"])
+                    if (dpfx + "polarity_dbz_sens_consistent") in d.files else None
+                )
+                w_on = d[dpfx + "on_win_ms"]
+                b_on = d[dpfx + "on_base_ms"]
+                w_off = d[dpfx + "off_win_ms"]
+                b_off = d[dpfx + "off_base_ms"]
+                sh_lbl = f"{nsh} shots/pos, " if nsh > 0 else ""
+                bz_note = (
+                    " [dBz_off marginal across sens windows]"
+                    if (pol_dc and pol_bz_sens is False) else ""
+                )
+                print(f"  [DC ] bias steps ({sh_lbl}polarity_ok={pol_dc}{bz_note}):")
+                print(
+                    f"        ON  [{float(w_on[0]):+.2f},{float(w_on[1]):+.2f}] ms "
+                    f"(base [{float(b_on[0]):+.2f},{float(b_on[1]):+.2f}]): "
+                    f"I_int={float(d[dpfx+'I_int_on']):+.2f} {i_unit} "
+                    f"(2\"={float(d[dpfx+'I_2in_on']):+.2f}, 4\"={float(d[dpfx+'I_4in_on']):+.2f}, "
+                    f"6\"={float(d[dpfx+'I_6in_on']):+.2f}, Stokes={float(d[dpfx+'I_stokes_on']):+.2f}) | "
+                    f"div/curl={float(d[dpfx+'div_curl_on']):.3f} (flip={float(d[dpfx+'div_curl_on_flipped']):.3f}) | "
+                    f"dBz={float(d[dpfx+'dBz_core_on'])*b_scale:+.3f}/{float(d[dpfx+'dBz_wall_on'])*b_scale:+.3f} {b_unit} (core/wall)"
+                )
+                print(
+                    f"        OFF [{float(w_off[0]):+.2f},{float(w_off[1]):+.2f}] ms "
+                    f"(base [{float(b_off[0]):+.2f},{float(b_off[1]):+.2f}]): "
+                    f"I_int={float(d[dpfx+'I_int_off']):+.2f} {i_unit} "
+                    f"(2\"={float(d[dpfx+'I_2in_off']):+.2f}, 4\"={float(d[dpfx+'I_4in_off']):+.2f}, "
+                    f"6\"={float(d[dpfx+'I_6in_off']):+.2f}, Stokes={float(d[dpfx+'I_stokes_off']):+.2f}) | "
+                    f"div/curl={float(d[dpfx+'div_curl_off']):.3f} (flip={float(d[dpfx+'div_curl_off_flipped']):.3f}) | "
+                    f"dBz={float(d[dpfx+'dBz_core_off'])*b_scale:+.3f}/{float(d[dpfx+'dBz_wall_off'])*b_scale:+.3f} {b_unit} (core/wall)"
+                )
+                if (dpfx + "sens_dur_ms") in d.files and d[dpfx + "sens_dur_ms"].size >= 2:
+                    sd = d[dpfx + "sens_dur_ms"]
+                    s_ion = d[dpfx + "sens_I_int_on"]
+                    s_ioff = d[dpfx + "sens_I_int_off"]
+                    s_dcon = d[dpfx + "sens_div_curl_on"]
+                    s_dcoff = d[dpfx + "sens_div_curl_off"]
+                    d_str = " vs ".join(f"{float(v):.2f}" for v in sd)
+                    ion_str = " vs ".join(f"{float(v):+.2f}" for v in s_ion)
+                    ioff_str = " vs ".join(f"{float(v):+.2f}" for v in s_ioff)
+                    dcon_str = " vs ".join(f"{float(v):.3f}" for v in s_dcon)
+                    dcoff_str = " vs ".join(f"{float(v):.3f}" for v in s_dcoff)
+                    print(
+                        f"        win-sens ({d_str} ms): "
+                        f"I_on={ion_str} {i_unit} (div/curl={dcon_str}), "
+                        f"I_off={ioff_str} {i_unit} (div/curl={dcoff_str})"
+                    )
 
 
 if __name__ == "__main__":
     out = batch_all()
+    batch_dc_bias_steps(out_path=out)
     print_summary(out)
