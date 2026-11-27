@@ -399,6 +399,185 @@ class TestTurbulenceHelpers(unittest.TestCase):
             with self.assertRaises(ValueError):
                 jtb._resolve_run32_channels("dummy.hdf5")
 
+    def test_compute_em_momentum_energy_flutter_exact_cylindrical_and_identities(self):
+        from scipy import constants as const
+
+        x_cm = np.arange(-8.0, 9.0, 1.0)
+        y_cm = np.arange(-8.0, 9.0, 1.0)
+        cx, cy = 2.0, -0.5
+        XX, YY = np.meshgrid(x_cm, y_cm)
+        dx, dy = XX - cx, YY - cy
+        RR = np.hypot(dx, dy)
+        ur_x, ur_y = dx / RR, dy / RR
+        ut_x, ut_y = -ur_y, ur_x
+
+        b0_g = 800.0
+        b0_t = b0_g * 1e-4
+        ne_cm3 = np.full(5, 1.0e13)
+        te_ev = np.full(5, 1.0)
+        rho = 4.0 * const.proton_mass * (ne_cm3 * 1e6)
+        cs1 = np.sqrt(const.e * te_ev / (4.0 * const.proton_mass))
+
+        # (a) Pure azimuthal field B_theta = B0_amp, B_r = 0, B_z = 0 -> zero Maxwell stress & flutter
+        b_amp = 1.0e-5  # 0.1 G peak
+        Bx_az = b_amp * ut_x + 0j
+        By_az = b_amp * ut_y + 0j
+        Bz_zero = np.zeros_like(Bx_az)
+        res_az = jtb.compute_em_momentum_energy_flutter(
+            x_cm, y_cm, Bx_az, By_az, Bz_zero, (cx, cy), b0_g, ne_cm3, te_ev,
+        )
+        np.testing.assert_allclose(res_az["dB_r_rms_t"], 0.0, atol=1e-18)
+        np.testing.assert_allclose(res_az["dB_theta_rms_t"], b_amp / np.sqrt(2.0), rtol=1e-12)
+        np.testing.assert_allclose(res_az["maxwell_stress_m2_s2"], 0.0, atol=1e-12)
+        np.testing.assert_allclose(res_az["delta_r_B_m"], 0.0, atol=1e-18)
+        np.testing.assert_allclose(res_az["chi_RR_m2_s"], 0.0, atol=1e-24)
+        np.testing.assert_allclose(res_az["W_B_j_m3"], (0.5 * b_amp ** 2) / (2.0 * const.mu_0), rtol=1e-12)
+        self.assertLess(res_az["parseval_max_rel_err"], 1e-14)
+
+        # (b) Exact spiral phasor: B_r = A_r, B_theta = A_t * exp(i * phi), B_z = A_z
+        A_r, A_t, A_z = 1.2e-5, 2.0e-5, 0.3e-5
+        phi = np.radians(30.0)
+        Br_c = np.full_like(RR, A_r + 0j, dtype=complex)
+        Bt_c = np.full_like(RR, A_t * np.exp(1j * phi), dtype=complex)
+        Bx = Br_c * ur_x + Bt_c * ut_x
+        By = Br_c * ur_y + Bt_c * ut_y
+        Bz = np.full_like(RR, A_z + 0j, dtype=complex)
+
+        # Second harmonic orthogonal contribution: half amplitude, same phase
+        Bx2, By2, Bz2 = 0.5 * Bx, 0.5 * By, 0.5 * Bz
+
+        # Synthetic Run 32 inputs chosen so W_K == W_B_perp -> exact Alfven impedance = 1.0!
+        wb_perp_exact = 0.5 * (A_r ** 2 + A_t ** 2) / (2.0 * const.mu_0)
+        et_f0_alf = (wb_perp_exact / rho) / (cs1 ** 2)
+        rs_f0 = np.full(5, 1.0e-3)
+        dn_rms = np.full(5, 0.10)
+        shear_cm = np.full(5, 0.01)
+        gE_mach = np.full(5, 3.0e4)
+        gE_exb = np.full(5, 4.0e4)
+        # Exact Eich-Manz Reynolds rate for uniform rs_f0, et_f0_alf, gE
+        g_re_mach = float((rs_f0[0] / et_f0_alf[0]) * gE_mach[0])
+        g_re_exb = float((rs_f0[0] / et_f0_alf[0]) * gE_exb[0])
+
+        res = jtb.compute_em_momentum_energy_flutter(
+            x_cm, y_cm, Bx, By, Bz, (cx, cy), b0_g, ne_cm3, te_ev,
+            Bx_h2=Bx2, By_h2=By2, Bz_h2=Bz2,
+            rs_rt_f0=rs_f0, et_f0_mean=et_f0_alf, dn_rms=dn_rms, cs1_band_m_s=cs1,
+            shear_per_cm=shear_cm, p_shear_integrated=-1.0,
+            gamma_E_mach_s=gE_mach, gamma_E_exb_s=gE_exb,
+            gamma_sh_mach_f0_s=g_re_mach, gamma_sh_mach_f0_wall_s=g_re_mach,
+            gamma_sh_exb_f0_s=g_re_exb, gamma_sh_exb_f0_wall_s=g_re_exb,
+            l_par_m=14.0, l_wall_m=0.04,
+        )
+        exp_maxwell = -0.5 * A_r * A_t * np.cos(phi) / (const.mu_0 * rho)
+        np.testing.assert_allclose(res["maxwell_stress_m2_s2"], exp_maxwell, rtol=1e-12)
+        # h1 + h2 (amplitude 0.5x -> power 0.25x) must equal 1.25x h1 identically
+        np.testing.assert_allclose(res["maxwell_stress_h12_m2_s2"], 1.25 * exp_maxwell, rtol=1e-12)
+        np.testing.assert_allclose(res["W_B_h12_j_m3"], 1.25 * res["W_B_j_m3"], rtol=1e-12)
+        np.testing.assert_allclose(res["dB_r_rms_h12_t"], np.sqrt(1.25) * res["dB_r_rms_t"], rtol=1e-12)
+        self.assertAlmostEqual(res["h12_over_h1_maxwell_med"], 1.25, places=10)
+        self.assertAlmostEqual(res["h12_over_h1_wb_med"], 1.25, places=10)
+
+        # Exact Alfven impedance identity: |dE_perp/dB_perp|/v_A == sqrt(W_K / W_B_perp) == 1.0
+        np.testing.assert_allclose(res["wave_impedance_over_vA"], 1.0, rtol=1e-12)
+        np.testing.assert_allclose(
+            res["wave_impedance_over_vA_h12"],
+            np.sqrt(res["W_K_j_m3"] / res["W_B_perp_h12_j_m3"]),
+            rtol=1e-12,
+        )
+
+        # Sign conventions: 4-quadrant check matches -cos(phi) and global negation (-Bx, -By) is invariant
+        self.assertTrue(res["wall_quad_all_same_sign"])
+        np.testing.assert_allclose(res["wall_quad_neg_c_brbt_med"], -np.cos(phi), rtol=1e-12)
+        res_neg = jtb.compute_em_momentum_energy_flutter(
+            x_cm, y_cm, -Bx, -By, -Bz, (cx, cy), b0_g, ne_cm3, te_ev,
+        )
+        np.testing.assert_allclose(res_neg["maxwell_stress_m2_s2"], res["maxwell_stress_m2_s2"], rtol=1e-12)
+
+        # Uniform stress ratio -> Eich-Manz Maxwell/Reynolds ratio equals local M_rt / R_rt
+        exp_rat = float(exp_maxwell[0] / (rs_f0[0] * cs1[0] ** 2))
+        self.assertAlmostEqual(res["gamma_sh_max_over_re_mach"], exp_rat, places=10)
+        self.assertAlmostEqual(res["gamma_sh_max_over_re_exb"], exp_rat, places=10)
+
+        # Flutter & thermal energy exact checks
+        exp_dbr = A_r / np.sqrt(2.0)
+        np.testing.assert_allclose(res["delta_r_B_m"], 14.0 * exp_dbr / b0_t, rtol=1e-12)
+        np.testing.assert_allclose(res["chi_RR_m2_s"], res["chi_par_m2_s"] * (exp_dbr / b0_t) ** 2, rtol=1e-12)
+        np.testing.assert_allclose(res["D_ExB_m2_s"], res["dv_perp_rms_m_s"] * 0.04, rtol=1e-12)
+        np.testing.assert_allclose(res["W_n_j_m3"], 0.5 * (ne_cm3 * 1e6) * (te_ev * const.e) * (dn_rms ** 2), rtol=1e-12)
+
+    def test_analyze_em_momentum_energy_flutter_npz_and_uncalibrated_guard(self):
+        x_cm = np.arange(-8.0, 9.0, 1.0)
+        y_cm = np.arange(-8.0, 9.0, 1.0)
+        XX, YY = np.meshgrid(x_cm, y_cm)
+        dx, dy = XX - 2.0, YY + 0.5
+        RR = np.hypot(dx, dy)
+        ur_x, ur_y = np.where(RR > 0, dx / np.where(RR > 0, RR, 1.0), 0.0), np.where(RR > 0, dy / np.where(RR > 0, RR, 1.0), 0.0)
+        ut_x, ut_y = -ur_y, ur_x
+        Bx = 4.0e-6 * ur_x + 6.0e-6 * ut_x + 0j
+        By = 4.0e-6 * ur_y + 6.0e-6 * ut_y + 0j
+        Bz = np.full_like(Bx, 1.0e-6 + 0j)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bdot_p = os.path.join(tmp, jtb.BDOT_2D_NPZ)
+            prof_p = os.path.join(tmp, jtb.PROFILES_NPZ)
+            x03 = np.linspace(-8.0, 10.0, 37)
+            np.savez(
+                prof_p,
+                **{
+                    "03__x_cm": x03,
+                    "03__x_center_cm": 1.0,
+                    "03__ref_sweep_idx": 0,
+                    "03__ne": np.full((x03.size, 2), 1.2e13),
+                    "03__Te": np.full((x03.size, 2), 0.9),
+                },
+            )
+            payload = {}
+            for rnum, b0_g in (("26", 800.0), ("31", 600.0)):
+                payload.update({
+                    f"{rnum}__b0_g": b0_g,
+                    f"{rnum}__bdot_calibrated": True,
+                    f"{rnum}__abs_coil_polarity_verified": True,
+                    f"{rnum}__x_cm": x_cm,
+                    f"{rnum}__y_cm": y_cm,
+                    f"{rnum}__h1__center_x_cm": 2.0,
+                    f"{rnum}__h1__center_y_cm": -0.5,
+                    f"{rnum}__h1__Bx": Bx,
+                    f"{rnum}__h1__By": By,
+                    f"{rnum}__h1__Bz": Bz,
+                    f"{rnum}__h2__Bx": 0.2 * Bx,
+                    f"{rnum}__h2__By": 0.2 * By,
+                    f"{rnum}__h2__Bz": 0.2 * Bz,
+                })
+            np.savez(bdot_p, **payload)
+
+            r32_synth = {
+                "r32__rs_rt_f0": np.full(5, 1.0e-3),
+                "r32__et_f0_mean": np.full(5, 2.0e-3),
+                "r32__dn_rms": np.full(5, 0.10),
+                "r32__cs1_band_m_s": np.full(5, 4500.0),
+                "r32__shear_per_cm": np.full(5, 0.01),
+                "r32__p_shear_integrated": -2.0e-4,
+                "r32__gamma_E_mach_s": np.full(5, 3.0e4),
+                "r32__gamma_E_exb_s": np.full(5, 3.5e4),
+                "r32__gamma_sh_mach_f0_s": 1.5e4,
+                "r32__gamma_sh_mach_f0_wall_s": 1.4e4,
+                "r32__gamma_sh_exb_f0_s": 2.0e4,
+                "r32__gamma_sh_exb_f0_wall_s": 1.8e4,
+            }
+            em_out = jtb.analyze_em_momentum_energy_flutter(data_dir=tmp, r32_res=r32_synth)
+            self.assertTrue(em_out["em_26__b0_matched_to_r32"])
+            self.assertFalse(em_out["em_31__b0_matched_to_r32"])
+            self.assertTrue(em_out["em_26__has_h2"])
+            self.assertTrue(em_out["em_26__maxwell_lt_1pct_wall"])
+            self.assertEqual(em_out["em_26__maxwell_stress_m2_s2"].shape, (5,))
+            self.assertGreater(float(em_out["em_31__delta_r_B_m"][0]), float(em_out["em_26__delta_r_B_m"][0]))
+
+            # Guard against uncalibrated B-dot NPZ
+            payload["26__bdot_calibrated"] = False
+            np.savez(bdot_p, **payload)
+            with self.assertRaises(ValueError):
+                jtb.analyze_em_momentum_energy_flutter(data_dir=tmp, r32_res=r32_synth)
+
 
 if __name__ == "__main__":
     unittest.main()

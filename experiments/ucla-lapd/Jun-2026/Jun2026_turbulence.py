@@ -46,6 +46,17 @@ drift-wave literature (Pace et al. 2008; Maggs & Morales 2011; Friedman et al.
    cycle waveforms across stationary ``Isat`` (puff & ``B_0`` scans), radially
    across ``r = 0..7 cm`` on Runs 11–14, and directly on Run 32's radial and
    azimuthal velocity fluctuations (``M_r``, ``M_theta``) vs. ``Isat_0``.
+6. **Electromagnetic momentum, wave energy & magnetic-flutter budgets
+   (P28 3x3 bench-calibrated B-dot Runs 26 [800 G] & 31 [600 G] vs. Run 32):**
+   Projects coherent reference-locked complex phasors ``(Bx, By, Bz)`` onto
+   cylindrical ``(B_r, B_theta)`` around the fitted mode center on Run 32's
+   matched radial bands ``[1.5, 7.0) cm``, computing Maxwell stress
+   ``-<B_r B_theta> / (mu_0 * rho)`` and its Eich-Manz / ``P_shear``
+   contribution relative to Run 32's Reynolds stress, wave energy partition
+   ``(W_B, W_K, W_n)`` and effective impedance ``|dE_perp / dB_perp| / v_A``,
+   magnetic-flutter displacement ``delta_r_B = L_par * (dB_r_rms / B_0)`` and
+   collisional Rechester-Rosenbluth diffusivity ``chi_RR`` vs. ``D_ExB``, plus
+   ``h1`` vs. ``h1 + h2`` and 4-quadrant / ``By``-flip sign checks.
 
 Note: No run in Jun-2026 carries a simultaneous floating-potential ``Vf``
 channel alongside fixed-bias ``Isat``; turbulent particle flux and Reynolds
@@ -71,6 +82,7 @@ trapezoid = getattr(np, "trapezoid", None) or np.trapz
 from data_analysis.io import open_lapd, parse_shunts, position_shots
 from data_analysis.plasma.flow import find_flow_centre, polar_components
 from data_analysis.plasma.mach import K_HUTCHINSON, mach_single
+from data_analysis.plasma.profiles import local_drift_scales
 from data_analysis.signal import (
     amplitude_normalized_cross_phase,
     clip_time_window,
@@ -109,6 +121,11 @@ RUN32_F0_BAND_HZ = (2000.0, 6500.0)
 RUN32_BB_BAND_HZ = (1000.0, 25000.0)
 RUN32_MAX_POS_PER_BAND = 24
 DEFAULT_X_CENTER_CM = 1.0
+DEFAULT_L_PAR_M = 14.0
+DEFAULT_L_WALL_M = 0.04          # 4 cm inner-wall radial scale (Jun2026_stability)
+EM_BUDGET_RUNS = ("26", "31")    # 800 G primary (matched to Run 32/03), 600 G secondary
+BDOT_2D_NPZ = "bdot_2d_jun2026.npz"
+PROFILES_NPZ = "profiles_summary_jun2026.npz"
 
 
 def _time_seconds(tarr):
@@ -1177,10 +1194,563 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
 
 
 # ============================================================================
+# 6. Electromagnetic momentum, wave energy & magnetic-flutter budgets (P28 B-dot)
+# ============================================================================
+def compute_em_momentum_energy_flutter(
+    x_cm,
+    y_cm,
+    Bx,
+    By,
+    Bz,
+    center_xy_cm,
+    b0_g,
+    ne_band_cm3,
+    te_band_ev,
+    *,
+    bands=RUN32_RADIAL_BANDS,
+    Bx_h2=None,
+    By_h2=None,
+    Bz_h2=None,
+    rs_rt_f0=None,
+    et_f0_mean=None,
+    dn_rms=None,
+    cs1_band_m_s=None,
+    shear_per_cm=None,
+    p_shear_integrated=np.nan,
+    gamma_E_mach_s=None,
+    gamma_E_exb_s=None,
+    gamma_sh_mach_f0_s=np.nan,
+    gamma_sh_mach_f0_wall_s=np.nan,
+    gamma_sh_exb_f0_s=np.nan,
+    gamma_sh_exb_f0_wall_s=np.nan,
+    l_par_m=DEFAULT_L_PAR_M,
+    l_wall_m=DEFAULT_L_WALL_M,
+    mu=4.0,
+    Z=1,
+    wall_r_max_cm=4.5,
+):
+    """Pure-array EM momentum (Maxwell stress), wave energy & magnetic-flutter budget.
+
+    Projects peak-amplitude complex B-dot phasors ``(Bx, By, Bz)`` [T] on a 2-D
+    Cartesian grid ``(ny, nx)`` onto right-handed cylindrical components
+    ``(B_r, B_theta)`` around ``center_xy_cm = (cx, cy)`` (with
+    ``r_hat x theta_hat = +z_hat``) and evaluates matched radial-band averages
+    using the peak-phasor time-average convention
+    ``<Re(A) Re(B)> = 0.5 * Re(A * conj(B))``.
+
+    When 2nd-harmonic phasors ``(Bx_h2, By_h2, Bz_h2)`` are supplied, they are
+    projected about the same ``(cx, cy)`` and summed in quadrature/covariance
+    (exact by Fourier orthogonality between ``f_0`` and ``2 f_0``) as an
+    ``h1`` vs. ``h1 + h2`` sanity check.
+    """
+    x_arr = np.asarray(x_cm, dtype=float)
+    y_arr = np.asarray(y_cm, dtype=float)
+    Bx_1 = np.asarray(Bx, dtype=complex)
+    By_1 = np.asarray(By, dtype=complex)
+    Bz_1 = np.asarray(Bz, dtype=complex)
+    exp_shape = (y_arr.size, x_arr.size)
+    if Bx_1.shape != exp_shape or By_1.shape != exp_shape or Bz_1.shape != exp_shape:
+        raise ValueError(
+            f"Bx, By, Bz must have shape {exp_shape}; got {Bx_1.shape}, {By_1.shape}, {Bz_1.shape}"
+        )
+
+    b0_g_f = float(b0_g)
+    b0_t = b0_g_f * 1e-4
+    l_par = float(l_par_m)
+    l_wall = float(l_wall_m)
+    if b0_t <= 0.0 or l_par <= 0.0 or l_wall <= 0.0:
+        raise ValueError("b0_g, l_par_m, and l_wall_m must be strictly positive")
+
+    nb = len(bands)
+    r_mids_cm = np.array([0.5 * (float(a) + float(b)) for a, b in bands], dtype=float)
+    r_m = r_mids_cm * 1e-2
+    ne_cm3 = np.asarray(ne_band_cm3, dtype=float)
+    te_ev = np.asarray(te_band_ev, dtype=float)
+    if ne_cm3.shape != (nb,) or te_ev.shape != (nb,):
+        raise ValueError(f"ne_band_cm3 and te_band_ev must have length {nb}")
+
+    cx, cy = float(center_xy_cm[0]), float(center_xy_cm[1])
+    XX, YY = np.meshgrid(x_arr, y_arr)
+    dx = XX - cx
+    dy = YY - cy
+    RR = np.hypot(dx, dy)
+    TH_deg = np.degrees(np.arctan2(dy, dx))
+    pos_r = RR > 0.0
+    ur_x = np.where(pos_r, dx / np.where(pos_r, RR, 1.0), np.nan)
+    ur_y = np.where(pos_r, dy / np.where(pos_r, RR, 1.0), np.nan)
+    ut_x = -ur_y
+    ut_y = ur_x
+
+    def _project_quadratics(bx_c, by_c, bz_c):
+        br_c = bx_c * ur_x + by_c * ur_y
+        bt_c = bx_c * ut_x + by_c * ut_y
+        br_bt = 0.5 * np.real(br_c * np.conj(bt_c))
+        br2 = 0.5 * (np.abs(br_c) ** 2)
+        bt2 = 0.5 * (np.abs(bt_c) ** 2)
+        bp2 = 0.5 * (np.abs(bx_c) ** 2 + np.abs(by_c) ** 2)
+        bz2 = 0.5 * (np.abs(bz_c) ** 2)
+        btot2 = bp2 + bz2
+        return br_bt, br2, bt2, bp2, btot2
+
+    br_bt_1, br2_1, bt2_1, bp2_1, btot2_1 = _project_quadratics(Bx_1, By_1, Bz_1)
+    # Cylindrical Parseval identity check: <|B_r|^2> + <|B_theta|^2> == <|B_x|^2 + |B_y|^2>
+    ok_p = pos_r & np.isfinite(bp2_1) & (bp2_1 > 0.0)
+    parseval_max_rel_err = (
+        float(np.nanmax(np.abs((br2_1[ok_p] + bt2_1[ok_p]) - bp2_1[ok_p]) / bp2_1[ok_p]))
+        if np.any(ok_p) else np.nan
+    )
+
+    # Flipped-By diagnostic: breaking right-handed (Bx, By) handedness destroys coherent M_rt
+    br_bt_flip, _, _, _, _ = _project_quadratics(Bx_1, -By_1, Bz_1)
+
+    has_h2 = (Bx_h2 is not None) and (By_h2 is not None) and (Bz_h2 is not None)
+    if has_h2:
+        Bx_2 = np.asarray(Bx_h2, dtype=complex)
+        By_2 = np.asarray(By_h2, dtype=complex)
+        Bz_2 = np.asarray(Bz_h2, dtype=complex)
+        if Bx_2.shape != exp_shape or By_2.shape != exp_shape or Bz_2.shape != exp_shape:
+            raise ValueError(f"h2 arrays must have shape {exp_shape}")
+        br_bt_2, br2_2, bt2_2, bp2_2, btot2_2 = _project_quadratics(Bx_2, By_2, Bz_2)
+        br_bt_12 = br_bt_1 + br_bt_2
+        br2_12 = br2_1 + br2_2
+        bt2_12 = bt2_1 + bt2_2
+        bp2_12 = bp2_1 + bp2_2
+        btot2_12 = btot2_1 + btot2_2
+    else:
+        br_bt_12 = np.full(exp_shape, np.nan, dtype=float)
+        br2_12 = np.full(exp_shape, np.nan, dtype=float)
+        bt2_12 = np.full(exp_shape, np.nan, dtype=float)
+        bp2_12 = np.full(exp_shape, np.nan, dtype=float)
+        btot2_12 = np.full(exp_shape, np.nan, dtype=float)
+
+    # 4-quadrant wall [2.5, 4.5) cm sign-convention audit on -c(B_r, B_theta)
+    denom_c = np.sqrt(np.maximum(br2_1 * bt2_1, 0.0))
+    neg_c_brbt = np.where(denom_c > 0.0, -br_bt_1 / np.where(denom_c > 0.0, denom_c, 1.0), np.nan)
+    wall_2d = (RR >= 2.5) & (RR < 4.5) & np.isfinite(neg_c_brbt)
+    q_bounds = ((0.0, 90.0), (90.0, 180.0), (-180.0, -90.0), (-90.0, 0.0))
+    quad_neg_c = np.array([
+        float(np.median(neg_c_brbt[wall_2d & (TH_deg >= lo) & (TH_deg < hi)]))
+        if np.any(wall_2d & (TH_deg >= lo) & (TH_deg < hi)) else np.nan
+        for lo, hi in q_bounds
+    ], dtype=float)
+    fin_q = quad_neg_c[np.isfinite(quad_neg_c)]
+    wall_quad_all_same_sign = bool(
+        fin_q.size == 4 and (np.all(fin_q > 0.0) or np.all(fin_q < 0.0))
+    )
+
+    # Plasma background scales per radial band
+    mi_kg = float(mu) * const.proton_mass
+    ne_m3 = ne_cm3 * 1e6
+    valid_ne = np.isfinite(ne_m3) & (ne_m3 > 0.0)
+    valid_te = np.isfinite(te_ev) & (te_ev > 0.0)
+    rho = np.where(valid_ne, mi_kg * ne_m3, np.nan)
+    v_alfven = np.where(valid_ne, b0_t / np.sqrt(const.mu_0 * np.where(valid_ne, rho, 1.0)), np.nan)
+    v_te = np.where(valid_te, np.sqrt(const.e * np.where(valid_te, te_ev, 1.0) / const.electron_mass), np.nan)
+    cs1 = (
+        np.asarray(cs1_band_m_s, dtype=float)
+        if cs1_band_m_s is not None
+        else np.where(valid_te, np.sqrt(const.e * np.where(valid_te, te_ev, 1.0) / mi_kg), np.nan)
+    )
+
+    nu_ei = np.full(nb, np.nan, dtype=float)
+    chi_par = np.full(nb, np.nan, dtype=float)
+    lambda_mfp = np.full(nb, np.nan, dtype=float)
+    for bi in range(nb):
+        if valid_ne[bi] and valid_te[bi]:
+            sc = local_drift_scales(float(ne_cm3[bi]), float(te_ev[bi]), b0_g_f, mu=float(mu), Z=int(Z))
+            nu_ei[bi] = float(sc["nu_ei_s"])
+            if np.isfinite(nu_ei[bi]) and nu_ei[bi] > 0.0:
+                chi_par[bi] = 3.16 * (v_te[bi] ** 2) / nu_ei[bi]
+                lambda_mfp[bi] = v_te[bi] / nu_ei[bi]
+
+    # Band averages of magnetic quantities
+    n_grid = np.zeros(nb, dtype=int)
+    br_bt_cov = np.full(nb, np.nan, dtype=float)
+    br_bt_cov_h12 = np.full(nb, np.nan, dtype=float)
+    br_bt_cov_flip = np.full(nb, np.nan, dtype=float)
+    dB_r_rms = np.full(nb, np.nan, dtype=float)
+    dB_t_rms = np.full(nb, np.nan, dtype=float)
+    dB_perp_rms = np.full(nb, np.nan, dtype=float)
+    dB_tot_rms = np.full(nb, np.nan, dtype=float)
+    dB_r_rms_h12 = np.full(nb, np.nan, dtype=float)
+    dB_perp_rms_h12 = np.full(nb, np.nan, dtype=float)
+    dB_tot_rms_h12 = np.full(nb, np.nan, dtype=float)
+    W_B = np.full(nb, np.nan, dtype=float)
+    W_B_perp = np.full(nb, np.nan, dtype=float)
+    W_B_h12 = np.full(nb, np.nan, dtype=float)
+    W_B_perp_h12 = np.full(nb, np.nan, dtype=float)
+
+    for bi, (r0, r1) in enumerate(bands):
+        m = pos_r & (RR >= float(r0)) & (RR < float(r1)) & np.isfinite(br_bt_1) & np.isfinite(btot2_1)
+        n_grid[bi] = int(np.sum(m))
+        if n_grid[bi] == 0:
+            continue
+        br_bt_cov[bi] = float(np.mean(br_bt_1[m]))
+        br_bt_cov_flip[bi] = float(np.mean(br_bt_flip[m]))
+        dB_r_rms[bi] = float(np.sqrt(np.mean(br2_1[m])))
+        dB_t_rms[bi] = float(np.sqrt(np.mean(bt2_1[m])))
+        dB_perp_rms[bi] = float(np.sqrt(np.mean(bp2_1[m])))
+        dB_tot_rms[bi] = float(np.sqrt(np.mean(btot2_1[m])))
+        W_B[bi] = float(np.mean(btot2_1[m])) / (2.0 * const.mu_0)
+        W_B_perp[bi] = float(np.mean(bp2_1[m])) / (2.0 * const.mu_0)
+        if has_h2:
+            m12 = m & np.isfinite(br_bt_12) & np.isfinite(btot2_12)
+            if np.any(m12):
+                br_bt_cov_h12[bi] = float(np.mean(br_bt_12[m12]))
+                dB_r_rms_h12[bi] = float(np.sqrt(np.mean(br2_12[m12])))
+                dB_perp_rms_h12[bi] = float(np.sqrt(np.mean(bp2_12[m12])))
+                dB_tot_rms_h12[bi] = float(np.sqrt(np.mean(btot2_12[m12])))
+                W_B_h12[bi] = float(np.mean(btot2_12[m12])) / (2.0 * const.mu_0)
+                W_B_perp_h12[bi] = float(np.mean(bp2_12[m12])) / (2.0 * const.mu_0)
+
+    # Cylindrical Maxwell stress per unit mass: -<B_r B_theta> / (mu_0 * rho) [m^2/s^2]
+    maxwell = -br_bt_cov / (const.mu_0 * rho)
+    maxwell_h12 = -br_bt_cov_h12 / (const.mu_0 * rho)
+    maxwell_flip = -br_bt_cov_flip / (const.mu_0 * rho)
+
+    # Magnetic-flutter field-line displacement & collisional Rechester-Rosenbluth diffusivity
+    dB_r_over_B0 = dB_r_rms / b0_t
+    dB_r_over_B0_h12 = dB_r_rms_h12 / b0_t
+    delta_r_B = l_par * dB_r_over_B0
+    delta_r_B_h12 = l_par * dB_r_over_B0_h12
+    chi_RR = chi_par * (dB_r_over_B0 ** 2)
+    chi_RR_h12 = chi_par * (dB_r_over_B0_h12 ** 2)
+
+    # Comparison against Run 32 Reynolds stress, kinetic/thermal energy, and E x B diffusivity
+    nan_b = np.full(nb, np.nan, dtype=float)
+    reynolds = (
+        np.asarray(rs_rt_f0, dtype=float) * (cs1 ** 2)
+        if rs_rt_f0 is not None else nan_b.copy()
+    )
+    ok_re = np.isfinite(reynolds) & (np.abs(reynolds) > 0.0)
+    max_over_re_signed = np.where(ok_re, maxwell / np.where(ok_re, reynolds, 1.0), np.nan)
+    max_over_re_abs = np.abs(max_over_re_signed)
+    max_over_re_abs_h12 = np.where(ok_re, np.abs(maxwell_h12) / np.where(ok_re, np.abs(reynolds), 1.0), np.nan)
+
+    # Hollow-wall bands [2.5, 5.5) cm (plus full [1.5, 7.0) cm summary)
+    wall_bands = (r_mids_cm >= 2.5) & (r_mids_cm < 5.5)
+    ok_wall_rat = wall_bands & np.isfinite(max_over_re_abs)
+    max_abs_ratio_wall = float(np.nanmax(max_over_re_abs[ok_wall_rat])) if np.any(ok_wall_rat) else np.nan
+    max_abs_ratio_all = float(np.nanmax(max_over_re_abs)) if np.any(np.isfinite(max_over_re_abs)) else np.nan
+    maxwell_lt_1pct_wall = bool(np.isfinite(max_abs_ratio_wall) and max_abs_ratio_wall < 0.01)
+
+    # Wave kinetic & thermal energy densities, wave impedance, and D_ExB
+    if et_f0_mean is not None:
+        et_f0 = np.asarray(et_f0_mean, dtype=float)
+        et_m2_s2 = et_f0 * (cs1 ** 2)
+        W_K = rho * et_m2_s2
+        dv_perp_rms = np.where(
+            np.isfinite(et_m2_s2) & (et_m2_s2 >= 0.0),
+            np.sqrt(2.0 * np.maximum(et_m2_s2, 0.0)),
+            np.nan,
+        )
+        dE_perp_rms = dv_perp_rms * b0_t
+        ok_imp = np.isfinite(dE_perp_rms) & np.isfinite(dB_perp_rms) & (dB_perp_rms > 0.0) & np.isfinite(v_alfven) & (v_alfven > 0.0)
+        wave_imp = np.where(ok_imp, (dE_perp_rms / np.where(ok_imp, dB_perp_rms, 1.0)) / np.where(ok_imp, v_alfven, 1.0), np.nan)
+        ok_imp12 = np.isfinite(dE_perp_rms) & np.isfinite(dB_perp_rms_h12) & (dB_perp_rms_h12 > 0.0) & np.isfinite(v_alfven) & (v_alfven > 0.0)
+        wave_imp_h12 = np.where(ok_imp12, (dE_perp_rms / np.where(ok_imp12, dB_perp_rms_h12, 1.0)) / np.where(ok_imp12, v_alfven, 1.0), np.nan)
+        D_ExB = dv_perp_rms * l_wall
+        ok_d = np.isfinite(D_ExB) & (D_ExB > 0.0)
+        chi_RR_over_D = np.where(ok_d, chi_RR / np.where(ok_d, D_ExB, 1.0), np.nan)
+        chi_RR_over_D_h12 = np.where(ok_d, chi_RR_h12 / np.where(ok_d, D_ExB, 1.0), np.nan)
+    else:
+        et_m2_s2 = nan_b.copy()
+        W_K = nan_b.copy()
+        dv_perp_rms = nan_b.copy()
+        dE_perp_rms = nan_b.copy()
+        wave_imp = nan_b.copy()
+        wave_imp_h12 = nan_b.copy()
+        D_ExB = nan_b.copy()
+        chi_RR_over_D = nan_b.copy()
+        chi_RR_over_D_h12 = nan_b.copy()
+
+    if dn_rms is not None:
+        dn_arr = np.asarray(dn_rms, dtype=float)
+        W_n = 0.5 * ne_m3 * (te_ev * const.e) * (dn_arr ** 2)
+    else:
+        W_n = nan_b.copy()
+
+    W_tot = W_B + W_K + W_n
+    ok_wk = np.isfinite(W_K) & (W_K > 0.0)
+    ok_wt = np.isfinite(W_tot) & (W_tot > 0.0)
+    W_B_over_W_K = np.where(ok_wk, W_B / np.where(ok_wk, W_K, 1.0), np.nan)
+    W_B_over_W_tot = np.where(ok_wt, W_B / np.where(ok_wt, W_tot, 1.0), np.nan)
+    W_K_over_W_tot = np.where(ok_wt, W_K / np.where(ok_wt, W_tot, 1.0), np.nan)
+    W_n_over_W_tot = np.where(ok_wt, W_n / np.where(ok_wt, W_tot, 1.0), np.nan)
+
+    # Maxwell shear-production contribution relative to Run 32 P_shear & Eich-Manz gamma_sh
+    if shear_per_cm is not None:
+        sh_cm = np.asarray(shear_per_cm, dtype=float)
+        ok_cs = np.isfinite(cs1) & (cs1 > 0.0)
+        p_shear_max_loc = np.where(ok_cs, -(maxwell / np.where(ok_cs, cs1 ** 2, 1.0)) * sh_cm, np.nan)
+        ok_ps = np.isfinite(p_shear_max_loc)
+        p_shear_max_int = (
+            float(trapezoid(p_shear_max_loc[ok_ps] * r_mids_cm[ok_ps], r_mids_cm[ok_ps]))
+            if int(np.sum(ok_ps)) >= 2 else np.nan
+        )
+        p_shear_max_over_re_int = (
+            float(p_shear_max_int / float(p_shear_integrated))
+            if (np.isfinite(p_shear_max_int) and np.isfinite(p_shear_integrated) and float(p_shear_integrated) != 0.0)
+            else np.nan
+        )
+    else:
+        p_shear_max_loc = nan_b.copy()
+        p_shear_max_int = np.nan
+        p_shear_max_over_re_int = np.nan
+
+    wall_em = r_mids_cm < float(wall_r_max_cm)
+    w_mass = np.where(valid_ne, ne_cm3, np.nan)
+
+    def _em_rate(m_stress, gE_arr):
+        if gE_arr is None:
+            return nan_b.copy(), np.nan, np.nan
+        gE = np.asarray(gE_arr, dtype=float)
+        p_em = m_stress * gE
+        ok = np.isfinite(p_em) & np.isfinite(et_m2_s2) & np.isfinite(w_mass) & (et_m2_s2 > 0.0)
+        if int(np.sum(ok)) >= 2:
+            num = float(trapezoid(w_mass[ok] * p_em[ok] * r_m[ok], r_m[ok]))
+            den = float(trapezoid(w_mass[ok] * et_m2_s2[ok] * r_m[ok], r_m[ok]))
+            g_full = num / den if den > 0.0 else np.nan
+        else:
+            g_full = np.nan
+        ok_w = ok & wall_em
+        if int(np.sum(ok_w)) >= 2:
+            num_w = float(trapezoid(w_mass[ok_w] * p_em[ok_w] * r_m[ok_w], r_m[ok_w]))
+            den_w = float(trapezoid(w_mass[ok_w] * et_m2_s2[ok_w] * r_m[ok_w], r_m[ok_w]))
+            g_wall = num_w / den_w if den_w > 0.0 else np.nan
+        else:
+            g_wall = np.nan
+        return p_em, g_full, g_wall
+
+    p_em_max_mach, g_max_mach, g_max_mach_w = _em_rate(maxwell, gamma_E_mach_s)
+    p_em_max_exb, g_max_exb, g_max_exb_w = _em_rate(maxwell, gamma_E_exb_s)
+    _, g_max_mach_h12, _ = _em_rate(maxwell_h12, gamma_E_mach_s)
+    _, g_max_exb_h12, _ = _em_rate(maxwell_h12, gamma_E_exb_s)
+
+    def _safe_ratio(num, den):
+        return float(num / den) if (np.isfinite(num) and np.isfinite(den) and float(den) != 0.0) else np.nan
+
+    # h1+h2 vs h1 sanity summary ratios on finite bands
+    def _med_ratio(arr12, arr1):
+        ok = np.isfinite(arr12) & np.isfinite(arr1) & (np.abs(arr1) > 0.0)
+        return float(np.median(arr12[ok] / arr1[ok])) if np.any(ok) else np.nan
+
+    return {
+        "b0_g": b0_g_f,
+        "center_xy_cm": np.array([cx, cy], dtype=float),
+        "band_edges_cm": np.array(bands, dtype=float),
+        "r_mids_cm": r_mids_cm,
+        "n_grid": n_grid,
+        "l_par_m": l_par,
+        "l_wall_m": l_wall,
+        "has_h2": bool(has_h2),
+        "ne_band_cm3": ne_cm3,
+        "te_band_ev": te_ev,
+        "rho_kg_m3": rho,
+        "v_alfven_m_s": v_alfven,
+        "v_te_m_s": v_te,
+        "nu_ei_s": nu_ei,
+        "chi_par_m2_s": chi_par,
+        "lambda_mfp_m": lambda_mfp,
+        "parseval_max_rel_err": parseval_max_rel_err,
+        "wall_quad_neg_c_brbt_med": quad_neg_c,
+        "wall_quad_all_same_sign": wall_quad_all_same_sign,
+        "br_bt_cov_t2": br_bt_cov,
+        "br_bt_cov_h12_t2": br_bt_cov_h12,
+        "dB_r_rms_t": dB_r_rms,
+        "dB_theta_rms_t": dB_t_rms,
+        "dB_perp_rms_t": dB_perp_rms,
+        "dB_tot_rms_t": dB_tot_rms,
+        "dB_r_rms_h12_t": dB_r_rms_h12,
+        "dB_perp_rms_h12_t": dB_perp_rms_h12,
+        "dB_tot_rms_h12_t": dB_tot_rms_h12,
+        "maxwell_stress_m2_s2": maxwell,
+        "maxwell_stress_h12_m2_s2": maxwell_h12,
+        "maxwell_stress_flipby_m2_s2": maxwell_flip,
+        "reynolds_stress_m2_s2": reynolds,
+        "maxwell_over_reynolds_signed": max_over_re_signed,
+        "maxwell_over_reynolds_abs": max_over_re_abs,
+        "maxwell_over_reynolds_abs_h12": max_over_re_abs_h12,
+        "max_abs_ratio_wall": max_abs_ratio_wall,
+        "max_abs_ratio_all": max_abs_ratio_all,
+        "maxwell_lt_1pct_wall": maxwell_lt_1pct_wall,
+        "p_shear_max_local": p_shear_max_loc,
+        "p_shear_max_integrated": p_shear_max_int,
+        "p_shear_max_over_re_int": p_shear_max_over_re_int,
+        "p_em_max_mach_m2_s3": p_em_max_mach,
+        "p_em_max_exb_m2_s3": p_em_max_exb,
+        "gamma_sh_max_mach_s": g_max_mach,
+        "gamma_sh_max_mach_wall_s": g_max_mach_w,
+        "gamma_sh_max_exb_s": g_max_exb,
+        "gamma_sh_max_exb_wall_s": g_max_exb_w,
+        "gamma_sh_max_mach_h12_s": g_max_mach_h12,
+        "gamma_sh_max_exb_h12_s": g_max_exb_h12,
+        "gamma_sh_max_over_re_mach": _safe_ratio(g_max_mach, gamma_sh_mach_f0_s),
+        "gamma_sh_max_over_re_mach_wall": _safe_ratio(g_max_mach_w, gamma_sh_mach_f0_wall_s),
+        "gamma_sh_max_over_re_exb": _safe_ratio(g_max_exb, gamma_sh_exb_f0_s),
+        "gamma_sh_max_over_re_exb_wall": _safe_ratio(g_max_exb_w, gamma_sh_exb_f0_wall_s),
+        "gamma_sh_max_over_re_mach_h12": _safe_ratio(g_max_mach_h12, gamma_sh_mach_f0_s),
+        "gamma_sh_max_over_re_exb_h12": _safe_ratio(g_max_exb_h12, gamma_sh_exb_f0_s),
+        "W_B_j_m3": W_B,
+        "W_B_perp_j_m3": W_B_perp,
+        "W_B_h12_j_m3": W_B_h12,
+        "W_B_perp_h12_j_m3": W_B_perp_h12,
+        "W_K_j_m3": W_K,
+        "W_n_j_m3": W_n,
+        "W_tot_j_m3": W_tot,
+        "W_B_over_W_K": W_B_over_W_K,
+        "W_B_over_W_tot": W_B_over_W_tot,
+        "W_K_over_W_tot": W_K_over_W_tot,
+        "W_n_over_W_tot": W_n_over_W_tot,
+        "dv_perp_rms_m_s": dv_perp_rms,
+        "dE_perp_rms_v_m": dE_perp_rms,
+        "wave_impedance_over_vA": wave_imp,
+        "wave_impedance_over_vA_h12": wave_imp_h12,
+        "dB_r_over_B0": dB_r_over_B0,
+        "dB_r_over_B0_h12": dB_r_over_B0_h12,
+        "delta_r_B_m": delta_r_B,
+        "delta_r_B_h12_m": delta_r_B_h12,
+        "chi_RR_m2_s": chi_RR,
+        "chi_RR_h12_m2_s": chi_RR_h12,
+        "D_ExB_m2_s": D_ExB,
+        "chi_RR_over_D_ExB": chi_RR_over_D,
+        "chi_RR_over_D_ExB_h12": chi_RR_over_D_h12,
+        "h12_over_h1_maxwell_med": _med_ratio(maxwell_h12, maxwell),
+        "h12_over_h1_wb_med": _med_ratio(W_B_h12, W_B),
+        "h12_over_h1_dbr_med": _med_ratio(dB_r_rms_h12, dB_r_rms),
+    }
+
+
+def _load_run03_band_profiles(profiles_npz, bands=RUN32_RADIAL_BANDS):
+    """Extract matched Run 03 (35 ms, 800 G) radial median ``(ne_cm3, Te_ev)`` on ``bands``."""
+    nb = len(bands)
+    ne_b = np.full(nb, np.nan, dtype=float)
+    te_b = np.full(nb, np.nan, dtype=float)
+    with np.load(profiles_npz, allow_pickle=True) as pf:
+        if "03__ne" not in pf.files or "03__Te" not in pf.files:
+            raise KeyError(f"{profiles_npz}: missing Run 03 profile keys ('03__ne', '03__Te')")
+        x03 = np.asarray(pf["03__x_cm"], dtype=float)
+        xc03 = float(pf["03__x_center_cm"])
+        ir03 = int(pf["03__ref_sweep_idx"])
+        rr03 = np.abs(x03 - xc03)
+        for bi, (r0, r1) in enumerate(bands):
+            mb = (rr03 >= float(r0)) & (rr03 < float(r1))
+            if np.any(mb):
+                ne_b[bi] = float(np.nanmedian(pf["03__ne"][mb, ir03]))
+                te_b[bi] = float(np.nanmedian(pf["03__Te"][mb, ir03]))
+    return ne_b, te_b
+
+
+def analyze_em_momentum_energy_flutter(
+    data_dir=DATA_DIR,
+    *,
+    runs=EM_BUDGET_RUNS,
+    r32_res=None,
+    bdot_npz=None,
+    profiles_npz=None,
+    bands=RUN32_RADIAL_BANDS,
+    l_par_m=DEFAULT_L_PAR_M,
+    l_wall_m=DEFAULT_L_WALL_M,
+):
+    """Campaign EM momentum, energy, and magnetic-flutter budget from cached NPZ summaries.
+
+    Uses 3x3 bench-calibrated ``bdot_2d_jun2026.npz`` (no raw HDF5 reads),
+    Run 03 radial ``ne(r), Te(r)`` from ``profiles_summary_jun2026.npz``, and
+    Run 32's radial-band Mach Reynolds-stress results (passed via ``r32_res`` or
+    loaded from ``turbulence_transport_jun2026.npz``).
+    """
+    bdot_path = bdot_npz or os.path.join(data_dir, BDOT_2D_NPZ)
+    if not os.path.isfile(bdot_path):
+        raise FileNotFoundError(f"missing {bdot_path}; run Jun2026_bdot_2d.py first")
+
+    if r32_res is None:
+        turb_p = os.path.join(data_dir, OUT_NAME)
+        if os.path.isfile(turb_p):
+            with np.load(turb_p, allow_pickle=True) as td:
+                r32_res = {k: td[k] for k in td.files if k.startswith("r32__")}
+        else:
+            r32_res = {}
+
+    prof_path = profiles_npz or os.path.join(data_dir, PROFILES_NPZ)
+    if os.path.isfile(prof_path):
+        ne_03, te_03 = _load_run03_band_profiles(prof_path, bands=bands)
+    elif "r32__ne_band_cm3" in r32_res and "r32__te_band_ev" in r32_res:
+        ne_03 = np.asarray(r32_res["r32__ne_band_cm3"], dtype=float)
+        te_03 = np.asarray(r32_res["r32__te_band_ev"], dtype=float)
+    else:
+        raise FileNotFoundError(f"missing {prof_path} and no Run 03 band profiles in r32_res")
+
+    r32_kwargs = {}
+    for src_k, dst_k in (
+        ("r32__rs_rt_f0", "rs_rt_f0"),
+        ("r32__et_f0_mean", "et_f0_mean"),
+        ("r32__dn_rms", "dn_rms"),
+        ("r32__cs1_band_m_s", "cs1_band_m_s"),
+        ("r32__shear_per_cm", "shear_per_cm"),
+        ("r32__gamma_E_mach_s", "gamma_E_mach_s"),
+        ("r32__gamma_E_exb_s", "gamma_E_exb_s"),
+    ):
+        if src_k in r32_res:
+            r32_kwargs[dst_k] = np.asarray(r32_res[src_k], dtype=float)
+    for src_k, dst_k in (
+        ("r32__p_shear_integrated", "p_shear_integrated"),
+        ("r32__gamma_sh_mach_f0_s", "gamma_sh_mach_f0_s"),
+        ("r32__gamma_sh_mach_f0_wall_s", "gamma_sh_mach_f0_wall_s"),
+        ("r32__gamma_sh_exb_f0_s", "gamma_sh_exb_f0_s"),
+        ("r32__gamma_sh_exb_f0_wall_s", "gamma_sh_exb_f0_wall_s"),
+    ):
+        if src_k in r32_res:
+            r32_kwargs[dst_k] = float(r32_res[src_k])
+
+    out = {}
+    with np.load(bdot_path, allow_pickle=True) as bd:
+        for rnum in runs:
+            if f"{rnum}__h1__Bx" not in bd.files:
+                continue
+            calibrated = bool(bd[f"{rnum}__bdot_calibrated"]) if f"{rnum}__bdot_calibrated" in bd.files else False
+            if not calibrated:
+                raise ValueError(
+                    f"{bdot_path}: run '{rnum}' has bdot_calibrated=False; "
+                    "physical Maxwell stress / energy budget requires calibrated Tesla phasors."
+                )
+            abs_pol = bool(bd[f"{rnum}__abs_coil_polarity_verified"]) if f"{rnum}__abs_coil_polarity_verified" in bd.files else False
+            b0_g = float(bd[f"{rnum}__b0_g"])
+            x_cm = np.asarray(bd[f"{rnum}__x_cm"], dtype=float)
+            y_cm = np.asarray(bd[f"{rnum}__y_cm"], dtype=float)
+            cx = float(bd[f"{rnum}__h1__center_x_cm"])
+            cy = float(bd[f"{rnum}__h1__center_y_cm"])
+            Bx1 = np.asarray(bd[f"{rnum}__h1__Bx"], dtype=complex)
+            By1 = np.asarray(bd[f"{rnum}__h1__By"], dtype=complex)
+            Bz1 = np.asarray(bd[f"{rnum}__h1__Bz"], dtype=complex)
+
+            h2_kw = {}
+            if f"{rnum}__h2__Bx" in bd.files and f"{rnum}__h2__By" in bd.files and f"{rnum}__h2__Bz" in bd.files:
+                h2_kw = {
+                    "Bx_h2": np.asarray(bd[f"{rnum}__h2__Bx"], dtype=complex),
+                    "By_h2": np.asarray(bd[f"{rnum}__h2__By"], dtype=complex),
+                    "Bz_h2": np.asarray(bd[f"{rnum}__h2__Bz"], dtype=complex),
+                }
+
+            res_r = compute_em_momentum_energy_flutter(
+                x_cm, y_cm, Bx1, By1, Bz1, (cx, cy), b0_g, ne_03, te_03,
+                bands=bands, l_par_m=l_par_m, l_wall_m=l_wall_m,
+                **h2_kw, **r32_kwargs,
+            )
+            p = f"em_{rnum}__"
+            out[p + "bdot_calibrated"] = calibrated
+            out[p + "abs_coil_polarity_verified"] = abs_pol
+            out[p + "profile_ref_run"] = "03"
+            out[p + "b0_matched_to_r32"] = bool(abs(b0_g - 800.0) < 1.0)
+            for k, v in res_r.items():
+                out[p + k] = v
+    return out
+
+
+# ============================================================================
 # Main orchestration & reporting
 # ============================================================================
 def run_turbulence_analysis(data_dir=DATA_DIR, out_name=OUT_NAME, overwrite=True):
-    """Run all four turbulence/transport checks and save summary npz."""
+    """Run all turbulence, transport, and EM momentum/energy/flutter analyses and save npz."""
     out_path = os.path.join(data_dir, out_name)
     if not overwrite and os.path.exists(out_path):
         print(f"  {out_name} exists, skipping (pass overwrite=True to regenerate)")
@@ -1194,9 +1764,16 @@ def run_turbulence_analysis(data_dir=DATA_DIR, out_name=OUT_NAME, overwrite=True
     res.update(analyze_stationary_spectra_and_moments(data_dir))
     res.update(analyze_radial_moments(data_dir))
     res.update(analyze_growth_vs_sat_crossphase(data_dir))
-    res.update(analyze_run32_transport_and_reynolds(data_dir))
+    r32_res = analyze_run32_transport_and_reynolds(data_dir)
+    res.update(r32_res)
+    if os.path.isfile(os.path.join(data_dir, BDOT_2D_NPZ)):
+        res.update(analyze_em_momentum_energy_flutter(data_dir, r32_res=r32_res))
 
-    merge_save_npz(out_path, res)
+    drop_keys = []
+    if overwrite and os.path.isfile(out_path):
+        with np.load(out_path, allow_pickle=True) as d_old:
+            drop_keys = [k for k in d_old.files if k not in res]
+    merge_save_npz(out_path, res, drop_keys=drop_keys)
     print_summary(res)
     print(f"\nSaved {out_path} ({len(res)} keys)")
     return res
@@ -1303,6 +1880,53 @@ def print_summary(res):
                     f"slp={res[f'r32__steep_{tag}_slope_ratio'][bi]:.2f}"
                 )
             print(f"    [{b0:.1f},{b1:.1f}) cm: " + " | ".join(parts))
+
+    if any(f"em_{r}__maxwell_stress_m2_s2" in res for r in EM_BUDGET_RUNS):
+        print("\n=== 6. Electromagnetic Momentum (Maxwell Stress), Wave Energy & Magnetic-Flutter Budget ===")
+        for rnum in EM_BUDGET_RUNS:
+            p = f"em_{rnum}__"
+            if p + "maxwell_stress_m2_s2" not in res:
+                continue
+            b0_g = float(res[p + "b0_g"])
+            cxy = np.asarray(res[p + "center_xy_cm"], dtype=float)
+            b_ed = np.asarray(res[p + "band_edges_cm"], dtype=float)
+            matched = bool(res[p + "b0_matched_to_r32"]) if (p + "b0_matched_to_r32") in res else (abs(b0_g - 800.0) < 1.0)
+            match_lbl = "matched 800 G vs Run 32/03" if matched else f"B0={b0_g:.0f} G; Run 03 ne/Te & Run 32 [800 G] ref"
+            print(
+                f"  Run {rnum} ({match_lbl}) | center=({cxy[0]:+.1f},{cxy[1]:+.1f}) cm | "
+                f"cal={bool(res[p+'bdot_calibrated'])}, abs_pol={bool(res[p+'abs_coil_polarity_verified'])} | "
+                f"Parseval err={float(res[p+'parseval_max_rel_err']):.1e}"
+            )
+            print(
+                f"  Sign & harmonic sanity: wall [2.5,4.5) 4-quad med(-c_BrBt)={np.round(res[p+'wall_quad_neg_c_brbt_med'], 2)} "
+                f"(same_sign={bool(res[p+'wall_quad_all_same_sign'])}) | "
+                f"h1+h2/h1 med: M_rt={float(res[p+'h12_over_h1_maxwell_med']):.3f}, "
+                f"W_B={float(res[p+'h12_over_h1_wb_med']):.3f}, dBr={float(res[p+'h12_over_h1_dbr_med']):.3f}"
+            )
+            print("  Band[cm]   n |  M_rt[m2/s2]   R_rt[m2/s2]  |M/R|% (h1+h2) |  W_B[J/m3]  W_K[J/m3]  W_n[J/m3]  |E/B|/vA | dBr[G]  dr_B[mm] chi_RR[m2/s] D_ExB[m2/s]")
+            for bi in range(len(b_ed)):
+                print(
+                    f"  [{b_ed[bi,0]:3.1f},{b_ed[bi,1]:3.1f}) {int(res[p+'n_grid'][bi]):2d} | "
+                    f"{float(res[p+'maxwell_stress_m2_s2'][bi]):+11.2e} {float(res[p+'reynolds_stress_m2_s2'][bi]):+11.2e} "
+                    f"{float(res[p+'maxwell_over_reynolds_abs'][bi])*100:6.3f}% ({float(res[p+'maxwell_over_reynolds_abs_h12'][bi])*100:5.3f}%) | "
+                    f"{float(res[p+'W_B_j_m3'][bi]):9.2e}  {float(res[p+'W_K_j_m3'][bi]):9.2e}  {float(res[p+'W_n_j_m3'][bi]):9.2e} "
+                    f"{float(res[p+'wave_impedance_over_vA'][bi]):8.2f} | "
+                    f"{float(res[p+'dB_r_rms_t'][bi])*1e4:6.3f}  {float(res[p+'delta_r_B_m'][bi])*1e3:7.2f}  "
+                    f"{float(res[p+'chi_RR_m2_s'][bi]):11.2e}  {float(res[p+'D_ExB_m2_s'][bi]):10.2f}"
+                )
+            if np.isfinite(float(res[p + "gamma_sh_max_mach_s"])):
+                print(
+                    f"  Maxwell shear-production vs Run 32: "
+                    f"Eich-Manz gamma_sh_max(mach)={float(res[p+'gamma_sh_max_mach_s']):+.1f} s^-1 "
+                    f"({float(res[p+'gamma_sh_max_over_re_mach'])*100:+.3f}% full, "
+                    f"{float(res[p+'gamma_sh_max_over_re_mach_wall'])*100:+.3f}% wall; "
+                    f"h1+h2={float(res[p+'gamma_sh_max_over_re_mach_h12'])*100:+.3f}%) | "
+                    f"ExB={float(res[p+'gamma_sh_max_exb_s']):+.1f} s^-1 "
+                    f"({float(res[p+'gamma_sh_max_over_re_exb'])*100:+.3f}% full, "
+                    f"{float(res[p+'gamma_sh_max_over_re_exb_wall'])*100:+.3f}% wall) | "
+                    f"P_sh_max/Re_int(unw)={float(res[p+'p_shear_max_over_re_int'])*100:+.3f}% | "
+                    f"max|M/R|_wall={float(res[p+'max_abs_ratio_wall'])*100:.3f}% (<1%={bool(res[p+'maxwell_lt_1pct_wall'])})"
+                )
 
 
 if __name__ == "__main__":
