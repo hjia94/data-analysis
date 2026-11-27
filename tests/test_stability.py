@@ -448,6 +448,207 @@ class TestLinearStabilitySolvers(unittest.TestCase):
             self.assertLess(r0["dv_ohm_2in_v"], 0.25 * wall_p2["dv_ohm_v"])
             self.assertAlmostEqual(r0["j0_2in_norm"], exp_p2["j0_norm"], places=12)
 
+    def test_evaluate_axial_sheath_closure_sign_convention_and_isat_cancellation(self):
+        # Hollow inner wall (dn/dr > 0, dTe/dr < 0 -> eta_e = -1.06 < 0):
+        # dTe/Te and dn/n are ~180 deg out of phase, causing partial cancellation in
+        # dI_sat/I_sat = dn/n + 0.5*dTe/Te (|I_sat|/|n| < 1) and shifting dphi(j - I_sat)
+        # into the positive in-phase quadrant.
+        st = local_braginskii_state(
+            ne_cm3=1.29e13, te_ev=0.91, b0_g=800.0,
+            dln_ne_dr_cm=+0.221, dln_te_dr_cm=-0.235,
+            er_v_per_cm=+0.95, r_cm=3.0, m=-1, b_sign_z=+1,
+        )
+        kp = float(np.hypot(st.k_theta_m, np.pi / 0.04))
+        L = 14.0
+        z_p28 = L - jst.L_P28_TO_P35_M
+        z_p29 = L - jst.L_P29_TO_P35_M
+
+        res_flt = solve_axial_braginskii_bvp(
+            st, kp, l_par_m=L, sheath_lambda=3.83, bc="conducting_1", n_nodes=24,
+        )
+        res_rext = solve_axial_braginskii_bvp(
+            st, kp, l_par_m=L, sheath_lambda=3.83, bc="conducting_1",
+            r_ext_hat=1.44, n_nodes=24,
+        )
+        res_bsh = solve_axial_braginskii_bvp(
+            st, kp, l_par_m=L, sheath_lambda=3.83, bc="conducting_1",
+            j0_norm=-0.44, r_ext_hat=1.44, n_nodes=24,
+        )
+        res_ins = solve_axial_braginskii_bvp(
+            st, kp, l_par_m=L, sheath_lambda=3.83, bc="insulating", n_nodes=24,
+        )
+
+        ev_flt = jst.evaluate_axial_sheath_closure(res_flt, z_p28_m=z_p28, z_p29_m=z_p29, l_par_m=L)
+        ev_rext = jst.evaluate_axial_sheath_closure(res_rext, z_p28_m=z_p28, z_p29_m=z_p29, l_par_m=L)
+        ev_bsh = jst.evaluate_axial_sheath_closure(res_bsh, z_p28_m=z_p28, z_p29_m=z_p29, l_par_m=L)
+        ev_ins = jst.evaluate_axial_sheath_closure(res_ins, z_p28_m=z_p28, z_p29_m=z_p29, l_par_m=L)
+
+        self.assertTrue(ev_flt["has_cwm"])
+        self.assertGreater(abs(ev_flt["dphi_T_n_sheath_deg"]), 150.0)
+        self.assertLess(ev_flt["isat_over_n_sheath"], 0.85)
+        self.assertGreater(ev_flt["j_over_isat_sheath"], ev_flt["j_over_n_sheath"])
+        self.assertGreater(ev_flt["dphi_j_isat_sheath_deg"], 0.0)
+        self.assertLess(ev_flt["dphi_j_isat_sheath_deg"], 70.0)
+        self.assertGreater(ev_flt["dphi_j_isat_p28_deg"], 0.0)
+        self.assertLess(ev_flt["dphi_j_isat_p28_deg"], 70.0)
+
+        # Series resistance & biased sheath throttle the normalized sheath current ratio
+        self.assertLess(ev_rext["j_over_isat_sheath"], ev_flt["j_over_isat_sheath"])
+        self.assertLess(ev_bsh["j_over_isat_sheath"], ev_rext["j_over_isat_sheath"])
+
+        # Insulating BVP has no CWM -> has_cwm=False and NaNs
+        self.assertFalse(ev_ins["has_cwm"])
+        self.assertTrue(np.isnan(ev_ins["j_over_isat_sheath"]))
+
+    def test_analyze_sheath_closure_peak_rms_invariance_polarity_and_eta_flip(self):
+        # Synthetic matched Run 03 profile (hollow core r<=2.5 cm, wall 2.5-4.5 cm)
+        # and synthetic calibrated Run 26 (800 G) & Run 31 (600 G) 2-D phasor grids.
+        x_prof = np.arange(-8.0, 9.0, 1.0)
+        rr_p = np.abs(x_prof)
+        ne = np.where(rr_p <= 2.5, 6.4e12, 1.4e13)[:, None]
+        te = np.where(rr_p <= 2.5, 1.74, 0.85)[:, None]
+        lam = np.where(rr_p <= 2.5, 3.6, 3.85)[:, None]
+        dln_ne = np.full_like(ne, +0.22)
+        dln_te = np.full_like(ne, -0.24)
+        er = np.full_like(ne, +0.95)
+
+        ux = np.arange(-8.0, 9.0, 1.0)
+        uy = np.arange(-8.0, 9.0, 1.0)
+        XX, YY = np.meshgrid(ux, uy)
+        RR = np.hypot(XX, YY)
+        theta = np.arctan2(YY, XX)
+
+        # Exact synthetic peak phasors: Jz leads LP by +15.0 deg everywhere
+        dphi_true_deg = 15.0
+        jz_core_pk, jz_wall_pk = 1400.0, 500.0
+        lp_core_pk, lp_wall_pk = 0.28, 0.12
+        dc_core_26, dc_wall_26 = 1.00, 1.20
+        dc_scale_31 = 0.70
+
+        jz_amp_26 = np.where(RR <= 2.5, jz_core_pk, np.where(RR <= 4.5, jz_wall_pk, 50.0))
+        lp_amp_26 = np.where(RR <= 2.5, lp_core_pk, np.where(RR <= 4.5, lp_wall_pk, 0.05))
+        lp_26 = lp_amp_26 * np.exp(-1j * theta)
+        jz_26 = jz_amp_26 * np.exp(-1j * theta + 1j * np.radians(dphi_true_deg))
+        g2_hi = np.full_like(RR, 0.95)
+        dc_26 = np.where(RR <= 2.5, dc_core_26, dc_wall_26)
+        dc_31 = dc_scale_31 * dc_26
+
+        with tempfile.TemporaryDirectory() as tmp:
+            prof_p = os.path.join(tmp, "profiles_summary_jun2026.npz")
+            bdot_p = os.path.join(tmp, "bdot_2d_jun2026.npz")
+            np.savez(
+                prof_p,
+                **{
+                    "03__x_cm": x_prof,
+                    "03__x_center_cm": np.float64(0.0),
+                    "03__ref_sweep_idx": np.int64(0),
+                    "03__ne": ne,
+                    "03__Te": te,
+                    "03__lambda": lam,
+                    "03__dln_ne_dr": dln_ne,
+                    "03__dln_te_dr": dln_te,
+                    "03__er_r_v_cm": er,
+                },
+            )
+            np.savez(
+                bdot_p,
+                **{
+                    "26__x_cm": ux, "26__y_cm": uy,
+                    "26__f0_hz": np.float64(4110.0),
+                    "26__bdot_calibrated": np.bool_(True),
+                    "26__abs_coil_polarity_verified": np.bool_(True),
+                    "26__h1__Jz": jz_26, "26__h1__LP": lp_26, "26__h1__g2_LP": g2_hi,
+                    "26__h1__center_x_cm": np.float64(0.0), "26__h1__center_y_cm": np.float64(0.0),
+                    "26__h1__dphi_J_minus_LP_deg": np.float64(dphi_true_deg),
+                    "26__h1__R_J_LP": np.float64(1.0),
+                    "31__x_cm": ux, "31__y_cm": uy,
+                    "31__f0_hz": np.float64(3529.0),
+                    "31__bdot_calibrated": np.bool_(True),
+                    "31__abs_coil_polarity_verified": np.bool_(True),
+                    "31__h1__Jz": 0.7 * jz_26, "31__h1__LP": 0.7 * lp_26, "31__h1__g2_LP": g2_hi,
+                    "31__h1__center_x_cm": np.float64(0.0), "31__h1__center_y_cm": np.float64(0.0),
+                    "31__h1__dphi_J_minus_LP_deg": np.float64(dphi_true_deg),
+                    "31__h1__R_J_LP": np.float64(1.0),
+                },
+            )
+            lp_dc_data = {
+                "26": {"x_cm": ux, "y_cm": uy, "lp_dc": dc_26, "lp_polarity_sign": +1, "source": "synthetic"},
+                "31": {"x_cm": ux, "y_cm": uy, "lp_dc": dc_31, "lp_polarity_sign": +1, "source": "synthetic"},
+            }
+            res = jst.analyze_sheath_closure(
+                data_dir=tmp, profiles_npz=prof_p, bdot_2d_npz=bdot_p,
+                n_nodes=20, lp_dc_data=lp_dc_data,
+            )
+
+            e26 = res["exp_26"]
+            e31 = res["exp_31"]
+            rp = res["ref_profile"]
+
+            # Exact peak-vs-RMS normalization and sqrt(2) cancellation in ratio
+            self.assertAlmostEqual(
+                e26["core_j_par_time_rms_a_m2"], jz_core_pk / np.sqrt(2.0), places=9,
+            )
+            self.assertAlmostEqual(
+                e26["core_disat_over_isat_rms"], (lp_core_pk / dc_core_26) / np.sqrt(2.0), places=9,
+            )
+            exp_core_ratio = (jz_core_pk / rp["core_j_sat_a_m2"]) / (lp_core_pk / dc_core_26)
+            exp_wall_ratio = (jz_wall_pk / rp["wall_j_sat_a_m2"]) / (lp_wall_pk / dc_wall_26)
+            self.assertAlmostEqual(e26["core_j_over_isat_ratio"], exp_core_ratio, places=9)
+            self.assertAlmostEqual(e26["wall_j_over_isat_ratio"], exp_wall_ratio, places=9)
+            self.assertAlmostEqual(e26["core_dphi_j_isat_deg"], dphi_true_deg, places=6)
+            self.assertAlmostEqual(e26["wall_dphi_j_isat_deg"], dphi_true_deg, places=6)
+            self.assertAlmostEqual(e26["core_R_j_isat"], 1.0, places=9)
+
+            # Run 31 scaled both Jz and LP_dc by 0.7 -> DC-scaled ratio equals Run 26!
+            self.assertAlmostEqual(e31["core_lp_dc_scale_vs_800G"], dc_scale_31, places=9)
+            self.assertAlmostEqual(e31["core_j_over_isat_ratio_dc_scaled"], exp_core_ratio, places=9)
+            self.assertAlmostEqual(e31["wall_j_over_isat_ratio_dc_scaled"], exp_wall_ratio, places=9)
+
+            # Inverted LP polarity flips dphi(J - I_sat) by exactly 180 deg
+            lp_dc_inv = {
+                "26": {"x_cm": ux, "y_cm": uy, "lp_dc": -dc_26, "lp_polarity_sign": -1, "source": "synthetic_inv"},
+                "31": {"x_cm": ux, "y_cm": uy, "lp_dc": -dc_31, "lp_polarity_sign": -1, "source": "synthetic_inv"},
+            }
+            res_inv = jst.analyze_sheath_closure(
+                data_dir=tmp, profiles_npz=prof_p, bdot_2d_npz=bdot_p,
+                n_nodes=20, lp_dc_data=lp_dc_inv,
+            )
+            self.assertAlmostEqual(
+                res_inv["exp_26"]["core_dphi_j_isat_deg"], dphi_true_deg - 180.0, places=6,
+            )
+
+            # Hollow (eta_e < 0) vs Peaked (eta_e > 0) flips sheath dphi(j - I_sat) by ~180 deg
+            ef = res["eta_flip"]
+            self.assertLess(ef["eta_e_hollow"], 0.0)
+            self.assertGreater(ef["eta_e_peaked"], 0.0)
+            for mtag in ("conducting_1", "flt_rext", "bsh_rext"):
+                self.assertTrue(ef[f"{mtag}_hollow_has_cwm"])
+                self.assertTrue(ef[f"{mtag}_peaked_has_cwm"])
+                self.assertGreater(abs(ef[f"{mtag}_hollow_dphi_T_n_sheath_deg"]), 150.0)
+                self.assertLess(abs(ef[f"{mtag}_peaked_dphi_T_n_sheath_deg"]), 30.0)
+                self.assertLess(ef[f"{mtag}_hollow_isat_over_n_sheath"], 0.85)
+                self.assertGreater(ef[f"{mtag}_peaked_isat_over_n_sheath"], 1.2)
+                self.assertGreater(ef[f"{mtag}_abs_delta_dphi_sheath_deg"], 150.0)
+
+            # Uncalibrated bdot_2d file must raise ValueError
+            bdot_uncal = os.path.join(tmp, "bdot_uncal.npz")
+            np.savez(
+                bdot_uncal,
+                **{
+                    "26__x_cm": ux, "26__y_cm": uy,
+                    "26__f0_hz": np.float64(4110.0),
+                    "26__bdot_calibrated": np.bool_(False),
+                    "26__abs_coil_polarity_verified": np.bool_(True),
+                    "26__h1__Jz": jz_26, "26__h1__LP": lp_26, "26__h1__g2_LP": g2_hi,
+                    "26__h1__center_x_cm": np.float64(0.0), "26__h1__center_y_cm": np.float64(0.0),
+                },
+            )
+            with self.assertRaises(ValueError):
+                jst.analyze_sheath_closure(
+                    data_dir=tmp, profiles_npz=prof_p, bdot_2d_npz=bdot_uncal,
+                    n_nodes=16, lp_dc_data=lp_dc_data,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

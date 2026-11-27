@@ -31,9 +31,10 @@ import os
 import numpy as np
 from scipy.interpolate import UnivariateSpline
 
-from data_analysis.io import open_lapd
+from data_analysis.io import open_lapd, position_shots
 from data_analysis.plasma.fields import reference_locked_phasor
 from data_analysis.plasma.stability import (
+    E_CHARGE,
     biased_sheath_parameters,
     fit_smooth_radial_profile,
     local_braginskii_state,
@@ -44,6 +45,7 @@ from data_analysis.plasma.stability import (
 from data_analysis.signal import clip_time_window
 from data_analysis.utils import merge_save_npz
 
+import Jun2026_IV as jiv
 import Jun2026_modes as jmo
 import Jun2026_onset as jon
 import Jun2026_profiles as jpr
@@ -77,6 +79,19 @@ BIASSCOPE_PRE_MS = (8.0, 11.5)    # pre-bias baseline in discharge-start scope t
 BIASSCOPE_DC_MS = (13.0, 16.5)    # bias-on DC plateau (1.0-4.5 ms bias-relative)
 BIASSCOPE_AC_MS = (14.4, 16.8)    # saturated AC window (2.4-4.8 ms bias-relative)
 L_P29_TO_P35_M = 1.92             # axial distance from P29 LP to Port-35 bias plate [m]
+L_P28_TO_P35_M = 2.24             # axial distance from P28 B-dot to Port-35 bias plate [m]
+
+# Calibrated P28 B-dot / P29-R LP sheath-closure benchmark defaults
+SHEATH_PROFILE_RUN = "03"         # matched 35 ms puff, 800 G Day-1 IV-sweep run
+SHEATH_BDOT_RUNS = (("26", 800.0), ("31", 600.0))
+SHEATH_LP_MOTION_GROUP = "<Hermes>    p29_LP"
+SHEATH_LP_SCOPE = "lpscope"
+SHEATH_LP_CHAN = "C2"
+SHEATH_BDOT_SCOPE = "bdotscope"
+SHEATH_TMIN_MS = 2.4              # matches Jun2026_bdot_2d saturated window
+SHEATH_TMAX_MS = 4.8
+SHEATH_FALLBACK_J0_4IN = -0.436475
+SHEATH_FALLBACK_REFF_4IN = 1.436583
 
 
 def select_near_onset_sweep(t_start_ms, t_mid_ms, regimes, t_onset_med_ms, ref_sweep_idx):
@@ -667,9 +682,536 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
     return out
 
 
+def _wrap_deg(deg):
+    """Wrap angle(s) in degrees to ``(-180, +180]``."""
+    return float(np.degrees(np.angle(np.exp(1j * np.radians(float(deg))))))
+
+
+def _interp_complex(z_grid, arr, z_target):
+    """Linearly interpolate a complex 1-D axial eigenfunction at ``z_target``."""
+    z_g = np.asarray(z_grid, dtype=float)
+    a = np.asarray(arr, dtype=complex)
+    return complex(np.interp(float(z_target), z_g, a.real) + 1j * np.interp(float(z_target), z_g, a.imag))
+
+
+def extract_lp_2d_dc_baseline(data_dir=DATA_DIR, runs=("26", "31"), *,
+                              tmin_ms=SHEATH_TMIN_MS, tmax_ms=SHEATH_TMAX_MS,
+                              grid_step_cm=1.0):
+    """Extract 2-D DC ``I_sat`` baseline [V] for moving P29-R LP (``lpscope/C2``).
+
+    Snaps ``<Hermes>    p29_LP`` positions onto the same ``grid_step_cm`` 2-D
+    ``(ny, nx)`` grid and ``[tmin_ms, tmax_ms]`` post-onset window used by
+    ``Jun2026_bdot_2d.py`` so ``|dI_sat / I_sat|`` is exact on the same probe.
+    Also verifies the polarity sign of ``LP_dc`` (``+1`` when ``LP_dc > 0`` so
+    ``+dV_LP`` corresponds to ``+dI_sat``).
+    """
+    out = {}
+    for rnum in runs:
+        hits = sorted(glob.glob(os.path.join(data_dir, f"{rnum}-*.hdf5")))
+        if not hits:
+            raise FileNotFoundError(f"no HDF5 for run {rnum} in {data_dir}")
+        ifn = hits[0]
+        run = open_lapd(ifn)
+        pos_lp = jiv.read_lp_positions(ifn, motion_group_name=SHEATH_LP_MOTION_GROUP)
+        tl = run.time_array(scope_name=SHEATH_LP_SCOPE)
+        il0, il1 = clip_time_window(tl, float(tmin_ms), float(tmax_ms))
+
+        all_shots = np.asarray(run.shots(scope_name=SHEATH_BDOT_SCOPE), dtype=int)
+        shot_to_idx = {int(s): i for i, s in enumerate(all_shots)}
+        st_lp, _ = run.channel(SHEATH_LP_CHAN, scope_name=SHEATH_LP_SCOPE, shots=all_shots.tolist())
+        seg = np.asarray(st_lp[:, il0:il1], dtype=float)
+
+        px = np.round(pos_lp.pos_array["x"][::pos_lp.nshot][:pos_lp.npos] / float(grid_step_cm)) * float(grid_step_cm)
+        py = np.round(pos_lp.pos_array["y"][::pos_lp.nshot][:pos_lp.npos] / float(grid_step_cm)) * float(grid_step_cm)
+        ux = np.unique(px)
+        uy = np.unique(py)
+        lp_dc = np.full((uy.size, ux.size), np.nan, dtype=float)
+        for p_i in range(pos_lp.npos):
+            sh = position_shots(pos_lp.shot_nums, p_i, pos_lp.nshot)
+            idx = [shot_to_idx[int(s)] for s in sh if int(s) in shot_to_idx]
+            if not idx:
+                continue
+            ix = int(np.searchsorted(ux, px[p_i]))
+            iy = int(np.searchsorted(uy, py[p_i]))
+            lp_dc[iy, ix] = float(np.nanmean(seg[idx]))
+
+        fin = lp_dc[np.isfinite(lp_dc)]
+        if fin.size == 0 or float(np.median(np.abs(fin))) == 0.0:
+            raise ValueError(f"Run {rnum}: empty or zero P29-R LP DC baseline on {SHEATH_LP_SCOPE}/{SHEATH_LP_CHAN}")
+        pol = +1 if float(np.median(fin)) > 0.0 else -1
+        if np.any(fin * pol <= 0.0):
+            raise ValueError(f"Run {rnum}: mixed-sign P29-R LP DC baseline (min={np.min(fin):.4f}, max={np.max(fin):.4f})")
+
+        out[str(rnum)] = {
+            "x_cm": ux,
+            "y_cm": uy,
+            "lp_dc": lp_dc,
+            "lp_polarity_sign": int(pol),
+            "source": f"hdf5_{SHEATH_LP_SCOPE}_{SHEATH_LP_CHAN}",
+        }
+    return out
+
+
+def evaluate_axial_sheath_closure(res, *, z_p28_m, z_p29_m=None, l_par_m=None):
+    """Evaluate 1-D axial CWM BVP eigenmode sheath-closure ratios and absolute phases.
+
+    Uses the linearized ion-saturation current fluctuation
+    ``i_sat_hat = n_hat + 0.5 * T_hat`` (crucial when ``eta_e < 0`` makes
+    ``dT_e/T_e`` and ``dn/n`` nearly 180 deg out of phase).
+
+    Sign & phase convention
+    -----------------------
+    In :func:`solve_axial_braginskii_bvp`, ``z = L_par`` is the Port-35 bias
+    plate (lab ``+z``, North), ``j_z = J_par / (e n_0 c_s)`` is conventional
+    parallel current density along ``+z`` (negative for electrons collected into
+    Port 35, matching ``bdot_2d_jun2026.npz`` under ``DEFAULT_CHANNEL_SIGNS =
+    (-1, -1, +1)``), and perturbations follow ``exp(i * (m * theta - omega * t))``.
+    Under the Doppler shift ``theta' = theta - Omega_E * t``,
+    ``m*theta' - omega_plasma*t == m*theta - omega_lab*t`` with ``omega_lab > 0``
+    (no complex conjugation), so ``angle(j_z(z_j) / i_sat_z(z_i))`` compares
+    directly (sign ``+1``, ``0 deg`` offset) to experimental
+    ``dphi(J_par - I_sat) = angle(Jz * conj(LP))`` from
+    :func:`reference_locked_phasor` with ``convention="exp_minus_iwt"``.
+    """
+    mode = res.get("cwm")
+    if mode is None or "j_z" not in res:
+        return {
+            "has_cwm": False,
+            "f_hz": np.nan, "gamma_s": np.nan, "k_par_rms_m": np.nan,
+            "j_end_rel": np.nan, "phi_end_rel": np.nan,
+            "j_over_isat_p28": np.nan, "dphi_j_isat_p28_deg": np.nan,
+            "j_over_n_p28": np.nan, "dphi_j_n_p28_deg": np.nan,
+            "T_over_n_p28": np.nan, "dphi_T_n_p28_deg": np.nan,
+            "isat_over_n_p28": np.nan,
+            "j_over_isat_p28_p29": np.nan, "dphi_j_isat_p28_p29_deg": np.nan,
+            "j_over_n_p28_p29": np.nan, "dphi_j_n_p28_p29_deg": np.nan,
+            "j_over_isat_sheath": np.nan, "dphi_j_isat_sheath_deg": np.nan,
+            "j_over_n_sheath": np.nan, "dphi_j_n_sheath_deg": np.nan,
+            "T_over_n_sheath": np.nan, "dphi_T_n_sheath_deg": np.nan,
+            "isat_over_n_sheath": np.nan,
+        }
+
+    z = np.asarray(res["z_m"], dtype=float)
+    z_end = float(z[-1]) if l_par_m is None else float(l_par_m)
+    z_28 = float(z_p28_m)
+    z_29 = z_28 if z_p29_m is None else float(z_p29_m)
+
+    n_z = np.asarray(res["n_z"], dtype=complex)
+    T_z = np.asarray(res["T_z"], dtype=complex)
+    j_z = np.asarray(res["j_z"], dtype=complex)
+    isat_z = n_z + 0.5 * T_z
+
+    def _ratio_phase(num, den):
+        if abs(den) <= 1e-30:
+            return np.nan, np.nan
+        q = num / den
+        return float(abs(q)), float(np.degrees(np.angle(q)))
+
+    j_28 = _interp_complex(z, j_z, z_28)
+    n_28 = _interp_complex(z, n_z, z_28)
+    T_28 = _interp_complex(z, T_z, z_28)
+    i_28 = _interp_complex(z, isat_z, z_28)
+    n_29 = _interp_complex(z, n_z, z_29)
+    i_29 = _interp_complex(z, isat_z, z_29)
+
+    j_L = _interp_complex(z, j_z, z_end)
+    n_L = _interp_complex(z, n_z, z_end)
+    T_L = _interp_complex(z, T_z, z_end)
+    i_L = _interp_complex(z, isat_z, z_end)
+
+    ji_28, dp_ji_28 = _ratio_phase(j_28, i_28)
+    jn_28, dp_jn_28 = _ratio_phase(j_28, n_28)
+    Tn_28, dp_Tn_28 = _ratio_phase(T_28, n_28)
+    in_28, _ = _ratio_phase(i_28, n_28)
+
+    ji_2829, dp_ji_2829 = _ratio_phase(j_28, i_29)
+    jn_2829, dp_jn_2829 = _ratio_phase(j_28, n_29)
+
+    ji_L, dp_ji_L = _ratio_phase(j_L, i_L)
+    jn_L, dp_jn_L = _ratio_phase(j_L, n_L)
+    Tn_L, dp_Tn_L = _ratio_phase(T_L, n_L)
+    in_L, _ = _ratio_phase(i_L, n_L)
+
+    return {
+        "has_cwm": True,
+        "f_hz": float(mode.f_hz),
+        "gamma_s": float(mode.gamma_s),
+        "k_par_rms_m": float(mode.k_par_rms_m),
+        "j_end_rel": float(mode.j_end_rel),
+        "phi_end_rel": float(mode.phi_end_rel),
+        "j_over_isat_p28": ji_28,
+        "dphi_j_isat_p28_deg": dp_ji_28,
+        "j_over_n_p28": jn_28,
+        "dphi_j_n_p28_deg": dp_jn_28,
+        "T_over_n_p28": Tn_28,
+        "dphi_T_n_p28_deg": dp_Tn_28,
+        "isat_over_n_p28": in_28,
+        "j_over_isat_p28_p29": ji_2829,
+        "dphi_j_isat_p28_p29_deg": dp_ji_2829,
+        "j_over_n_p28_p29": jn_2829,
+        "dphi_j_n_p28_p29_deg": dp_jn_2829,
+        "j_over_isat_sheath": ji_L,
+        "dphi_j_isat_sheath_deg": dp_ji_L,
+        "j_over_n_sheath": jn_L,
+        "dphi_j_n_sheath_deg": dp_jn_L,
+        "T_over_n_sheath": Tn_L,
+        "dphi_T_n_sheath_deg": dp_Tn_L,
+        "isat_over_n_sheath": in_L,
+    }
+
+
+def _extract_profile_zone_jsat(pf, run_num, swp_idx, mask, *, b0_g=800.0):
+    """Extract matched zone median ``(ne_cm3, te_ev, cs_m_s, j_sat_a_m2, dln_ne, dln_te, eta_e, lam)``."""
+    ne = float(np.nanmedian(pf[f"{run_num}__ne"][mask, swp_idx]))
+    te = float(np.nanmedian(pf[f"{run_num}__Te"][mask, swp_idx]))
+    dn = float(np.nanmedian(pf[f"{run_num}__dln_ne_dr"][mask, swp_idx]))
+    dt = float(np.nanmedian(pf[f"{run_num}__dln_te_dr"][mask, swp_idx]))
+    lam = float(np.nanmedian(pf[f"{run_num}__lambda"][mask, swp_idx]))
+    st = local_braginskii_state(
+        ne, te, b0_g, dn, dt, er_v_per_cm=0.0, r_cm=DEFAULT_R_CM, m=DEFAULT_M,
+    )
+    jsat = float(E_CHARGE * st.ne_m3 * st.cs_m_s)
+    eta_e = float(dt / dn) if abs(dn) > 1e-12 else np.nan
+    return {
+        "ne_cm3": ne,
+        "te_ev": te,
+        "cs_m_s": float(st.cs_m_s),
+        "j_sat_a_m2": jsat,
+        "dln_ne_dr_cm": dn,
+        "dln_te_dr_cm": dt,
+        "eta_e": eta_e,
+        "lambda": lam,
+    }
+
+
+def analyze_sheath_closure(data_dir=DATA_DIR, *, profiles_npz=None, bdot_2d_npz=None,
+                           profile_run=SHEATH_PROFILE_RUN,
+                           bdot_runs=SHEATH_BDOT_RUNS,
+                           l_par_m=DEFAULT_L_PAR_M,
+                           wall_width_cm=DEFAULT_WALL_WIDTH_CM,
+                           n_nodes=DEFAULT_N_NODES,
+                           biased_res=None, lp_dc_data=None):
+    """Benchmark calibrated 2-D ``J_par`` amplitude & absolute phase against 1-D CWM BVP.
+
+    Compares BOTH:
+    1. Dimensionless sheath-current ratio
+       ``(|dJ_par| / (e n_0 c_s)) / (|dI_sat| / I_sat)``, using exact peak-vs-RMS
+       accounting (:func:`reference_locked_phasor` returns peak complex amplitude
+       ``|X| = sqrt(2) * X_rms``; dividing ``|dJ_par| / j_sat`` by
+       ``|dI_sat| / I_sat_DC`` on the same P29-R probe cancels ``sqrt(2)``
+       identically) and linearized ``dI_sat / I_sat = dn/n + 0.5 * dT_e / T_e``.
+    2. Absolute phase ``dphi(J_par - I_sat)`` [deg] under verified ``C16``
+       coil polarity (``DEFAULT_CHANNEL_SIGNS = (-1, -1, +1)``) and positive
+       ``lpscope/C2`` DC baseline.
+
+    Evaluates ``conducting_1``, ``flt+Reff4``, and ``biased_sheath+Reff4`` on
+    the matched Run ``03`` (35 ms puff) inner-wall state at ``800 G`` (Run 26)
+    and ``600 G`` (Run 31) at ``z_P28`` (``2.24 m`` upstream of Port 35),
+    two-port ``P28/P29`` (``0.32 m`` probe separation), and the Port-35 sheath
+    (``z = L_par``). Also tests how ``eta_e < 0`` (hollow column) flips
+    ``dphi(j_par - I_sat)`` by ``~180 deg`` relative to a peaked-density
+    (``eta_e > 0``) plasma.
+    """
+    prof_path = profiles_npz or os.path.join(data_dir, jpr.OUT_NAME)
+    bdot_path = bdot_2d_npz or os.path.join(data_dir, "bdot_2d_jun2026.npz")
+
+    out = {}
+
+    # --- 1. Matched Run 03 equilibrium reference profiles (core, wall, BVP wall) ---
+    with np.load(prof_path, allow_pickle=True) as pf:
+        ref_swp = int(pf[f"{profile_run}__ref_sweep_idx"])
+        x_cm = pf[f"{profile_run}__x_cm"]
+        xc_cm = float(pf[f"{profile_run}__x_center_cm"])
+        rr_p = np.abs(x_cm - xc_cm)
+
+        prof_core = _extract_profile_zone_jsat(pf, profile_run, ref_swp, rr_p <= 2.5, b0_g=800.0)
+        prof_wall = _extract_profile_zone_jsat(pf, profile_run, ref_swp, (rr_p > 2.5) & (rr_p <= 4.5), b0_g=800.0)
+        prof_ring = _extract_profile_zone_jsat(
+            pf, profile_run, ref_swp,
+            (rr_p >= DEFAULT_R_CM - DEFAULT_R_HALF_CM) & (rr_p <= DEFAULT_R_CM + DEFAULT_R_HALF_CM),
+            b0_g=800.0,
+        )
+
+        st_800, lam_800 = _extract_wall_state(pf, profile_run, ref_swp, b0_g=800.0)
+        st_600, lam_600 = _extract_wall_state(pf, profile_run, ref_swp, b0_g=600.0)
+
+        # Raw wall medians for the eta_e sign-flip test
+        band_w = (rr_p >= DEFAULT_R_CM - DEFAULT_R_HALF_CM) & (rr_p <= DEFAULT_R_CM + DEFAULT_R_HALF_CM)
+        ne_w = float(np.nanmedian(pf[f"{profile_run}__ne"][band_w, ref_swp]))
+        te_w = float(np.nanmedian(pf[f"{profile_run}__Te"][band_w, ref_swp]))
+        dn_w = float(np.nanmedian(pf[f"{profile_run}__dln_ne_dr"][band_w, ref_swp]))
+        dt_w = float(np.nanmedian(pf[f"{profile_run}__dln_te_dr"][band_w, ref_swp]))
+        er_w = float(np.nanmedian(pf[f"{profile_run}__er_r_v_cm"][band_w, ref_swp]))
+
+    out["ref_profile"] = {
+        "profile_run": str(profile_run),
+        "ref_sweep_idx": int(ref_swp),
+        **{f"core_{k}": v for k, v in prof_core.items()},
+        **{f"wall_{k}": v for k, v in prof_wall.items()},
+        **{f"wall_bvp_{k}": v for k, v in prof_ring.items()},
+    }
+
+    # --- 2. Experimental calibrated J_par & P29-R I_sat on Runs 26 & 31 ---
+    run_nums = tuple(r for r, _ in bdot_runs)
+    if lp_dc_data is None:
+        try:
+            lp_dc_map = extract_lp_2d_dc_baseline(data_dir=data_dir, runs=run_nums)
+        except (FileNotFoundError, ImportError) as exc:
+            print(f"  [note] P29-R LP DC baseline unavailable ({exc}); dI_sat/I_sat will be NaN")
+            lp_dc_map = {}
+    else:
+        lp_dc_map = lp_dc_data
+
+    exp_dc_ref_by_zone = {}
+    with np.load(bdot_path, allow_pickle=True) as bd:
+        for rnum, b0_g in bdot_runs:
+            if f"{rnum}__h1__Jz" not in bd.files:
+                continue
+            cal_ok = bool(bd[f"{rnum}__bdot_calibrated"]) if f"{rnum}__bdot_calibrated" in bd.files else False
+            pol_ok = (
+                bool(bd[f"{rnum}__abs_coil_polarity_verified"])
+                if f"{rnum}__abs_coil_polarity_verified" in bd.files else False
+            )
+            if not cal_ok:
+                raise ValueError(f"Run {rnum}: bdot_2d_jun2026.npz is not calibrated (bdot_calibrated=False)")
+            if not pol_ok:
+                raise ValueError(f"Run {rnum}: absolute B-dot coil polarity is not verified")
+
+            ux = np.asarray(bd[f"{rnum}__x_cm"], dtype=float)
+            uy = np.asarray(bd[f"{rnum}__y_cm"], dtype=float)
+            Jz = np.asarray(bd[f"{rnum}__h1__Jz"], dtype=complex)
+            LP = np.asarray(bd[f"{rnum}__h1__LP"], dtype=complex)
+            g2_LP = np.asarray(bd[f"{rnum}__h1__g2_LP"], dtype=float)
+            cx = float(bd[f"{rnum}__h1__center_x_cm"])
+            cy = float(bd[f"{rnum}__h1__center_y_cm"])
+            f0_hz = float(bd[f"{rnum}__f0_hz"])
+
+            XX, YY = np.meshgrid(ux, uy)
+            RR = np.hypot(XX - cx, YY - cy)
+            j_int_max = float(np.nanmax(np.abs(Jz[1:-1, 1:-1])))
+
+            dc_rec = lp_dc_map.get(str(rnum))
+            if dc_rec is not None:
+                lp_dc = np.asarray(dc_rec["lp_dc"], dtype=float)
+                if lp_dc.shape != LP.shape:
+                    raise ValueError(
+                        f"Run {rnum}: LP DC grid shape {lp_dc.shape} != bdot_2d LP shape {LP.shape}"
+                    )
+                if "x_cm" in dc_rec and "y_cm" in dc_rec:
+                    if not (np.allclose(dc_rec["x_cm"], ux, atol=1e-6) and np.allclose(dc_rec["y_cm"], uy, atol=1e-6)):
+                        raise ValueError(f"Run {rnum}: LP DC coordinate grid differs from bdot_2d_jun2026.npz")
+                lp_pol = int(dc_rec.get("lp_polarity_sign", +1))
+                dc_src = str(dc_rec.get("source", "supplied"))
+            else:
+                lp_dc = np.full_like(LP.real, np.nan)
+                lp_pol = +1
+                dc_src = "unavailable"
+
+            LP_signed = float(lp_pol) * LP
+
+            zones = (
+                ("core", (RR <= 2.5), prof_core["j_sat_a_m2"]),
+                ("wall", (RR > 2.5) & (RR <= 4.5), prof_wall["j_sat_a_m2"]),
+                (
+                    "ring_coh",
+                    (RR >= 2.0) & (RR <= 5.0)
+                    & np.isfinite(Jz) & np.isfinite(LP_signed) & np.isfinite(g2_LP)
+                    & (np.abs(Jz) >= 0.3 * j_int_max) & (g2_LP >= 0.5),
+                    prof_ring["j_sat_a_m2"],
+                ),
+            )
+
+            rec = {
+                "run_num": str(rnum),
+                "b0_g": float(b0_g),
+                "f0_hz": f0_hz,
+                "bdot_calibrated": True,
+                "abs_coil_polarity_verified": True,
+                "lp_polarity_sign": int(lp_pol),
+                "lp_dc_source": dc_src,
+                "phasor_normalization": "peak_complex_amplitude_rms_eq_peak_over_sqrt2",
+                "dphi_j_lp_stored_deg": (
+                    float(bd[f"{rnum}__h1__dphi_J_minus_LP_deg"])
+                    if f"{rnum}__h1__dphi_J_minus_LP_deg" in bd.files else np.nan
+                ),
+                "R_j_lp_stored": (
+                    float(bd[f"{rnum}__h1__R_J_LP"])
+                    if f"{rnum}__h1__R_J_LP" in bd.files else np.nan
+                ),
+            }
+
+            for zname, zmask, jsat_ref in zones:
+                valid = zmask & np.isfinite(Jz) & np.isfinite(LP_signed)
+                n_pts = int(np.sum(valid))
+                if n_pts == 0:
+                    for suf in (
+                        "n_pts", "j_par_peak_rms_a_m2", "j_par_time_rms_a_m2",
+                        "j_sat_ref_a_m2", "j_par_norm_peak", "j_par_norm_rms",
+                        "lp_peak_rms_v", "lp_dc_med_v",
+                        "disat_over_isat_peak", "disat_over_isat_rms",
+                        "j_over_isat_ratio", "dphi_j_isat_deg", "R_j_isat",
+                    ):
+                        rec[f"{zname}_{suf}"] = 0 if suf == "n_pts" else np.nan
+                    continue
+
+                jz_pk = float(np.sqrt(np.nanmean(np.abs(Jz[valid]) ** 2)))
+                jz_rms = jz_pk / np.sqrt(2.0)
+                j_norm_pk = jz_pk / float(jsat_ref)
+                j_norm_rms = jz_rms / float(jsat_ref)
+
+                lp_pk = float(np.sqrt(np.nanmean(np.abs(LP_signed[valid]) ** 2)))
+                dc_vals = np.abs(lp_dc[valid])
+                dc_med = float(np.nanmedian(dc_vals)) if np.any(np.isfinite(dc_vals)) else np.nan
+                if np.isfinite(dc_med) and dc_med > 0.0:
+                    di_pk = lp_pk / dc_med
+                    di_rms = di_pk / np.sqrt(2.0)
+                    ratio = j_norm_pk / di_pk if di_pk > 0.0 else np.nan
+                else:
+                    di_pk = di_rms = ratio = np.nan
+
+                z_jl = np.mean(np.exp(1j * np.angle(Jz[valid] * np.conj(LP_signed[valid]))))
+                dphi_deg = float(np.degrees(np.angle(z_jl)))
+                R_jl = float(np.abs(z_jl))
+
+                if np.isclose(b0_g, 800.0) and np.isfinite(dc_med) and dc_med > 0.0:
+                    exp_dc_ref_by_zone[zname] = dc_med
+
+                rec.update({
+                    f"{zname}_n_pts": n_pts,
+                    f"{zname}_j_par_peak_rms_a_m2": jz_pk,
+                    f"{zname}_j_par_time_rms_a_m2": jz_rms,
+                    f"{zname}_j_sat_ref_a_m2": float(jsat_ref),
+                    f"{zname}_j_par_norm_peak": j_norm_pk,
+                    f"{zname}_j_par_norm_rms": j_norm_rms,
+                    f"{zname}_lp_peak_rms_v": lp_pk,
+                    f"{zname}_lp_dc_med_v": dc_med,
+                    f"{zname}_disat_over_isat_peak": di_pk,
+                    f"{zname}_disat_over_isat_rms": di_rms,
+                    f"{zname}_j_over_isat_ratio": ratio,
+                    f"{zname}_dphi_j_isat_deg": dphi_deg,
+                    f"{zname}_R_j_isat": R_jl,
+                })
+
+            out[f"exp_{rnum}"] = rec
+
+    # For non-800 G runs (Run 31 at 600 G), add LP_dc-scaled j_sat & ratio using the
+    # same P29-R probe's DC I_sat ratio relative to the 800 G run (Run 26).
+    for rnum, b0_g in bdot_runs:
+        key = f"exp_{rnum}"
+        if key not in out:
+            continue
+        rec = out[key]
+        for zname in ("core", "wall", "ring_coh"):
+            dc_med = rec.get(f"{zname}_lp_dc_med_v", np.nan)
+            dc_800 = exp_dc_ref_by_zone.get(zname, np.nan)
+            ratio_raw = rec.get(f"{zname}_j_over_isat_ratio", np.nan)
+            if (not np.isclose(b0_g, 800.0)) and np.isfinite(dc_med) and np.isfinite(dc_800) and dc_800 > 0.0:
+                scale = float(dc_med / dc_800)
+                rec[f"{zname}_lp_dc_scale_vs_800G"] = scale
+                rec[f"{zname}_j_sat_dc_scaled_a_m2"] = float(rec[f"{zname}_j_sat_ref_a_m2"] * scale)
+                rec[f"{zname}_j_over_isat_ratio_dc_scaled"] = float(ratio_raw / scale) if np.isfinite(ratio_raw) else np.nan
+            else:
+                rec[f"{zname}_lp_dc_scale_vs_800G"] = 1.0
+                rec[f"{zname}_j_sat_dc_scaled_a_m2"] = float(rec.get(f"{zname}_j_sat_ref_a_m2", np.nan))
+                rec[f"{zname}_j_over_isat_ratio_dc_scaled"] = float(ratio_raw) if np.isfinite(ratio_raw) else np.nan
+
+    # --- 3. 1-D Axial CWM BVP predictions at 800 G and 600 G ---
+    if biased_res and profile_run in biased_res:
+        j0_4 = float(biased_res[profile_run]["j0_4in_norm"])
+        r_eff_4 = float(biased_res[profile_run]["r_ext_eff_hat_4in"])
+        bias_src = f"biased_res_{profile_run}"
+    else:
+        j0_4 = float(SHEATH_FALLBACK_J0_4IN)
+        r_eff_4 = float(SHEATH_FALLBACK_REFF_4IN)
+        bias_src = f"fallback_{profile_run}"
+
+    k_r = np.pi / (float(wall_width_cm) * 1e-2)
+    z_p28 = float(l_par_m) - float(L_P28_TO_P35_M)
+    z_p29 = float(l_par_m) - float(L_P29_TO_P35_M)
+
+    model_specs = (
+        ("conducting_1", dict(bc="conducting_1")),
+        ("flt_rext", dict(bc="conducting_1", r_ext_hat=r_eff_4)),
+        ("bsh_rext", dict(bc="conducting_1", j0_norm=j0_4, r_ext_hat=r_eff_4)),
+    )
+
+    for lbl, st_b, lam_b, b0_g in (("bvp_800G", st_800, lam_800, 800.0), ("bvp_600G", st_600, lam_600, 600.0)):
+        kp = float(np.hypot(st_b.k_theta_m, k_r))
+        row = {
+            "b0_g": float(b0_g),
+            "l_par_m": float(l_par_m),
+            "z_p28_m": z_p28,
+            "z_p29_m": z_p29,
+            "k_perp_m": kp,
+            "sheath_lambda": float(lam_b),
+            "j0_4in_norm": j0_4,
+            "r_ext_eff_hat_4in": r_eff_4,
+            "biased_params_source": bias_src,
+            "eta_e": float(st_b.omega_star_T_rad_s / st_b.omega_star_n_rad_s),
+        }
+        for mtag, mkw in model_specs:
+            res = solve_axial_braginskii_bvp(
+                st_b, kp, l_par_m=l_par_m, sheath_lambda=lam_b,
+                include_centrifugal=True, n_nodes=n_nodes, **mkw,
+            )
+            ev = evaluate_axial_sheath_closure(res, z_p28_m=z_p28, z_p29_m=z_p29, l_par_m=l_par_m)
+            for k, v in ev.items():
+                row[f"{mtag}_{k}"] = v
+        out[lbl] = row
+
+    # --- 4. Hollow (eta_e < 0) vs Peaked (eta_e > 0) ~180 deg phase-flip test ---
+    # Disable centrifugal gravity (include_centrifugal=False) so rotational
+    # interchange (unstable for dn/dr < 0) does not mask the CWM eigenmode.
+    st_hollow = local_braginskii_state(
+        ne_w, te_w, 800.0, +abs(dn_w), -abs(dt_w),
+        er_v_per_cm=er_w, r_cm=DEFAULT_R_CM, m=DEFAULT_M, b_sign_z=DEFAULT_B_SIGN_Z,
+    )
+    st_peaked = local_braginskii_state(
+        ne_w, te_w, 800.0, -abs(dn_w), -abs(dt_w),
+        er_v_per_cm=er_w, r_cm=DEFAULT_R_CM, m=DEFAULT_M, b_sign_z=DEFAULT_B_SIGN_Z,
+    )
+    kp_flip = float(np.hypot(st_hollow.k_theta_m, k_r))
+    flip_row = {
+        "eta_e_hollow": float(st_hollow.omega_star_T_rad_s / st_hollow.omega_star_n_rad_s),
+        "eta_e_peaked": float(st_peaked.omega_star_T_rad_s / st_peaked.omega_star_n_rad_s),
+        "include_centrifugal": False,
+    }
+    for mtag, mkw in model_specs:
+        res_h = solve_axial_braginskii_bvp(
+            st_hollow, kp_flip, l_par_m=l_par_m, sheath_lambda=lam_800,
+            include_centrifugal=False, n_nodes=n_nodes, **mkw,
+        )
+        res_p = solve_axial_braginskii_bvp(
+            st_peaked, kp_flip, l_par_m=l_par_m, sheath_lambda=lam_800,
+            include_centrifugal=False, n_nodes=n_nodes, **mkw,
+        )
+        ev_h = evaluate_axial_sheath_closure(res_h, z_p28_m=z_p28, z_p29_m=z_p29, l_par_m=l_par_m)
+        ev_p = evaluate_axial_sheath_closure(res_p, z_p28_m=z_p28, z_p29_m=z_p29, l_par_m=l_par_m)
+        for pfx, ev in (("hollow", ev_h), ("peaked", ev_p)):
+            for k in (
+                "has_cwm", "f_hz", "gamma_s",
+                "j_over_isat_p28", "dphi_j_isat_p28_deg",
+                "j_over_isat_sheath", "dphi_j_isat_sheath_deg",
+                "j_over_n_sheath", "dphi_j_n_sheath_deg",
+                "dphi_T_n_sheath_deg", "isat_over_n_sheath",
+            ):
+                flip_row[f"{mtag}_{pfx}_{k}"] = ev[k]
+        if np.isfinite(ev_h["dphi_j_isat_sheath_deg"]) and np.isfinite(ev_p["dphi_j_isat_sheath_deg"]):
+            delta = _wrap_deg(ev_h["dphi_j_isat_sheath_deg"] - ev_p["dphi_j_isat_sheath_deg"])
+            flip_row[f"{mtag}_delta_dphi_sheath_deg"] = delta
+            flip_row[f"{mtag}_abs_delta_dphi_sheath_deg"] = float(abs(delta))
+        else:
+            flip_row[f"{mtag}_delta_dphi_sheath_deg"] = np.nan
+            flip_row[f"{mtag}_abs_delta_dphi_sheath_deg"] = np.nan
+    out["eta_flip"] = flip_row
+
+    return out
+
+
 def batch_all(data_dir=DATA_DIR, out_path=None, *, l_par_m=DEFAULT_L_PAR_M,
               wall_width_cm=DEFAULT_WALL_WIDTH_CM, k_par_m=DEFAULT_K_PAR_M,
-              n_nodes=DEFAULT_N_NODES, include_biased_sheath=True, overwrite=False):
+              n_nodes=DEFAULT_N_NODES, include_biased_sheath=True,
+              include_sheath_closure=True, overwrite=False):
     """Run all linear stability comparisons and save ``stability_linear_jun2026.npz``."""
     out_path = out_path or os.path.join(data_dir, OUT_NAME)
     if os.path.isfile(out_path):
@@ -695,6 +1237,17 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, l_par_m=DEFAULT_L_PAR_M,
             )
         except (FileNotFoundError, ImportError) as exc:
             print(f"  [note] skipping biased-sheath biasscope extraction: {exc}")
+
+    sheath_res = {}
+    if include_sheath_closure:
+        try:
+            sheath_res = analyze_sheath_closure(
+                data_dir=data_dir, l_par_m=l_par_m,
+                wall_width_cm=wall_width_cm, n_nodes=n_nodes,
+                biased_res=biased_res,
+            )
+        except (FileNotFoundError, ImportError, ValueError) as exc:
+            print(f"  [note] skipping sheath-closure B-dot/BVP benchmark: {exc}")
 
     payload = {
         "updated": np.str_(datetime.datetime.now().isoformat(timespec="seconds")),
@@ -723,6 +1276,8 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, l_par_m=DEFAULT_L_PAR_M,
     _pack("b0", b0_res)
     if biased_res:
         _pack("biased", biased_res)
+    if sheath_res:
+        _pack("sheath", sheath_res)
 
     merge_save_npz(out_path, payload)
     print(f"\nWrote {out_path}")
@@ -848,6 +1403,96 @@ def print_summary(npz_path=None):
                     f"{_fg(pfx, 'bsh_rext')} | {_fg(pfx, 'bsh_cc')} | "
                     f"{_fg(pfx, 'esat_cc_top')} | {_fg(pfx, 'ins_cc_top')}"
                 )
+
+        if any(k.startswith("sheath__") for k in d.files):
+            print("\n=== 5. Calibrated Sheath-Closure Benchmark: |J_par/(e n0 cs)| / |dI_sat/I_sat| & Absolute Phase ===")
+            print(
+                "  Experimental (P28 C16 B-dot vs P29-R Isat; peak-phasor RMS / sqrt(2) = time-RMS; "
+                "matched Run 03 j_sat):"
+            )
+            print(
+                f"  {'Run(B0)':>11} {'Zone':>11} | {'|Jz|_rms':>8} {'|j|_rms':>7} "
+                f"{'|dI/I|_rms':>10} | {'|j|/|dI/I|':>10} {'(DC-scl)':>8} | {'dphi(J-I)':>10} {'R':>5}"
+            )
+            for rnum, b0_g in SHEATH_BDOT_RUNS:
+                pfx = f"sheath__exp_{rnum}__"
+                if f"{pfx}b0_g" not in d.files:
+                    continue
+                for zname, zlbl in (("core", "core<=2.5"), ("wall", "wall2.5-4.5"), ("ring_coh", "ring_coh")):
+                    if f"{pfx}{zname}_j_par_time_rms_a_m2" not in d.files:
+                        continue
+                    jz_rms = float(d[f"{pfx}{zname}_j_par_time_rms_a_m2"])
+                    jn_rms = float(d[f"{pfx}{zname}_j_par_norm_rms"])
+                    di_rms = float(d[f"{pfx}{zname}_disat_over_isat_rms"])
+                    rat = float(d[f"{pfx}{zname}_j_over_isat_ratio"])
+                    rat_sc = float(d[f"{pfx}{zname}_j_over_isat_ratio_dc_scaled"])
+                    dphi = float(d[f"{pfx}{zname}_dphi_j_isat_deg"])
+                    rval = float(d[f"{pfx}{zname}_R_j_isat"])
+                    sc_s = f"{rat_sc:8.3f}" if (not np.isclose(b0_g, 800.0) and np.isfinite(rat_sc)) else "     ---"
+                    print(
+                        f"  {f'{rnum}({int(b0_g)}G)':>11} {zlbl:>11} | "
+                        f"{jz_rms:8.1f} {jn_rms:7.3f} {di_rms:10.3f} | "
+                        f"{rat:10.3f} {sc_s} | {dphi:+9.1f}d {rval:5.2f}"
+                    )
+            print(
+                "  Note: ring_coh (2-5 cm, |Jz|>=0.3 max, g2_LP>=0.5) isolates the active CWM channel; "
+                "unfiltered wall2.5-4.5 mixes in the weak outer density-turnover zone (3.5-4.5 cm) where dphi rotates."
+            )
+
+            print(
+                "\n  1-D Axial CWM BVP (Run 03 wall, dI_sat/I_sat = dn/n + 0.5*dTe/Te; "
+                "z_P28=L-2.24m, z_P29=L-1.92m, sheath z=L):"
+            )
+            print(
+                f"  {'B0':>5} {'Model':>13} | {'P28 |j|/|I|':>11} {'dphi(P28)':>9} | "
+                f"{'P28/29 |j|/|I|':>14} {'dphi(28/29)':>11} | "
+                f"{'Sheath |j|/|I|':>14} {'dphi(L)':>8} | {'|I|/|n|(L)':>10} {'dp(T-n)':>8}"
+            )
+            for b_lbl, b_tag in (("800G", "bvp_800G"), ("600G", "bvp_600G")):
+                pfx = f"sheath__{b_tag}__"
+                if f"{pfx}b0_g" not in d.files:
+                    continue
+                for mtag, mlbl in (
+                    ("conducting_1", "conducting_1"),
+                    ("flt_rext", "flt+Reff4"),
+                    ("bsh_rext", "bsh+Reff4"),
+                ):
+                    if f"{pfx}{mtag}_j_over_isat_p28" not in d.files:
+                        continue
+                    print(
+                        f"  {b_lbl:>5} {mlbl:>13} | "
+                        f"{float(d[f'{pfx}{mtag}_j_over_isat_p28']):11.3f} "
+                        f"{float(d[f'{pfx}{mtag}_dphi_j_isat_p28_deg']):+8.1f}d | "
+                        f"{float(d[f'{pfx}{mtag}_j_over_isat_p28_p29']):14.3f} "
+                        f"{float(d[f'{pfx}{mtag}_dphi_j_isat_p28_p29_deg']):+10.1f}d | "
+                        f"{float(d[f'{pfx}{mtag}_j_over_isat_sheath']):14.3f} "
+                        f"{float(d[f'{pfx}{mtag}_dphi_j_isat_sheath_deg']):+7.1f}d | "
+                        f"{float(d[f'{pfx}{mtag}_isat_over_n_sheath']):10.2f} "
+                        f"{float(d[f'{pfx}{mtag}_dphi_T_n_sheath_deg']):+7.1f}d"
+                    )
+
+            epfx = "sheath__eta_flip__"
+            if f"{epfx}eta_e_hollow" in d.files:
+                print(
+                    f"\n  Hollow (eta_e={float(d[epfx+'eta_e_hollow']):+.2f}) vs. Peaked "
+                    f"(eta_e={float(d[epfx+'eta_e_peaked']):+.2f}) Sheath Phase Flip (centrifugal off):"
+                )
+                for mtag, mlbl in (
+                    ("conducting_1", "conducting_1"),
+                    ("flt_rext", "flt+Reff4"),
+                    ("bsh_rext", "bsh+Reff4"),
+                ):
+                    if f"{epfx}{mtag}_delta_dphi_sheath_deg" not in d.files:
+                        continue
+                    print(
+                        f"    {mlbl:>13}: hollow dphi(L)={float(d[f'{epfx}{mtag}_hollow_dphi_j_isat_sheath_deg']):+6.1f}d "
+                        f"(|I|/|n|={float(d[f'{epfx}{mtag}_hollow_isat_over_n_sheath']):.2f}, "
+                        f"dp(T-n)={float(d[f'{epfx}{mtag}_hollow_dphi_T_n_sheath_deg']):+6.1f}d) vs. "
+                        f"peaked dphi(L)={float(d[f'{epfx}{mtag}_peaked_dphi_j_isat_sheath_deg']):+6.1f}d "
+                        f"(|I|/|n|={float(d[f'{epfx}{mtag}_peaked_isat_over_n_sheath']):.2f}, "
+                        f"dp(T-n)={float(d[f'{epfx}{mtag}_peaked_dphi_T_n_sheath_deg']):+5.1f}d) "
+                        f"-> |Delta dphi|={float(d[f'{epfx}{mtag}_abs_delta_dphi_sheath_deg']):5.1f} deg"
+                    )
 
 
 if __name__ == "__main__":
