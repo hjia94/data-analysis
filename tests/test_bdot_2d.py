@@ -14,6 +14,7 @@ _JUN2026_DIR = os.path.abspath(
 if _JUN2026_DIR not in sys.path:
     sys.path.insert(0, _JUN2026_DIR)
 
+from data_analysis.plasma.bdot import BdotCalibration
 from data_analysis.plasma.fields import (
     circular_polarization,
     curl,
@@ -171,6 +172,64 @@ class TestElectromagnetic2DHelpers(unittest.TestCase):
             with np.load(out_npz) as d:
                 self.assertAlmostEqual(float(d["26__tmin_ms"]), 1.5)
                 self.assertAlmostEqual(float(d["31__tmin_ms"]), jb2.DEFAULT_TMIN_MS)
+
+    def test_apply_bdot_calibration_3x3_real_level_and_channel_signs(self):
+        A = np.array([
+            [1.15e-4, 0.0, 1.25e-5],
+            [1.5e-6, 9.8e-5, 9.4e-7],
+            [2.3e-6, 1.01e-5, 8.7e-5],
+        ])
+        cal = BdotCalibration(
+            probe_id="C16",
+            area_matrix_m2=A,
+            r2_matrix=np.ones((3, 3)),
+            phase_deg_matrix=np.full((3, 3), 90.0),
+            phase_R_matrix=np.ones((3, 3)),
+            diag_band_hz=(150e3, 500e3),
+            offdiag_band_hz=(250e3, 1000e3),
+        )
+        f0 = 4110.0
+        w0 = 2.0 * np.pi * f0
+        B_true = np.array([
+            [[3e-5 + 1e-5j, -1e-5 + 2e-5j]],
+            [[-2e-5 + 3e-5j, 4e-5 - 1e-5j]],
+            [[4e-6 - 2e-6j, 1e-6 + 3e-6j]],
+        ])  # (3, 1, 2)
+        gain = 1000.0
+        atten_db = 6.0
+        eff_gain = gain * 10.0 ** (-atten_db / 20.0)
+        ch_signs = (+1, +1, -1)
+        # V_coil = -i * w * A @ B; scope sees channel_signs * eff_gain * V_coil
+        V_coil = -1j * w0 * np.einsum("ij,j...->i...", A, B_true)
+        V_scope = np.asarray(ch_signs)[:, None, None] * eff_gain * V_coil
+
+        Bx, By, Bz, cal_flag = jb2._apply_bdot_calibration(
+            V_scope[0], V_scope[1], V_scope[2], f0,
+            bdot_cal=cal, bdot_gain=gain, bdot_atten_db=atten_db,
+            channel_signs=ch_signs,
+        )
+        self.assertTrue(cal_flag)
+        np.testing.assert_allclose(np.stack([Bx, By, Bz], axis=0), B_true, rtol=1e-12)
+
+    def test_batch_all_calibrated_ndarray_settings_mismatch(self):
+        A1 = np.diag([1.1e-4, 1.0e-4, 0.9e-4])
+        A2 = np.diag([1.2e-4, 1.0e-4, 0.9e-4])
+        fake = {
+            "b0_g": 800.0, "f0_hz": 4110.0,
+            "x_cm": np.array([-1.0, 0.0, 1.0]), "y_cm": np.array([-1.0, 0.0, 1.0]),
+            "t0_offset_us": 0.0, "bdot_calibrated": True, "bdot_gain": 1000.0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out_npz = os.path.join(tmp, "bdot_2d.npz")
+            with mock.patch.object(jb2, "analyze_run", return_value=fake):
+                jb2.batch_all(data_dir=tmp, runs=["26"], out_path=out_npz, bdot_area_m2=A1, bdot_gain=1000.0)
+            # Same 3x3 matrix skips cleanly
+            with mock.patch.object(jb2, "analyze_run") as m_ar:
+                jb2.batch_all(data_dir=tmp, runs=["26"], out_path=out_npz, bdot_area_m2=A1, bdot_gain=1000.0)
+                m_ar.assert_not_called()
+            # Changed 3x3 matrix fails fast unless overwrite=True
+            with self.assertRaises(ValueError):
+                jb2.batch_all(data_dir=tmp, runs=["26"], out_path=out_npz, bdot_area_m2=A2, bdot_gain=1000.0)
 
 
 if __name__ == "__main__":

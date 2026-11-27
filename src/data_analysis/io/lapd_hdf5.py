@@ -276,6 +276,66 @@ def parse_shunts(text, tips=None):
     return {}
 
 
+# B-dot signal chain inside a probe description block, e.g.
+#   - P28: Bdot-10T-C16
+#     - Connection: 2.5BLP => X10 => 2.5BLP =>X100
+_BDOT_HEADER_RE = re.compile(r"^\s*-\s*(?:(?:\(NOT\s+US\w*\)\s*)?.*bdot.*)$", re.IGNORECASE)
+_CONN_RE = re.compile(r"connection\s*:\s*(.+)$", re.IGNORECASE)
+_GAIN_STAGE_RE = re.compile(r"(?<![A-Za-z0-9])X\s*(\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_ATTEN_DB_RE = re.compile(r"(\d+(?:\.\d+)?)\s*dB\b", re.IGNORECASE)
+
+
+def parse_bdot_gain(text):
+    """Extract a B-dot probe's recorded amplifier/attenuator chain from a run description.
+
+    Scans active (non-``(NOT USED)``) B-dot probe blocks for a ``Connection:``
+    line such as ``Connection: 2.5BLP => X10 => 2.5BLP =>X100``, multiplying
+    ``X<n>`` linear gain stages and folding any ``<n> dB`` attenuator pads.
+
+    Returns ``{'chain': str, 'gain': float, 'atten_db': float, 'effective_gain': float}``
+    when a B-dot connection line with at least one gain/attenuator token is found,
+    or ``None`` when no B-dot signal chain is recorded (never guesses a default).
+    """
+    if not text:
+        return None
+    lines = text.splitlines()
+    in_bdot = False
+    bdot_indent = 0
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        indent = len(line) - len(stripped)
+        if _BDOT_HEADER_RE.match(line):
+            if re.search(r"\(NOT\s+US\w*\)", line, re.IGNORECASE):
+                in_bdot = False
+                continue
+            in_bdot = True
+            bdot_indent = indent
+            continue
+        if in_bdot:
+            if indent <= bdot_indent and stripped.startswith("-"):
+                in_bdot = False
+                continue
+            m = _CONN_RE.search(line)
+            if m:
+                chain = m.group(1).strip()
+                gains = [float(g) for g in _GAIN_STAGE_RE.findall(chain)]
+                attens = [float(a) for a in _ATTEN_DB_RE.findall(chain)]
+                if not gains and not attens:
+                    continue
+                gain = float(np.prod(gains)) if gains else 1.0
+                atten_db = float(sum(attens)) if attens else 0.0
+                eff = gain * (10.0 ** (-atten_db / 20.0))
+                return {
+                    "chain": chain,
+                    "gain": gain,
+                    "atten_db": atten_db,
+                    "effective_gain": eff,
+                }
+    return None
+
+
 def list_all_channels(fn):
     """Print every scope group's channel descriptions -> ``{scope: {chan: description}}``.
 

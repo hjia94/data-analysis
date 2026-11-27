@@ -90,7 +90,7 @@ def drive_frequency(I, dt, steady):
 
 
 def reduce_chunk(args):
-    path, shots, freq, w = args
+    path, shots, freq, w, area_arg, eff_gain = args
     run = open_lapd(path)
     V = {}
     for ch in CH_B + CH_I:
@@ -98,7 +98,9 @@ def reduce_chunk(args):
     dt = t[1] - t[0]
     period = 1 / (freq * dt)
     vb = np.stack([V[c] for c in CH_B])                          # (3, nshot, nt)
-    bd = bdot.voltage_to_bdot(vb, bdot.inverse_area_matrix(AREA, GAIN))
+    # Convert scope volts to real probe-terminal voltage before plasma.bdot
+    v_coil = vb / float(eff_gain)
+    bd = bdot.voltage_to_bdot(v_coil, bdot.inverse_area_matrix(area_arg, gain=1.0))
     B = bdot.integrate_bdot(bd, dt, "pretrigger", pretrigger=w["pre"])
     Braw = bdot.integrate_bdot(bd, dt, None)
     Bsm = bdot.integrate_bdot(bd, dt, "smooth", period=period, smooth_periods=4)
@@ -132,9 +134,26 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("run", type=int)
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    ap.add_argument("--cal", type=Path, default=None,
+                    help="Path to BdotCalibration .npz (e.g. C11-bdot-calibration.npz)")
+    ap.add_argument("--gain", type=float, default=GAIN,
+                    help=f"Experiment amplifier linear gain (default: {GAIN:g})")
+    ap.add_argument("--atten-db", type=float, default=0.0,
+                    help="Experiment attenuator [dB] (default: 0.0)")
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--chunk", type=int, default=36, help="shots per worker task")
     args = ap.parse_args()
+
+    if args.cal is not None:
+        cal = bdot.load_bdot_calibration(args.cal)
+        area_arg = cal.area_matrix_m2
+        probe_id = cal.probe_id
+        calibrated = True
+    else:
+        area_arg = AREA
+        probe_id = ""
+        calibrated = False
+    eff_gain = float(args.gain) * (10.0 ** (-float(args.atten_db) / 20.0))
 
     t0 = time.time()
     path = run_file(args.run)
@@ -148,13 +167,15 @@ def main():
     w = burst_windows(I, t)
     freq = drive_frequency(I[np.argmax(I.std(-1))], t[1] - t[0], w["steady"])
     ms = {k: f"{t[s.start]*1e3:.2f}-{t[s.stop-1]*1e3:.2f} ms" for k, s in w.items() if s.stop > s.start}
-    print(f"{path.name}\n  {len(shots)} shots, dt {(t[1]-t[0])*1e9:.0f} ns, drive {freq/1e3:.3f} kHz\n  windows {ms}",
+    print(f"{path.name}\n  {len(shots)} shots, dt {(t[1]-t[0])*1e9:.0f} ns, drive {freq/1e3:.3f} kHz"
+          f", calibrated={calibrated} (gain={args.gain:g}, atten={args.atten_db:g} dB)\n  windows {ms}",
           flush=True)
 
     chunks = [shots[i:i + args.chunk] for i in range(0, len(shots), args.chunk)]
     parts = []
     with ProcessPoolExecutor(args.workers) as ex:
-        for k, r in enumerate(ex.map(reduce_chunk, [(path, c, freq, w) for c in chunks])):
+        tasks = [(path, c, freq, w, area_arg, eff_gain) for c in chunks]
+        for k, r in enumerate(ex.map(reduce_chunk, tasks)):
             parts.append(r)
             print(f"  chunk {k + 1}/{len(chunks)}  {time.time() - t0:.0f}s", flush=True)
     res = {k: np.concatenate([p[k] for p in parts], axis=0 if k == "shots" else 1) for k in parts[0]}
@@ -162,7 +183,9 @@ def main():
     args.out_dir.mkdir(parents=True, exist_ok=True)
     out = args.out_dir / f"{args.run:02d}-bdot-phasors.npz"
     np.savez(out, source=str(path), freq=freq, dt=t[1] - t[0], t_burst0=t[w["burst"].start],
-             area=AREA, gain=GAIN, pos_x=pos["x"], pos_y=pos["y"], pos_shot=pos["shot_num"], **res)
+             area=area_arg, gain=float(args.gain), atten_db=float(args.atten_db),
+             probe_id=np.str_(probe_id), calibrated=np.bool_(calibrated),
+             pos_x=pos["x"], pos_y=pos["y"], pos_shot=pos["shot_num"], **res)
     print(f"saved {out}  ({time.time() - t0:.0f}s)")
 
 

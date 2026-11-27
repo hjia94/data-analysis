@@ -34,8 +34,13 @@ import os
 
 import numpy as np
 
-from data_analysis.io import open_lapd
-from data_analysis.plasma.bdot import inverse_area_matrix, voltage_to_bdot
+from data_analysis.io import open_lapd, parse_bdot_gain
+from data_analysis.plasma.bdot import (
+    BdotCalibration,
+    inverse_area_matrix,
+    load_bdot_calibration,
+    voltage_to_bdot,
+)
 from data_analysis.plasma.flow import find_flow_centre
 from data_analysis.plasma.modes import (
     axial_wavenumber,
@@ -61,12 +66,16 @@ OUT_NAME = "modes_dispersion_jun2026.npz"
 # leaving |k_par| and f_Alfven unchanged. Aliasing limit: |k_par| = pi/1.28 = 2.45 /m.
 DZ_P29_P25_M = 1.28
 
-# Bdot-10T-C16 effective area and preamp gain are not recorded in the HDF5
-# description; leave None by default so estimate_bdot_amplitude reports raw
-# V_perp and flux-like V_perp / omega = (G * A) * delta_B_perp [V*s] without
-# fabricating unverified Tesla/Gauss amplitudes.
+# Bdot-10T-C16 HDF5 run descriptions record `2.5BLP => X10 => 2.5BLP => X100`
+# (G = 1000.0), while the bench-calibrated 3x3 effective area lives in
+# `C16-bdot-calibration.npz` (from Jun2026_bdot_cal.py). Leave None by default
+# so estimate_bdot_amplitude reports raw V_perp and flux-like V_perp / omega
+# without fabricating Tesla/Gauss amplitudes unless a calibration is supplied.
+DEFAULT_BDOT_CAL = None
 DEFAULT_BDOT_AREA_M2 = None
 DEFAULT_BDOT_GAIN = 1.0
+DEFAULT_BDOT_ATTEN_DB = 0.0
+DEFAULT_BDOT_CHANNEL_SIGNS = (+1, +1, +1)
 
 # LAPD magnetic field polarity: +1 -> B_0 along +z so outward E_r > 0 gives
 # clockwise E x B rotation (v_theta < 0, matching the observed m = -1 mode).
@@ -299,19 +308,59 @@ def analyze_axial_kpar(data_dir=DATA_DIR, onset_table=None, *,
 
 
 def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
+                            bdot_cal=DEFAULT_BDOT_CAL,
                             bdot_area_m2=DEFAULT_BDOT_AREA_M2,
                             bdot_gain=DEFAULT_BDOT_GAIN,
+                            bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
+                            channel_signs=DEFAULT_BDOT_CHANNEL_SIGNS,
                             max_shots=60):
     """Measure P28 B-dot p95 RMS voltage and (when calibrated) ``delta_B_perp / B_0``.
 
     Always computes raw ``v_perp_p95_v`` [V] and ``v_perp_over_omega_vs``
-    [V*s = ``gain * area * delta_B_perp``]. When bench-calibrated
-    ``bdot_area_m2`` is provided, applies :func:`data_analysis.plasma.bdot.voltage_to_bdot`
-    to compute ``delta_b_perp_g``, ``delta_b_z_g``, and ``delta_b_perp_over_b0``;
-    otherwise those calibrated fields stay ``NaN`` with ``bdot_calibrated=False``.
+    [V*s = ``gain * area * delta_B_perp``]. When bench-calibrated ``bdot_cal``
+    (:class:`BdotCalibration` or ``.npz`` path) or ``bdot_area_m2`` (scalar,
+    length-3, or 3x3) is provided, divides out ``bdot_gain``/``bdot_atten_db``
+    to real probe-terminal voltage and applies 3-axis
+    :func:`data_analysis.plasma.bdot.voltage_to_bdot` **before** taking RMS,
+    ``hypot(dBx, dBy)``, and the 95th percentile; otherwise calibrated fields
+    stay ``NaN`` with ``bdot_calibrated=False``.
     """
-    calibrated = bdot_area_m2 is not None
-    inv_area = inverse_area_matrix(bdot_area_m2, gain=bdot_gain) if calibrated else None
+    if bdot_cal is not None and bdot_area_m2 is not None:
+        raise ValueError("Pass either bdot_cal or bdot_area_m2, not both")
+
+    probe_id = ""
+    if bdot_cal is not None:
+        cal_obj = bdot_cal if isinstance(bdot_cal, BdotCalibration) else load_bdot_calibration(bdot_cal)
+        area_mat = cal_obj.area_matrix_m2.copy()
+        probe_id = str(cal_obj.probe_id)
+        calibrated = True
+    elif bdot_area_m2 is not None:
+        cal_obj = bdot_area_m2
+        a = np.asarray(bdot_area_m2, dtype=float)
+        if a.ndim == 0:
+            area_mat = np.eye(3, dtype=float) * float(a)
+        elif a.shape == (3,):
+            area_mat = np.diag(a)
+        elif a.shape == (3, 3):
+            area_mat = a.copy()
+        else:
+            raise ValueError(f"bdot_area_m2 must be scalar, (3,), or (3, 3); got shape {a.shape}")
+        calibrated = True
+    else:
+        cal_obj = None
+        area_mat = np.full((3, 3), np.nan, dtype=float)
+        calibrated = False
+
+    signs = np.asarray(channel_signs, dtype=float)
+    if signs.shape != (3,) or not np.all(np.isin(signs, (-1.0, +1.0))):
+        raise ValueError(f"channel_signs must be 3 values in {{-1, +1}}, got {channel_signs!r}")
+    eff_gain = float(bdot_gain) * (10.0 ** (-float(bdot_atten_db) / 20.0))
+    if eff_gain <= 0.0:
+        raise ValueError(f"effective bdot gain must be > 0, got {eff_gain}")
+
+    # Real probe-level inverse area matrix (experiment gain removed before voltage_to_bdot)
+    inv_area = inverse_area_matrix(cal_obj, gain=1.0) if calibrated else None
+
     out = {}
     for rnum, b0_g, f_fallback in [("26", 800.0, 4110.0), ("31", 600.0, 3529.0)]:
         try:
@@ -320,17 +369,25 @@ def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
             continue
         f0 = float(onset_table[rnum]["f_peak_hz"]) if (onset_table and rnum in onset_table) else f_fallback
         run = open_lapd(ifn)
+        try:
+            parsed_chain = parse_bdot_gain(run.description().raw)
+        except (OSError, ValueError, NotImplementedError, KeyError):
+            parsed_chain = None
+        signal_chain = parsed_chain["chain"] if parsed_chain else ""
+
         tarr = run.time_array(scope_name="bdotscope")
         i0, i1 = clip_time_window(tarr, *BIASSCOPE_WINDOW_MS)
         all_shots = np.asarray(run.shots(scope_name="bdotscope"), dtype=int)
         idx = np.unique(np.linspace(0, all_shots.size - 1, min(all_shots.size, max_shots), dtype=int))
         shots = all_shots[idx].tolist()
 
+        segs = []
         v_rms = {}
         for ch, name in [("C1", "Bx"), ("C2", "By"), ("C3", "Bz")]:
             st, _ = run.channel(ch, scope_name="bdotscope", shots=shots)
             seg = np.asarray(st[:, i0:i1], dtype=float)
             seg = seg - seg.mean(axis=1, keepdims=True)
+            segs.append(seg)
             v_rms[name] = np.std(seg, axis=1)
 
         # Peak over the sampled scan positions (95th percentile avoids single-shot spikes)
@@ -339,8 +396,13 @@ def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
         omega = 2.0 * np.pi * f0
 
         if calibrated:
-            b_perp_t = float(voltage_to_bdot(v_perp_pk, inv_area)) / omega
-            b_z_t = float(voltage_to_bdot(v_z_pk, inv_area)) / omega
+            # Stack (3, nshot, nt) -> real probe-terminal voltage -> 3x3 dB/dt -> RMS/hypot
+            v_stack = np.stack(segs, axis=0)
+            v_coil = (signs[:, None, None] * v_stack) / eff_gain
+            bd_stack = voltage_to_bdot(v_coil, inv_area)
+            bd_rms = np.std(bd_stack, axis=-1)  # (3, nshot), T/s
+            b_perp_t = float(np.percentile(np.hypot(bd_rms[0], bd_rms[1]), 95)) / omega
+            b_z_t = float(np.percentile(bd_rms[2], 95)) / omega
             b0_t = b0_g * 1e-4
             db_perp_g = b_perp_t * 1e4
             db_z_g = b_z_t * 1e4
@@ -358,8 +420,11 @@ def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
             "delta_b_perp_g": db_perp_g,
             "delta_b_z_g": db_z_g,
             "delta_b_perp_over_b0": db_over_b0,
-            "bdot_area_m2": float(bdot_area_m2) if calibrated else np.nan,
+            "bdot_probe_id": probe_id,
+            "bdot_area_matrix_m2": area_mat,
+            "bdot_signal_chain": signal_chain,
             "bdot_gain": float(bdot_gain),
+            "bdot_atten_db": float(bdot_atten_db),
             "bdot_calibrated": bool(calibrated),
         }
     return out
@@ -545,8 +610,12 @@ def build_dispersion_table(data_dir=DATA_DIR, *, r_cm=DISPERSION_R_CM,
 
 
 def batch_all(data_dir=DATA_DIR, out_path=None, *, include_biasscope=True,
-              include_bdot_amp=True, bdot_area_m2=DEFAULT_BDOT_AREA_M2,
-              bdot_gain=DEFAULT_BDOT_GAIN, overwrite=False):
+              include_bdot_amp=True, bdot_cal=DEFAULT_BDOT_CAL,
+              bdot_area_m2=DEFAULT_BDOT_AREA_M2,
+              bdot_gain=DEFAULT_BDOT_GAIN,
+              bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
+              bdot_channel_signs=DEFAULT_BDOT_CHANNEL_SIGNS,
+              overwrite=False):
     """Run all Module #4 analyses and save ``modes_dispersion_jun2026.npz``.
 
     Skips when ``out_path`` already exists unless ``overwrite=True``.
@@ -570,7 +639,9 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, include_biasscope=True,
     k_par_ref = abs(ax["29"]["inner_k_par_m"]) if "29" in ax else 0.65
     disp = build_dispersion_table(data_dir, k_par_m=k_par_ref)
     bdot_amp = (estimate_bdot_amplitude(
-        data_dir, onset, bdot_area_m2=bdot_area_m2, bdot_gain=bdot_gain,
+        data_dir, onset, bdot_cal=bdot_cal, bdot_area_m2=bdot_area_m2,
+        bdot_gain=bdot_gain, bdot_atten_db=bdot_atten_db,
+        channel_signs=bdot_channel_signs,
     ) if include_bdot_amp else {})
     bias_coh = (analyze_biasscope_coherence(data_dir, onset_table=onset)
                 if include_biasscope else {})
@@ -616,7 +687,9 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, include_biasscope=True,
         for rnum, fields in nested.items():
             for k, v in fields.items():
                 key = f"{prefix}__{rnum}__{k}"
-                if isinstance(v, str):
+                if isinstance(v, np.ndarray):
+                    payload[key] = v
+                elif isinstance(v, str):
                     payload[key] = np.str_(v)
                 elif isinstance(v, (bool, np.bool_)):
                     payload[key] = np.bool_(v)
@@ -660,7 +733,8 @@ def print_summary(npz_path=None):
                 if bool(d[f"bdot__{r}__bdot_calibrated"]):
                     print(
                         f"    B-dot p95 (calibrated): V_perp={vp_mv:.1f} mV, "
-                        f"dB_perp={float(d[f'bdot__{r}__delta_b_perp_g']):.3f} G "
+                        f"dB_perp={float(d[f'bdot__{r}__delta_b_perp_g']):.3f} G, "
+                        f"dB_z={float(d[f'bdot__{r}__delta_b_z_g']):.3f} G "
                         f"(dB/B0={float(d[f'bdot__{r}__delta_b_perp_over_b0']):.2e})"
                     )
                 else:

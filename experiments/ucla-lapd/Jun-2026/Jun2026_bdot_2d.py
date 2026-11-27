@@ -40,13 +40,18 @@ Saves ``bdot_2d_jun2026.npz`` in ``DATA_DIR`` and prints a concise summary.
 import datetime
 import glob
 import os
+import warnings
 from typing import NamedTuple
 
 import numpy as np
 from scipy.constants import mu_0
 
-from data_analysis.io import open_lapd, position_shots
-from data_analysis.plasma.bdot import inverse_area_matrix
+from data_analysis.io import open_lapd, parse_bdot_gain, position_shots
+from data_analysis.plasma.bdot import (
+    BdotCalibration,
+    load_bdot_calibration,
+    phasor_voltage_to_b,
+)
 from data_analysis.plasma.fields import (
     circular_polarization,
     curl,
@@ -79,8 +84,13 @@ DEFAULT_ON_POLARITY_MISMATCH = "raise"  # "raise" | "flip" | "ignore"
 DEFAULT_ABS_COIL_POLARITY_VERIFIED = False  # True once one in-plane coil abs sign is bench-verified
 DEFAULT_MJ_GAMMA2_MIN = 0.5       # transverse B-dot coherence threshold on current-bearing interior
 DEFAULT_GRID_STEP_CM = 1.0
-DEFAULT_BDOT_AREA_M2 = None       # pass bench-calibrated area [m^2] when available
-DEFAULT_BDOT_GAIN = 1.0
+DEFAULT_BDOT_CAL = None           # BdotCalibration or .npz path (e.g. C16-bdot-calibration.npz)
+DEFAULT_BDOT_AREA_M2 = None       # bare coil area [m^2]: scalar, (3,), or (3, 3)
+DEFAULT_BDOT_GAIN = 1.0           # experiment amplifier linear gain (Jun-2026 P28: 1000.0)
+DEFAULT_BDOT_ATTEN_DB = 0.0       # experiment attenuator [dB]
+DEFAULT_CHANNEL_SIGNS = (+1, +1, +1)  # pre-inversion hardware polarity on (C1, C2, C3)
+JUN2026_BDOT_SIGNAL_CHAIN = "2.5BLP => X10 => 2.5BLP => X100"
+JUN2026_BDOT_GAIN = 1000.0
 
 
 class Bdot2DRunSpec(NamedTuple):
@@ -106,25 +116,77 @@ def _run_ifn(data_dir, run_num):
     return hits[0]
 
 
-def _apply_bdot_calibration(vx, vy, vz, omega, *, bdot_area_m2=None, bdot_gain=1.0):
-    """Integrate B-dot voltage phasors in ``exp(-i*w*t)`` convention -> ``(Bx, By, Bz, calibrated)``.
-
-    In physics ``exp(-i*w*t)`` convention, ``V_bdot = -i*w*(G*A)*B`` so
-    ``B = (+i/w) * (G*A)^-1 * V_bdot``. When ``bdot_area_m2 is None``, leaves
-    ``G*A = 1`` so outputs are uncalibrated flux-like phasors ``(G*A)*B`` [V*s]
-    with ``calibrated=False``.
-    """
-    factor = 1j / float(omega)
+def _resolve_bdot_calibration(bdot_cal=None, bdot_area_m2=None):
+    """Normalize ``bdot_cal`` / ``bdot_area_m2`` -> ``(cal_or_area, area_matrix_3x3, probe_id)``."""
+    if bdot_cal is not None and bdot_area_m2 is not None:
+        raise ValueError("Pass either bdot_cal or bdot_area_m2, not both")
+    if bdot_cal is not None:
+        cal = bdot_cal if isinstance(bdot_cal, BdotCalibration) else load_bdot_calibration(bdot_cal)
+        return cal, cal.area_matrix_m2.copy(), str(cal.probe_id)
     if bdot_area_m2 is None:
-        return factor * vx, factor * vy, factor * vz, False
+        return None, np.full((3, 3), np.nan, dtype=float), ""
+    a = np.asarray(bdot_area_m2, dtype=float)
+    if a.ndim == 0:
+        mat = np.eye(3, dtype=float) * float(a)
+    elif a.shape == (3,):
+        mat = np.diag(a)
+    elif a.shape == (3, 3):
+        mat = a.copy()
+    else:
+        raise ValueError(f"bdot_area_m2 must be scalar, (3,), or (3, 3); got shape {a.shape}")
+    return bdot_area_m2, mat, ""
 
-    inv_a = np.asarray(inverse_area_matrix(bdot_area_m2, gain=bdot_gain), dtype=float)
-    if inv_a.ndim == 0:
-        s = factor * float(inv_a)
-        return s * vx, s * vy, s * vz, True
-    stacked = np.stack([vx, vy, vz], axis=0)
-    cal = factor * np.einsum("ij,j...->i...", inv_a, stacked)
-    return cal[0], cal[1], cal[2], True
+
+def _apply_bdot_calibration(
+    vx,
+    vy,
+    vz,
+    freq_hz,
+    *,
+    bdot_cal=None,
+    bdot_area_m2=None,
+    bdot_gain=1.0,
+    bdot_atten_db=0.0,
+    channel_signs=DEFAULT_CHANNEL_SIGNS,
+    probe_to_lab=None,
+    mode="static",
+):
+    """Convert scope B-dot voltage phasors (``exp(-i*w*t)``) -> ``(Bx, By, Bz, calibrated)``.
+
+    Experiment signal conditioning (``channel_signs``, ``bdot_gain``,
+    ``bdot_atten_db``) is applied **first** to produce real probe-terminal
+    voltage phasors ``V_coil`` before delegating to
+    :func:`data_analysis.plasma.bdot.phasor_voltage_to_b`. Optional
+    ``probe_to_lab`` (3x3 rotation/sign matrix) is applied **after** ``A^-1``.
+    When neither ``bdot_cal`` nor ``bdot_area_m2`` is given, returns uncalibrated
+    flux-like phasors ``(i/w) * V_coil`` [V*s] with ``calibrated=False``.
+    """
+    signs = np.asarray(channel_signs, dtype=float)
+    if signs.shape != (3,) or not np.all(np.isin(signs, (-1.0, +1.0))):
+        raise ValueError(f"channel_signs must be 3 values in {{-1, +1}}, got {channel_signs!r}")
+    eff_gain = float(bdot_gain) * (10.0 ** (-float(bdot_atten_db) / 20.0))
+    if eff_gain <= 0.0:
+        raise ValueError(f"effective bdot gain must be > 0, got {eff_gain}")
+
+    # Real probe-terminal voltage phasors (3, ny, nx)
+    v_scope = np.stack([vx, vy, vz], axis=0)
+    v_coil = (signs[:, None, None] * v_scope) / eff_gain
+
+    cal_obj, _, _ = _resolve_bdot_calibration(bdot_cal, bdot_area_m2)
+    if cal_obj is None:
+        factor = 1j / (2.0 * np.pi * float(freq_hz))
+        out = factor * v_coil
+        return out[0], out[1], out[2], False
+
+    B = phasor_voltage_to_b(
+        v_coil, freq_hz, cal_obj, convention="exp_minus_iwt", gain=1.0, mode=mode,
+    )
+    if probe_to_lab is not None:
+        R = np.asarray(probe_to_lab, dtype=float)
+        if R.shape != (3, 3):
+            raise ValueError(f"probe_to_lab must have shape (3, 3), got {R.shape}")
+        B = np.einsum("ij,j...->i...", R, B)
+    return B[0], B[1], B[2], True
 
 
 def analyze_harmonic_fields(x_cm, y_cm, Bx, By, Bz, LP, g2_Bx, g2_By, g2_Bz, g2_LP, *,
@@ -363,7 +425,12 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
                 by_sign=DEFAULT_BY_SIGN,
                 on_polarity_mismatch=DEFAULT_ON_POLARITY_MISMATCH,
                 abs_coil_polarity_verified=DEFAULT_ABS_COIL_POLARITY_VERIFIED,
-                bdot_area_m2=DEFAULT_BDOT_AREA_M2, bdot_gain=DEFAULT_BDOT_GAIN):
+                bdot_cal=DEFAULT_BDOT_CAL,
+                bdot_area_m2=DEFAULT_BDOT_AREA_M2,
+                bdot_gain=DEFAULT_BDOT_GAIN,
+                bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
+                channel_signs=DEFAULT_CHANNEL_SIGNS,
+                probe_to_lab=None):
     """Extract 2-D complex B-dot & LP phasors, ``J_par``, and polarization for one run."""
     ifn = _run_ifn(data_dir, spec.run_num)
     f0 = (float(onset_table[spec.run_num]["f_peak_hz"])
@@ -371,7 +438,26 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
           else float(spec.f0_fallback_hz))
     freqs = (f0, 2.0 * f0)
 
+    cal_obj, area_mat, probe_id = _resolve_bdot_calibration(bdot_cal, bdot_area_m2)
+
     run = open_lapd(ifn)
+    parsed_chain = None
+    try:
+        parsed_chain = parse_bdot_gain(run.description().raw)
+    except (OSError, ValueError, NotImplementedError, KeyError):
+        parsed_chain = None
+
+    signal_chain = parsed_chain["chain"] if parsed_chain else ""
+    if cal_obj is not None and parsed_chain is not None:
+        req_eff = float(bdot_gain) * (10.0 ** (-float(bdot_atten_db) / 20.0))
+        if not np.isclose(req_eff, parsed_chain["effective_gain"], rtol=1e-3, atol=0.0):
+            warnings.warn(
+                f"Run {spec.run_num}: requested bdot effective gain {req_eff:g} differs from "
+                f"HDF5 description '{parsed_chain['chain']}' ({parsed_chain['effective_gain']:g})",
+                UserWarning,
+                stacklevel=2,
+            )
+
     pos_b = jiv.read_lp_positions(ifn, motion_group_name=BDOT_MOTION_GROUP)
     pos_lp = jiv.read_lp_positions(ifn, motion_group_name=LP_MOTION_GROUP)
 
@@ -421,19 +507,29 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
         "x_cm": ux,
         "y_cm": uy,
         "t0_offset_us": float(t0_offset_s * 1e6),
-        "bdot_calibrated": bool(bdot_area_m2 is not None),
+        "bdot_calibrated": bool(cal_obj is not None),
+        "bdot_probe_id": str(probe_id),
+        "bdot_area_matrix_m2": area_mat,
+        "bdot_signal_chain": str(signal_chain),
         "bdot_gain": float(bdot_gain),
+        "bdot_atten_db": float(bdot_atten_db),
+        "bdot_channel_signs": np.asarray(channel_signs, dtype=np.int64),
         "abs_coil_polarity_verified": bool(abs_coil_polarity_verified),
     }
 
     for h_lbl, f_hz in (("h1", freqs[0]), ("h2", freqs[1])):
-        omega = 2.0 * np.pi * f_hz
         vx, gx = bdot_grids["Bx"][f_hz]
         vy, gy = bdot_grids["By"][f_hz]
         vz, gz = bdot_grids["Bz"][f_hz]
         lp_c, glp = lp_grids[f_hz]
         Bx, By, Bz, cal_flag = _apply_bdot_calibration(
-            vx, vy, vz, omega, bdot_area_m2=bdot_area_m2, bdot_gain=bdot_gain,
+            vx, vy, vz, f_hz,
+            bdot_cal=cal_obj if isinstance(cal_obj, BdotCalibration) else None,
+            bdot_area_m2=None if isinstance(cal_obj, BdotCalibration) else cal_obj,
+            bdot_gain=bdot_gain,
+            bdot_atten_db=bdot_atten_db,
+            channel_signs=channel_signs,
+            probe_to_lab=probe_to_lab,
         )
         h_res = analyze_harmonic_fields(
             ux, uy, Bx, By, Bz, lp_c, gx, gy, gz, glp,
@@ -450,7 +546,10 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
 
 def _run_settings_dict(tmin_ms, tmax_ms, window, b_sign_z, by_sign,
                        on_polarity_mismatch, abs_coil_polarity_verified,
-                       bdot_area_m2, bdot_gain):
+                       bdot_cal, bdot_area_m2, bdot_gain,
+                       bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
+                       channel_signs=DEFAULT_CHANNEL_SIGNS):
+    cal_obj, area_mat, probe_id = _resolve_bdot_calibration(bdot_cal, bdot_area_m2)
     return {
         "tmin_ms": float(tmin_ms),
         "tmax_ms": float(tmax_ms),
@@ -459,8 +558,12 @@ def _run_settings_dict(tmin_ms, tmax_ms, window, b_sign_z, by_sign,
         "by_sign": int(by_sign),
         "on_polarity_mismatch": str(on_polarity_mismatch),
         "abs_coil_polarity_verified": bool(abs_coil_polarity_verified),
-        "bdot_calibrated": bool(bdot_area_m2 is not None),
+        "bdot_calibrated": bool(cal_obj is not None),
+        "bdot_probe_id": str(probe_id),
+        "bdot_area_matrix_m2": area_mat,
         "bdot_gain": float(bdot_gain),
+        "bdot_atten_db": float(bdot_atten_db),
+        "bdot_channel_signs": np.asarray(channel_signs, dtype=np.int64),
     }
 
 
@@ -471,7 +574,11 @@ def _run_settings_mismatch(npz_data, run_num, want):
         if k not in npz_data.files:
             diffs.append(f"{field}: missing")
             continue
-        if isinstance(val, bool):
+        if isinstance(val, np.ndarray):
+            got = np.asarray(npz_data[k])
+            if got.shape != val.shape or not np.allclose(got, val, rtol=1e-6, atol=1e-12, equal_nan=True):
+                diffs.append(f"{field}: stored array differs from requested")
+        elif isinstance(val, bool):
             if bool(npz_data[k]) != val:
                 diffs.append(f"{field}: stored {bool(npz_data[k])} != {val}")
         elif isinstance(val, int):
@@ -492,7 +599,12 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
               by_sign=DEFAULT_BY_SIGN,
               on_polarity_mismatch=DEFAULT_ON_POLARITY_MISMATCH,
               abs_coil_polarity_verified=DEFAULT_ABS_COIL_POLARITY_VERIFIED,
-              bdot_area_m2=DEFAULT_BDOT_AREA_M2, bdot_gain=DEFAULT_BDOT_GAIN,
+              bdot_cal=DEFAULT_BDOT_CAL,
+              bdot_area_m2=DEFAULT_BDOT_AREA_M2,
+              bdot_gain=DEFAULT_BDOT_GAIN,
+              bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
+              channel_signs=DEFAULT_CHANNEL_SIGNS,
+              probe_to_lab=None,
               overwrite=False):
     """Compute 2-D B-dot phasors, ``J_par``, and ``B_L/B_R`` polarization -> npz path."""
     specs = (BDOT_2D_RUNS if runs is None
@@ -502,7 +614,8 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
     onset_table = jon.load_onset_table(onset_path) if os.path.isfile(onset_path) else {}
     want = _run_settings_dict(
         tmin_ms, tmax_ms, window, b_sign_z, by_sign, on_polarity_mismatch,
-        abs_coil_polarity_verified, bdot_area_m2, bdot_gain,
+        abs_coil_polarity_verified, bdot_cal, bdot_area_m2, bdot_gain,
+        bdot_atten_db=bdot_atten_db, channel_signs=channel_signs,
     )
 
     if overwrite and runs is None and os.path.isfile(out_path):
@@ -542,7 +655,9 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
             tmin_ms=tmin_ms, tmax_ms=tmax_ms, window=window, b_sign_z=b_sign_z,
             by_sign=by_sign, on_polarity_mismatch=on_polarity_mismatch,
             abs_coil_polarity_verified=abs_coil_polarity_verified,
-            bdot_area_m2=bdot_area_m2, bdot_gain=bdot_gain,
+            bdot_cal=bdot_cal, bdot_area_m2=bdot_area_m2,
+            bdot_gain=bdot_gain, bdot_atten_db=bdot_atten_db,
+            channel_signs=channel_signs, probe_to_lab=probe_to_lab,
         )
         p = spec.run_num
         for k, v in res.items():
@@ -557,7 +672,9 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
             else:
                 payload[f"{p}__{k}"] = np.asarray(v)
         for sk, sv in want.items():
-            if isinstance(sv, bool):
+            if isinstance(sv, np.ndarray):
+                payload[f"{p}__{sk}"] = sv
+            elif isinstance(sv, bool):
                 payload[f"{p}__{sk}"] = np.bool_(sv)
             elif isinstance(sv, int):
                 payload[f"{p}__{sk}"] = np.int64(sv)
@@ -587,6 +704,8 @@ def print_summary(npz_path=None):
             abs_pol = bool(d[f"{r}__abs_coil_polarity_verified"]) if f"{r}__abs_coil_polarity_verified" in d.files else False
             b_unit = "G" if cal else "uV*s"
             b_scale = 1e4 if cal else 1e6
+            j_unit = "A/m^2" if cal else "uV*s/cm"
+            j_scale = 1.0 if cal else 1e4
             pol_note = "" if abs_pol else " [mod 180d: abs coil sign unverified]"
             print(
                 f"\nRun {r} ({float(d[f'{r}__b0_g']):.0f} G, f0={float(d[f'{r}__f0_hz']):.1f} Hz, "
@@ -610,7 +729,7 @@ def print_summary(npz_path=None):
                         f"        {zl}: |BL|={float(d[pfx+zn+'_bL_rms'])*b_scale:5.2f} "
                         f"|BR|={float(d[pfx+zn+'_bR_rms'])*b_scale:5.2f} {b_unit}  "
                         f"P={float(d[pfx+zn+'_ellip_med']):+.2f}  "
-                        f"|Jz|={float(d[pfx+zn+'_jz_rms'])*1e4:5.2f}  "
+                        f"|Jz|={float(d[pfx+zn+'_jz_rms'])*j_scale:6.1f} {j_unit}  "
                         f"|LP|={float(d[pfx+zn+'_lp_rms'])*1e3:6.2f} mV"
                     )
 

@@ -8,12 +8,12 @@ imports readers from here and never re-implements parsing.
 
 | Module | What it reads / does |
 |--------|----------------------|
-| `lapd_hdf5.py` | Unified LAPD HDF5 reader — `open_lapd()`, `LapdRun`, `LapdSession` — plus the run-description helpers (`compare_runs`, `gas_puff`, `parse_shunts`, `print_run_description`) and `position_shots`. |
+| `lapd_hdf5.py` | Unified LAPD HDF5 reader — `open_lapd()`, `LapdRun`, `LapdSession` — plus the run-description helpers (`compare_runs`, `gas_puff`, `parse_shunts`, `parse_bdot_gain`, `print_run_description`) and `position_shots`. |
 | `probe_map.py` | Joins moving probes (motion groups) to the digitizer channels that recorded them, by port number parsed from both sides. Campaign-independent; works on pydaq and bapsflib layouts. |
 | `interferometer.py` | Interferometer phase traces merged into pydaq datarun files by `interf_merge_lapd_daq.py` (`read_interferometer`, `InterferometerChannel`). |
 | `scope_reader.py` | Reads oscilloscope traces: LeCroy `.trc`, `.txt`, and scope groups inside HDF5. Optional `scope_io` (from the sibling `LAPD_DAQ` repo) is discovered lazily. |
 | `cine.py` | Phantom high-speed-camera `.cine` movies (+ AVI conversion, motion overlays). |
-| `network_analyzer.py` | Vector network-analyzer CSV exports (`read_NA_data`). |
+| `network_analyzer.py` | Vector network-analyzer exports: Keysight N5230C CSV (`read_NA_data`) and HP/Agilent E5100A ASCII/binary + B-dot calibration directories (`read_e5100a_csv`, `read_e5100a_binary`, `load_bdot_vna_dir`). |
 | `LeCroy_Scope_Header.py` | LeCroy binary trace header parsing (used by `scope_reader.py`). |
 | `paths.py` | Central output-location resolver (`output_path`) so writers don't hard-code paths. |
 | `prompts.py` | Format-agnostic `choose_from_list` — the one interactive picker readers delegate to on an ambiguous choice. |
