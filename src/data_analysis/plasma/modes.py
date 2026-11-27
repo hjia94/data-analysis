@@ -232,7 +232,11 @@ def plasma_frame_dispersion(f_lab_hz, m, r_cm, v_rot_m_s, *,
       in the same signed convention as ``f_plasma``.
 
     Returns a dict of frequencies [Hz] and dimensionless regime parameters
-    (``k_perp_rho_s``, ``beta_e_over_me_mi``, ``f_alfven_hz``, ``nu_ei_over_omega``).
+    (``k_perp_rho_s``, ``beta_e_over_me_mi``, ``f_alfven_hz``,
+    ``nu_ei_over_omega_lab``). Passing ``f_lab_hz=np.nan`` (e.g., for stable
+    runs with no coherent mode) leaves ``f_plasma_hz`` and
+    ``nu_ei_over_omega_lab`` as ``NaN`` while still computing all
+    frequency-independent Doppler, diamagnetic, and Alfvén scales.
     """
     r_m = float(r_cm) * 1e-2
     if r_m <= 0.0:

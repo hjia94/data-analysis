@@ -454,9 +454,12 @@ def ne_from_esat(I_esat, Te):
     (never a placeholder Te: a fabricated value yields a real-looking density).
 
     Absolute scale is only as good as ``Aprobe`` and the ``vth`` convention:
-    this omits the standard flux-average factor sqrt(2*pi)/4 ~ 0.63, so it is a
-    consistent relative measure, not an absolute density.  Prefer
-    :func:`calibrate_plasma_npz` when interferometer data exists.
+    the planar one-sided Maxwellian electron flux is
+    ``J_esat = (1/4) * ne * e * vbar = ne * e * vth / sqrt(2*pi)``, so omitting
+    the ``1/sqrt(2*pi) ~ 0.40`` factor makes uncalibrated ``ne`` about
+    ``sqrt(2*pi) ~ 2.5x`` low — a consistent relative measure, not an absolute
+    density.  Prefer :func:`calibrate_plasma_npz` when interferometer data
+    exists.
     """
     Te = np.asarray(Te, dtype=float)
     with np.errstate(invalid="ignore", divide="ignore"):

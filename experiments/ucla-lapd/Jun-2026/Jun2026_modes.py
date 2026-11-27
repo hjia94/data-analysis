@@ -479,7 +479,8 @@ def build_dispersion_table(data_dir=DATA_DIR, *, r_cm=DISPERSION_R_CM,
             on = onset[ir]
             f_lab = float(on["f_peak_hz"])
             gamma = float(on["gamma_med_s"])
-            f_lab_eval = f_lab if np.isfinite(on["t_onset_med_ms"]) else 3000.0
+            unstable = bool(np.isfinite(on["t_onset_med_ms"]))
+            f_lab_eval = f_lab if unstable else np.nan
 
             ref_swp = int(pd[f"{ir}__ref_sweep_idx"])
             ref_bin = int(md[f"{mr}__ref_bin_idx"])
@@ -523,10 +524,10 @@ def build_dispersion_table(data_dir=DATA_DIR, *, r_cm=DISPERSION_R_CM,
             )
             rows[ir] = {
                 "gas_puff_ms": float(spec.gas_puff_ms),
-                "unstable": bool(np.isfinite(on["t_onset_med_ms"])),
+                "unstable": unstable,
                 "f_lab_hz": f_lab,
                 "gamma_s": gamma,
-                "gamma_over_omega": float(gamma / (2.0 * np.pi * f_lab)) if (np.isfinite(gamma) and f_lab > 0) else np.nan,
+                "gamma_over_omega": float(gamma / (2.0 * np.pi * f_lab)) if (unstable and np.isfinite(gamma) and f_lab > 0) else np.nan,
                 "f_doppler_exb_hz": d_exb["f_doppler_hz"],
                 "f_plasma_exb_hz": d_exb["f_plasma_hz"],
                 "f_doppler_mach_hz": d_mach["f_doppler_hz"],
@@ -710,11 +711,15 @@ def print_summary(npz_path=None):
             gw_s = f"{gw:6.2f}" if np.isfinite(gw) else "   ---"
             fl = float(d[f"disp__{r}__f_lab_hz"]) * 1e-3 if bool(d[f"disp__{r}__unstable"]) else np.nan
             fl_s = f"{fl:6.2f}" if np.isfinite(fl) else "  stbl"
+            fpe = float(d[f"disp__{r}__f_plasma_exb_hz"]) * 1e-3
+            fpm = float(d[f"disp__{r}__f_plasma_mach_hz"]) * 1e-3
+            fpe_s = f"{fpe:+7.2f}" if np.isfinite(fpe) else "    ---"
+            fpm_s = f"{fpm:+7.2f}" if np.isfinite(fpm) else "    ---"
             print(
                 f"{r:>3} {float(d[f'disp__{r}__gas_puff_ms']):4.0f}m {fl_s:>6} "
                 f"{float(d[f'disp__{r}__f_doppler_exb_hz'])*1e-3:+7.2f} "
-                f"{float(d[f'disp__{r}__f_plasma_exb_hz'])*1e-3:+7.2f} "
-                f"{float(d[f'disp__{r}__f_plasma_mach_hz'])*1e-3:+7.2f} "
+                f"{fpe_s:>7} "
+                f"{fpm_s:>7} "
                 f"{float(d[f'disp__{r}__f_star_n_hz'])*1e-3:+6.2f} "
                 f"{float(d[f'disp__{r}__f_star_T_hz'])*1e-3:+6.2f} "
                 f"{float(d[f'disp__{r}__f_star_p_hz'])*1e-3:+6.2f} "

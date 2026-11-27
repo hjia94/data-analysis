@@ -188,6 +188,22 @@ class TestModesAndDispersion(unittest.TestCase):
                 self.assertGreater(rows["02"]["f_doppler_exb_hz"] * sign_v, 0.0)
                 self.assertGreater(rows["02"]["f_doppler_mach_hz"] * sign_v, 0.0)
 
+            # Stable run (t_onset = NaN) must yield NaN for f_plasma_* and nu_ei_over_omega
+            # instead of fabricating values from a placeholder f_lab, while still returning
+            # frequency-independent Doppler, diamagnetic, and Alfven scales.
+            fake_onset["06"] = {"f_peak_hz": np.nan, "gamma_med_s": np.nan, "t_onset_med_ms": np.nan}
+            with mock.patch.object(jmo.jon, "load_onset_table", return_value=fake_onset):
+                rows_stbl = jmo.build_dispersion_table(data_dir=tmp, m=-1, b_sign_z=+1)
+            r06 = rows_stbl["06"]
+            self.assertFalse(r06["unstable"])
+            self.assertTrue(np.isnan(r06["f_plasma_exb_hz"]))
+            self.assertTrue(np.isnan(r06["f_plasma_mach_hz"]))
+            self.assertTrue(np.isnan(r06["nu_ei_over_omega"]))
+            self.assertTrue(np.isnan(r06["gamma_over_omega"]))
+            self.assertTrue(np.isfinite(r06["f_doppler_exb_hz"]))
+            self.assertTrue(np.isfinite(r06["f_star_n_hz"]))
+            self.assertTrue(np.isfinite(r06["f_alfven_hz"]))
+
     def test_require_xcorr_raises_keyerror_and_batch_all_skips_by_default(self):
         with mock.patch.object(jpl, "_load_xcorr_run", return_value=None):
             with self.assertRaises(KeyError):
