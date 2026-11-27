@@ -116,8 +116,10 @@ class TestHollowProfileMetrics(unittest.TestCase):
             uy_unit = np.where(rr > 0.0, dx / rr, 0.0)
         t32 = np.linspace(-1.0, 6.0, 71)
         amp_t = np.where((t32 >= 0.0) & (t32 <= 5.0), 0.085, 0.0)
-        mx = ux_unit[:, None] * amp_t[None, :]
-        my = uy_unit[:, None] * amp_t[None, :]
+        # Add uniform pre-bias/kappa DC offset (+0.03, -0.025) that would shift an
+        # unsubtracted center fit by ~1 cm; pre-bias subtraction must recover exact center.
+        mx = ux_unit[:, None] * amp_t[None, :] + 0.030
+        my = uy_unit[:, None] * amp_t[None, :] - 0.025
         # Core axial flow = -0.35, ring = -0.15
         mz_base = np.where(rr <= 2.0, -0.35, -0.15)
         mz = np.broadcast_to(mz_base[:, None], mx.shape).copy()

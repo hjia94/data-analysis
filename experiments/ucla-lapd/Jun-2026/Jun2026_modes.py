@@ -579,7 +579,9 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, include_biasscope=True,
     r32_cx = r32_cy = r32_ratio = np.nan
     if os.path.isfile(p32):
         with np.load(p32) as d32:
-            m_win = (d32["t_ms"] >= 0.5) & (d32["t_ms"] <= 1.5)
+            t32 = d32["t_ms"]
+            m_win = (t32 >= 0.5) & (t32 <= 1.5)
+            m_pre = t32 < -0.5
             vx_sub = d32["v_X"][:, m_win]
             vy_sub = d32["v_Y"][:, m_win]
             vx = np.full(vx_sub.shape[0], np.nan, dtype=float)
@@ -588,6 +590,15 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, include_biasscope=True,
             ok_y = np.any(np.isfinite(vy_sub), axis=1)
             vx[ok_x] = np.nanmean(vx_sub[ok_x], axis=1)
             vy[ok_y] = np.nanmean(vy_sub[ok_y], axis=1)
+            if np.any(m_pre):
+                vx_p = d32["v_X"][:, m_pre]
+                vy_p = d32["v_Y"][:, m_pre]
+                ok_xp = ok_x & np.any(np.isfinite(vx_p), axis=1)
+                ok_yp = ok_y & np.any(np.isfinite(vy_p), axis=1)
+                vx[~ok_xp] = np.nan
+                vy[~ok_yp] = np.nan
+                vx[ok_xp] -= np.nanmean(vx_p[ok_xp], axis=1)
+                vy[ok_yp] -= np.nanmean(vy_p[ok_yp], axis=1)
             r32_cx, r32_cy, r32_ratio = find_flow_centre(vx, vy, d32["pos_x"], d32["pos_y"])
 
     payload = {

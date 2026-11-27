@@ -270,9 +270,13 @@ def analyze_run32_slow_spindown(data_dir=DATA_DIR, *, r_band_cm=DEFAULT_R_BAND_C
         vx, vy = d["v_X"], d["v_Y"]
         mx, my = d["M_X"], d["M_Y"]
     m_on = (t32 >= 0.5) & (t32 <= 4.5)
+    m_pre = t32 < -0.5
     with np.errstate(invalid="ignore"):
         vx_m = np.nanmean(vx[:, m_on], axis=1)
         vy_m = np.nanmean(vy[:, m_on], axis=1)
+        if np.any(m_pre):
+            vx_m = vx_m - np.nanmean(vx[:, m_pre], axis=1)
+            vy_m = vy_m - np.nanmean(vy[:, m_pre], axis=1)
     cx, cy, ratio = find_flow_centre(vx_m, vy_m, px, py)
     rr = np.hypot(px - cx, py - cy)
     ring = (rr >= r_band_cm[0]) & (rr <= r_band_cm[1])

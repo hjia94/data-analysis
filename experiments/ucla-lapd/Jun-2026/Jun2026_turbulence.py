@@ -828,6 +828,27 @@ def _mach_linear_tip_bracket(recs, kappa, fs_hz, f0_hz):
     return {k: np.vstack(v) for k, v in out.items()}
 
 
+def _resolve_run32_channels(ifn):
+    """Resolve Run 32 ``(X+, X-, Y+, Y-, REF)`` scope channels from HDF5 wiring descriptions.
+
+    Uses :func:`Jun2026_mach_flow.tip_channels` for the Mach probe faces and
+    locates the stationary ``LP@P29-R`` reference probe from
+    :func:`Jun2026_mach_flow.channel_wiring`, avoiding any hardcoded ``C1=X+`` map.
+    """
+    tips = jmf.tip_channels(ifn)
+    ch_map = {tip: tips[tip] for tip in ("X+", "X-", "Y+", "Y-")}
+    ref_hits = [
+        chan for (scope, chan), desc in jmf.channel_wiring(ifn).items()
+        if scope == "scope" and "p29-r" in desc.lower()
+    ]
+    if len(ref_hits) != 1:
+        raise ValueError(
+            f"{ifn}: expected exactly 1 'LP@P29-R' reference channel on 'scope', found {ref_hits}"
+        )
+    ch_map["REF"] = ref_hits[0]
+    return ch_map
+
+
 def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
                                          bands=RUN32_RADIAL_BANDS,
                                          max_pos_per_band=RUN32_MAX_POS_PER_BAND):
@@ -844,18 +865,23 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
     px_n, py_n = np.asarray(d32["pos_x"], dtype=float), np.asarray(d32["pos_y"], dtype=float)
     mx_n, my_n = np.asarray(d32["M_X"], dtype=float), np.asarray(d32["M_Y"], dtype=float)
     m_on = (t_npz >= 2.0) & (t_npz <= 4.8)
+    m_pre = t_npz < -0.5
     mx_m = _nanmean_rows(mx_n[:, m_on])
     my_m = _nanmean_rows(my_n[:, m_on])
-    # Velocities FIRST, positions SECOND!
-    cx, cy, ratio = find_flow_centre(mx_m, my_m, px_n, py_n)
+    dmx_m = mx_m - _nanmean_rows(mx_n[:, m_pre]) if np.any(m_pre) else mx_m
+    dmy_m = my_m - _nanmean_rows(my_n[:, m_pre]) if np.any(m_pre) else my_m
+    # Velocities FIRST, positions SECOND! Fit center on pre-bias-subtracted dM so
+    # uniform kappa/background offsets do not shift the zero-rotation point.
+    cx, cy, ratio = find_flow_centre(dmx_m, dmy_m, px_n, py_n)
     _, mth_mean = polar_components(mx_m, my_m, px_n, py_n, (cx, cy))
     rr_n = np.hypot(px_n - cx, py_n - cy)
 
-    # 2. Read raw Run 32 6-tip Mach fluctuations + stationary P29-R ref (C8)
+    # 2. Read raw Run 32 6-tip Mach fluctuations + stationary P29-R ref (from HDF5 wiring)
     hits = sorted(glob.glob(os.path.join(data_dir, "32-*.hdf5")))
     if not hits:
         raise FileNotFoundError(f"no Run 32 HDF5 in {data_dir}")
     ifn32 = hits[0]
+    ch_map32 = _resolve_run32_channels(ifn32)
     run32 = open_lapd(ifn32)
     sh32 = parse_shunts(run32.description().raw)
     pos32 = jiv.read_lp_positions(ifn32)
@@ -924,7 +950,8 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
             sh = position_shots(pos32.shot_nums, int(p), pos32.nshot)
             ch_d = {}
             ok = True
-            for tip, ch in (("X+", "C1"), ("X-", "C2"), ("Y+", "C3"), ("Y-", "C4"), ("REF", "C8")):
+            for tip in ("X+", "X-", "Y+", "Y-", "REF"):
+                ch = ch_map32[tip]
                 d, _ = run32.channel(ch, scope_name="scope", shots=sh)
                 if d is None:
                     ok = False

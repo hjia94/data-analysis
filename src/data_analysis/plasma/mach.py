@@ -132,9 +132,12 @@ def mach_single(R, kappa, K=K_HUTCHINSON, flow_sign=FLOW_SIGN_PLUS_FACING_AXIS):
     )
 
 
-def flow_velocity(M, T_e_eV, mu, gamma=5 / 3, Z=1):
+def flow_velocity(M, T_e_eV, mu, gamma=1.0, Z=1):
     """Mach number -> flow speed in **km/s**. ``mu`` is the ion mass in m_p (He = 4).
 
+    Defaults to the isothermal ion sound speed ``c_s = sqrt(Z * T_e / m_i)``
+    (``gamma = 1.0``), matching Hutchinson (1987) and the fluid/profile solvers
+    in :mod:`data_analysis.plasma.profiles` and :mod:`data_analysis.plasma.stability`.
     A Mach probe does not measure ``T_e``, so every velocity carries that
     assumption (``v`` scales as ``sqrt(T_e)``). Callers state the T_e they used
     wherever the velocity is shown.
@@ -144,9 +147,12 @@ def flow_velocity(M, T_e_eV, mu, gamma=5 / 3, Z=1):
 
 
 def rescale_mach_velocity(M, T_e_eV, mu, *, te_err_ev=None, M_err=None,
-                          gamma=5 / 3, Z=1):
+                          gamma=1.0, Z=1):
     """Rescale Mach number ``M`` with measured ``T_e(x, t)`` [eV] -> **km/s**.
 
+    Defaults to the isothermal ion sound speed ``c_s = sqrt(Z * T_e / m_i)``
+    (``gamma = 1.0``) matching :func:`flow_velocity`, Hutchinson (1987), and
+    :func:`data_analysis.plasma.profiles.local_drift_scales`.
     Invalid or non-positive ``T_e_eV`` entries yield ``NaN`` cleanly (no
     ``RuntimeWarning``). When either ``te_err_ev`` or ``M_err`` is given,
     returns ``(v_km_s, v_err_km_s)`` propagating uncorrelated errors via::

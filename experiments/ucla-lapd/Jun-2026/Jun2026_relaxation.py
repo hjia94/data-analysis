@@ -743,8 +743,12 @@ def _analyze_mach32_arrays(t32, px, py, mx, my, mz, t_on_ref_ms, *,
     SECOND.
     """
     m_fit = (t32 >= 2.5) & (t32 <= 4.5)
+    m_pre = t32 < -0.5
     mx_m = _nanmean_rows(mx[:, m_fit])
     my_m = _nanmean_rows(my[:, m_fit])
+    if np.any(m_pre):
+        mx_m = mx_m - _nanmean_rows(mx[:, m_pre])
+        my_m = my_m - _nanmean_rows(my[:, m_pre])
     xc, yc, ratio = find_flow_centre(mx_m, my_m, px, py)
     rr = np.hypot(px - xc, py - yc)
     m_wall = (rr >= ROT_R_CM[0]) & (rr <= ROT_R_CM[1])

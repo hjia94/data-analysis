@@ -417,8 +417,10 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
     Replaces the placeholder constant ``T_e`` in ``<mach_run>-mach-flow-line-data.npz``
     with the measured ``T_e(x, t)`` from ``MACH_TO_IV[mach_run]`` (using
     :func:`rescale_mach_velocity`, which follows ``mach.flow_velocity``'s
-    cold-ion ``gamma = 5/3`` sound speed), propagates ``Te_err`` and calibration
-    ``kappa_err_sys`` uncertainties, separates the antisymmetric rotational
+    isothermal cold-ion ``gamma = 1.0`` sound speed, matching Hutchinson 1987,
+    ``profiles.py``, and ``stability.py``), propagates ``Te_err`` and
+    multiplicative calibration ``kappa_err_sys`` uncertainties
+    (``sigma_M = K * ln(kappa_err_sys)``), separates the antisymmetric rotational
     profile ``v_rot(r)`` from uniform background offsets, computes the
     cylindrical shearing rate ``gamma_E = r dOmega/dr``, and compares directly
     against the paired P29 ``E_r / B`` drift profile on **matched** radial bands.
@@ -489,9 +491,16 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
 
     rescaled = {}
     for i, a in enumerate(axes):
-        # Systematic Mach error from area-ratio calibration: dM = K * (dkappa/kappa).
-        m_err_sys = (K_hutch * (kappa_err[i] / kappa[i])
-                     if kappa[i] > 0 else np.nan)
+        # kappa_err_sys from Jun2026_mach_cal is a multiplicative x/÷ factor (>= 1):
+        # M = -K * ln(R / kappa) => dM = K * ln(kappa_err_sys).
+        k_err = float(kappa_err[i])
+        if np.isfinite(k_err) and k_err < 1.0:
+            raise ValueError(
+                f"Mach run {mach_run} axis {a}: kappa_err_sys={k_err} must be a "
+                "multiplicative x/÷ factor >= 1.0, not an additive uncertainty."
+            )
+        m_err_sys = (K_hutch * float(np.log(k_err))
+                     if (kappa[i] > 0 and np.isfinite(k_err)) else np.nan)
         v_a, v_a_err = rescale_mach_velocity(
             M_by_axis[a], Te_bin, ion_mu, te_err_ev=Te_err_bin, M_err=m_err_sys,
         )

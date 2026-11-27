@@ -157,11 +157,42 @@ class TestMachRescalingAndFlowShear(unittest.TestCase):
         np.testing.assert_allclose(params, truth, atol=1e-12)
         np.testing.assert_allclose(residuals, 0.0, atol=1e-12)
 
+    def test_run32_find_flow_centre_subtracts_prebias_offset(self):
+        import Jun2026_mach_flow as jmf
+
+        gx, gy = np.meshgrid(np.linspace(-10.0, 10.0, 21), np.linspace(-10.0, 10.0, 21))
+        px, py = gx.ravel(), gy.ravel()
+        cx_true, cy_true = 1.5, -0.75
+        dx, dy = px - cx_true, py - cy_true
+        rr = np.hypot(dx, dy)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ux = np.where(rr > 0.0, -dy / rr, 0.0)
+            uy = np.where(rr > 0.0, dx / rr, 0.0)
+        t_ms = np.linspace(-2.0, 6.0, 81)
+        amp = np.where((t_ms >= 0.0) & (t_ms <= 5.0), -2.5, 0.0)
+        # Uniform pre-bias/kappa DC offset (+0.6, -0.5 km/s) shifts raw fit but cancels after subtraction
+        data = {
+            "t_ms": t_ms,
+            "pos_x": px,
+            "pos_y": py,
+            "v_X": ux[:, None] * amp[None, :] + 0.6,
+            "v_Y": uy[:, None] * amp[None, :] - 0.5,
+        }
+        cx, cy, ratio = jmf.find_flow_centre(data)
+        self.assertAlmostEqual(cx, cx_true, delta=0.05)
+        self.assertAlmostEqual(cy, cy_true, delta=0.05)
+        self.assertLess(ratio, 0.05)
+
     def test_rescale_mach_velocity_errors_and_invalid_te(self):
+        from data_analysis.plasma.profiles import local_drift_scales
+
         M = np.array([0.0, 0.25, -0.5])
         Te = np.array([4.0, 4.0, -1.0])
         v, v_err = rescale_mach_velocity(M, Te, mu=4.0, te_err_ev=0.4, M_err=0.05)
         cs = flow_velocity(1.0, 4.0, 4.0)
+        # Default flow_velocity / rescale_mach_velocity must match isothermal c_s in profiles.py
+        cs_prof = float(local_drift_scales(1e12, 4.0, 800.0, mu=4.0)["cs_m_s"]) * 1e-3
+        self.assertAlmostEqual(cs, cs_prof, delta=0.01)
         # M = 0 must not produce 0/0 NaN; sigma_v = cs * M_err
         self.assertAlmostEqual(v[0], 0.0, places=12)
         self.assertAlmostEqual(v_err[0], cs * 0.05, places=12)
@@ -237,8 +268,8 @@ class TestMachRescalingAndFlowShear(unittest.TestCase):
                 ion_mu=np.float64(4.0),
                 K_hutchinson=np.float64(0.45),
                 flow_sign=np.int64(FLOW_SIGN_PLUS_FACING_AXIS),
-                kappa=np.array([1.0, 1.0]),
-                kappa_err_sys=np.array([0.05, 0.05]),
+                kappa=np.array([1.9, 1.2]),
+                kappa_err_sys=np.array([1.45, 1.03]),
                 M_X=np.zeros((x.size, 2)),
                 M_Y=np.tile(0.2 * np.sign(x - 1.0)[:, None], (1, 2)),
             )
@@ -248,6 +279,33 @@ class TestMachRescalingAndFlowShear(unittest.TestCase):
             self.assertTrue(np.all(np.isnan(res["dv_Y_te"])))
             self.assertTrue(np.all(np.isnan(res["dv_Y_dM_te"])))
             self.assertEqual(res["profiles_file"], "profiles_summary_jun2026.npz")
+            # Multiplicative kappa_err_sys=1.03 -> dM = K_H * ln(1.03) (NOT K_H * 1.03 / kappa)
+            cs_3ev = flow_velocity(1.0, 3.0, 4.0)
+            v_y_expected = 0.2 * cs_3ev
+            dm_y_expected = K_HUTCHINSON * np.log(1.03)
+            # Te_err = 0.1 on Te = 3.0
+            vy_err_expected = np.sqrt((cs_3ev * dm_y_expected) ** 2 + (0.5 * v_y_expected * (0.1 / 3.0)) ** 2)
+            # Check non-zero M_Y point (x != 1.0)
+            self.assertAlmostEqual(float(res["v_Y_te_err"][0, 0]), vy_err_expected, places=10)
+
+            # Additive kappa_err_sys (< 1.0) must raise ValueError instead of silently corrupting v_err
+            np.savez(
+                mach_npz,
+                iv_run=np.str_("06"),
+                pos=x,
+                t_ms=np.array([0.6, 1.6]),
+                iv_sweep_index=np.array([0, 1], dtype=np.int32),
+                axes=np.array(["X", "Y"]),
+                ion_mu=np.float64(4.0),
+                K_hutchinson=np.float64(0.45),
+                flow_sign=np.int64(FLOW_SIGN_PLUS_FACING_AXIS),
+                kappa=np.array([1.0, 1.0]),
+                kappa_err_sys=np.array([0.05, 0.05]),
+                M_X=np.zeros((x.size, 2)),
+                M_Y=np.zeros((x.size, 2)),
+            )
+            with self.assertRaises(ValueError):
+                jml.rescale_line_with_iv("08", data_dir=tmp, profiles_npz=prof_p)
 
     def test_batch_rescaled_summary_settings_validation_and_partial_overwrite(self):
         fake = {

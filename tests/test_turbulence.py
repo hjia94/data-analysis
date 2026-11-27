@@ -378,6 +378,27 @@ class TestTurbulenceHelpers(unittest.TestCase):
             loaded = jtb.batch_all(data_dir=tmp, overwrite=False)
             self.assertEqual(int(loaded["sentinel"]), 99)
 
+    def test_resolve_run32_channels_reads_wiring_not_hardcoded_order(self):
+        from unittest import mock
+
+        swapped_wiring = {
+            ("scope", "C2"): "Isat, Mach@P33-X+",
+            ("scope", "C1"): "Isat, Mach@P33-X-",
+            ("scope", "C4"): "Isat, Mach@P33-Y+",
+            ("scope", "C3"): "Isat, Mach@P33-Y-",
+            ("scope", "C5"): "Isat, Mach@P33-Z+",
+            ("scope", "C6"): "Isat, Mach@P33-Z-",
+            ("scope", "C7"): "Isat, LP@P29-R",
+        }
+        with mock.patch.object(jtb.jmf, "channel_wiring", return_value=swapped_wiring):
+            ch = jtb._resolve_run32_channels("dummy.hdf5")
+        self.assertEqual(ch, {"X+": "C2", "X-": "C1", "Y+": "C4", "Y-": "C3", "REF": "C7"})
+
+        no_ref = {k: v for k, v in swapped_wiring.items() if "P29-R" not in v}
+        with mock.patch.object(jtb.jmf, "channel_wiring", return_value=no_ref):
+            with self.assertRaises(ValueError):
+                jtb._resolve_run32_channels("dummy.hdf5")
+
 
 if __name__ == "__main__":
     unittest.main()

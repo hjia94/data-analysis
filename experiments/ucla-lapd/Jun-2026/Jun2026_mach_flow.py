@@ -86,10 +86,13 @@ AXES = ("X", "Y", "Z")
 QUIVER_STEP = 2
 
 #: Window the rotation centre is fitted over [ms]. The bias-on stretch: that is
-#: when an E x B rotation exists to have a centre. Run 32 fits (+2.50, -1.25),
-#: ratio 0.22, stable across it; widening past the bias-off edge degenerates the
-#: fit (ratio ~0.7, centre on the search-box edge).
+#: when an E x B rotation exists to have a centre. Pre-bias baseline
+#: (:data:`PRE_BIAS_MS`) is subtracted before fitting so uniform background /
+#: kappa offsets do not shift the stagnation centre: Run 32 fits (+1.50, -0.75)
+#: with ratio 0.19 (vs. (+2.50, -1.25), ratio 0.22 without subtraction),
+#: matching P29's Day 3-4 hollow core (+1.40, -0.80) and Run 32's dM_Z core.
 CENTRE_FIT_MS = (0.0, 5.0)
+PRE_BIAS_MS = (-2.0, -0.5)
 
 NPZ_SUFFIX = "-mach-flow-data.npz"
 
@@ -282,12 +285,14 @@ def _te_note(data):
             f"(not measured in this run); v scales as sqrt(T_e)")
 
 
-def find_flow_centre(data, window_ms=CENTRE_FIT_MS):
+def find_flow_centre(data, window_ms=CENTRE_FIT_MS, pre_window_ms=PRE_BIAS_MS):
     """The rotation centre over ``window_ms`` -> ``(cx, cy, ratio)`` cm.
 
     Campaign wrapper over :func:`~data_analysis.plasma.flow.find_flow_centre`:
-    averages the bins in the window, hands it one velocity per position. Only
-    meaningful over the bias-on stretch (:data:`CENTRE_FIT_MS`).
+    averages the bins in ``window_ms``, subtracts the pre-bias baseline over
+    ``pre_window_ms`` when present (removing uniform kappa / background-flow
+    offsets that otherwise shift the fitted zero-rotation point), and hands
+    the bias-driven increment to the centre fitter.
     """
     t = data["t_ms"]
     win = (t >= window_ms[0]) & (t <= window_ms[1])
@@ -298,6 +303,11 @@ def find_flow_centre(data, window_ms=CENTRE_FIT_MS):
         warnings.filterwarnings("ignore", "Mean of empty slice")
         vx = np.nanmean(data["v_X"][:, win], axis=1)
         vy = np.nanmean(data["v_Y"][:, win], axis=1)
+        if pre_window_ms is not None:
+            pre = (t >= pre_window_ms[0]) & (t <= pre_window_ms[1])
+            if pre.any():
+                vx = vx - np.nanmean(data["v_X"][:, pre], axis=1)
+                vy = vy - np.nanmean(data["v_Y"][:, pre], axis=1)
     return _fit_centre(vx, vy, data["pos_x"], data["pos_y"])
 
 
