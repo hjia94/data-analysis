@@ -231,6 +231,76 @@ class TestElectromagnetic2DHelpers(unittest.TestCase):
             with self.assertRaises(ValueError):
                 jb2.batch_all(data_dir=tmp, runs=["26"], out_path=out_npz, bdot_area_m2=A2, bdot_gain=1000.0)
 
+    def test_resolve_bdot_gain_auto_from_hdf5_and_fail_fast(self):
+        chain = {"header": "P28: Bdot-10T-C16", "chain": "X10 => X100",
+                 "gain": 1000.0, "atten_db": 0.0, "effective_gain": 1000.0}
+        # Uncalibrated defaults to (1.0, 0.0) even without a recorded chain
+        self.assertEqual(
+            jb2._resolve_bdot_gain(None, calibrated=False, bdot_gain=None, bdot_atten_db=None, run_num="26"),
+            (1.0, 0.0),
+        )
+        # Calibrated with bdot_gain=None auto-reads recorded chain
+        self.assertEqual(
+            jb2._resolve_bdot_gain(chain, calibrated=True, bdot_gain=None, bdot_atten_db=None, run_num="26"),
+            (1000.0, 0.0),
+        )
+        # Calibrated with bdot_gain=None and missing chain raises instead of guessing 1.0
+        with self.assertRaises(ValueError):
+            jb2._resolve_bdot_gain(None, calibrated=True, bdot_gain=None, bdot_atten_db=None, run_num="26")
+        # Explicit gain disagreeing with HDF5 emits UserWarning
+        with self.assertWarns(UserWarning):
+            self.assertEqual(
+                jb2._resolve_bdot_gain(chain, calibrated=True, bdot_gain=10.0, bdot_atten_db=None, run_num="26"),
+                (10.0, 0.0),
+            )
+
+    def test_read_bdot_chain_propagates_ambiguity_and_batch_auto_gain_mismatch(self):
+        # Ambiguous multiple active P28 B-dot entries must propagate ValueError
+        ambig_desc = mock.Mock(
+            raw="- P28: Bdot-10T-C16\n  - Connection: X10\n- P28: Bdot-5T-B2\n  - Connection: X100\n"
+        )
+        run_ambig = mock.Mock()
+        run_ambig.description.return_value = ambig_desc
+        with self.assertRaises(ValueError):
+            jb2._read_bdot_chain(run_ambig)
+
+        # Unreadable run description still degrades cleanly to None
+        run_err = mock.Mock()
+        run_err.description.side_effect = KeyError("no description")
+        self.assertIsNone(jb2._read_bdot_chain(run_err))
+
+        # batch_all(..., bdot_gain=None) must flag stale stored gain vs HDF5 chain
+        A1 = np.diag([1.1e-4, 1.0e-4, 0.9e-4])
+        fake_10 = {
+            "b0_g": 800.0, "f0_hz": 4110.0,
+            "x_cm": np.array([-1.0, 0.0, 1.0]), "y_cm": np.array([-1.0, 0.0, 1.0]),
+            "t0_offset_us": 0.0, "bdot_calibrated": True, "bdot_gain": 10.0, "bdot_atten_db": 0.0,
+        }
+        fake_1000 = dict(fake_10, bdot_gain=1000.0)
+        run_1000 = mock.Mock()
+        run_1000.description.return_value = mock.Mock(
+            raw="- P28: Bdot-10T-C16\n  - Connection: 2.5BLP => X10 => 2.5BLP => X100\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "26-dummy.hdf5"), "wb").close()
+            out_npz = os.path.join(tmp, "bdot_2d.npz")
+            with mock.patch.object(jb2, "analyze_run", return_value=fake_10):
+                jb2.batch_all(data_dir=tmp, runs=["26"], out_path=out_npz, bdot_area_m2=A1, bdot_gain=10.0)
+            with mock.patch.object(jb2, "open_lapd", return_value=run_1000):
+                with self.assertRaises(ValueError):
+                    jb2.batch_all(data_dir=tmp, runs=["26"], out_path=out_npz, bdot_area_m2=A1, bdot_gain=None)
+
+            # Matching stored gain (1000.0) with bdot_gain=None skips cleanly
+            with mock.patch.object(jb2, "analyze_run", return_value=fake_1000):
+                jb2.batch_all(
+                    data_dir=tmp, runs=["26"], out_path=out_npz,
+                    bdot_area_m2=A1, bdot_gain=1000.0, overwrite=True,
+                )
+            with mock.patch.object(jb2, "open_lapd", return_value=run_1000), \
+                 mock.patch.object(jb2, "analyze_run") as m_ar:
+                jb2.batch_all(data_dir=tmp, runs=["26"], out_path=out_npz, bdot_area_m2=A1, bdot_gain=None)
+                m_ar.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

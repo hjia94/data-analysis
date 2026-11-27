@@ -70,6 +70,7 @@ DATA_DIR = jon.DATA_DIR
 OUT_NAME = "bdot_2d_jun2026.npz"
 
 BDOT_MOTION_GROUP = "<Athena>    p28_Bdot"
+BDOT_PROBE_PORT = "P28"           # header token for parse_bdot_gain(..., probe=...)
 LP_MOTION_GROUP = "<Hermes>    p29_LP"
 REF_SCOPE_CHAN = ("lpscope", "C3")
 LP_SCOPE_CHAN = ("lpscope", "C2")
@@ -86,8 +87,8 @@ DEFAULT_MJ_GAMMA2_MIN = 0.5       # transverse B-dot coherence threshold on curr
 DEFAULT_GRID_STEP_CM = 1.0
 DEFAULT_BDOT_CAL = None           # BdotCalibration or .npz path (e.g. C16-bdot-calibration.npz)
 DEFAULT_BDOT_AREA_M2 = None       # bare coil area [m^2]: scalar, (3,), or (3, 3)
-DEFAULT_BDOT_GAIN = 1.0           # experiment amplifier linear gain (Jun-2026 P28: 1000.0)
-DEFAULT_BDOT_ATTEN_DB = 0.0       # experiment attenuator [dB]
+DEFAULT_BDOT_GAIN = None          # None: auto-read from HDF5 P28 chain when calibrated (1.0 uncalibrated)
+DEFAULT_BDOT_ATTEN_DB = None      # None: auto-read from HDF5 P28 chain when bdot_gain is None (else 0.0)
 DEFAULT_CHANNEL_SIGNS = (+1, +1, +1)  # pre-inversion hardware polarity on (C1, C2, C3)
 JUN2026_BDOT_SIGNAL_CHAIN = "2.5BLP => X10 => 2.5BLP => X100"
 JUN2026_BDOT_GAIN = 1000.0
@@ -135,6 +136,61 @@ def _resolve_bdot_calibration(bdot_cal=None, bdot_area_m2=None):
     else:
         raise ValueError(f"bdot_area_m2 must be scalar, (3,), or (3, 3); got shape {a.shape}")
     return bdot_area_m2, mat, ""
+
+
+def _read_bdot_chain(run, probe=BDOT_PROBE_PORT):
+    """Read and parse the active B-dot signal chain from an open LAPD run.
+
+    Returns ``None`` when the run description is unavailable or lists no
+    matching B-dot block, while propagating :class:`ValueError` from
+    :func:`parse_bdot_gain` on ambiguous multi-probe matches.
+    """
+    try:
+        raw_desc = run.description().raw
+    except (OSError, ValueError, NotImplementedError, KeyError):
+        return None
+    return parse_bdot_gain(raw_desc, probe=probe)
+
+
+def _resolve_bdot_gain(parsed_chain, *, calibrated, bdot_gain, bdot_atten_db, run_num):
+    """Resolve experiment amplifier gain & attenuator [dB] for one run.
+
+    - Uncalibrated (``calibrated=False``): ``None`` defaults to ``(1.0, 0.0)``
+      so uncalibrated flux-like outputs remain at raw scope level.
+    - Calibrated (``calibrated=True``): ``bdot_gain=None`` reads the run's
+      recorded ``P28`` chain from HDF5 (raising ``ValueError`` if absent rather
+      than silently using 1.0). When ``bdot_gain`` is explicitly supplied,
+      ``bdot_atten_db=None`` defaults to ``0.0`` and a warning is emitted if the
+      effective gain disagrees with the recorded HDF5 chain.
+    """
+    if not calibrated:
+        gain_used = 1.0 if bdot_gain is None else float(bdot_gain)
+        atten_used = 0.0 if bdot_atten_db is None else float(bdot_atten_db)
+        return gain_used, atten_used
+
+    if bdot_gain is None:
+        if parsed_chain is None:
+            raise ValueError(
+                f"Run {run_num}: B-dot calibration requested with bdot_gain=None, "
+                f"but no active {BDOT_PROBE_PORT} B-dot signal chain was found in "
+                "the HDF5 description; pass bdot_gain= explicitly."
+            )
+        gain_used = float(parsed_chain["gain"])
+        atten_used = float(parsed_chain["atten_db"]) if bdot_atten_db is None else float(bdot_atten_db)
+    else:
+        gain_used = float(bdot_gain)
+        atten_used = 0.0 if bdot_atten_db is None else float(bdot_atten_db)
+
+    if parsed_chain is not None:
+        req_eff = gain_used * (10.0 ** (-atten_used / 20.0))
+        if not np.isclose(req_eff, parsed_chain["effective_gain"], rtol=1e-3, atol=0.0):
+            warnings.warn(
+                f"Run {run_num}: requested bdot effective gain {req_eff:g} differs from "
+                f"HDF5 description '{parsed_chain['chain']}' ({parsed_chain['effective_gain']:g})",
+                UserWarning,
+                stacklevel=3,
+            )
+    return gain_used, atten_used
 
 
 def _apply_bdot_calibration(
@@ -441,22 +497,16 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
     cal_obj, area_mat, probe_id = _resolve_bdot_calibration(bdot_cal, bdot_area_m2)
 
     run = open_lapd(ifn)
-    parsed_chain = None
-    try:
-        parsed_chain = parse_bdot_gain(run.description().raw)
-    except (OSError, ValueError, NotImplementedError, KeyError):
-        parsed_chain = None
+    parsed_chain = _read_bdot_chain(run)
 
     signal_chain = parsed_chain["chain"] if parsed_chain else ""
-    if cal_obj is not None and parsed_chain is not None:
-        req_eff = float(bdot_gain) * (10.0 ** (-float(bdot_atten_db) / 20.0))
-        if not np.isclose(req_eff, parsed_chain["effective_gain"], rtol=1e-3, atol=0.0):
-            warnings.warn(
-                f"Run {spec.run_num}: requested bdot effective gain {req_eff:g} differs from "
-                f"HDF5 description '{parsed_chain['chain']}' ({parsed_chain['effective_gain']:g})",
-                UserWarning,
-                stacklevel=2,
-            )
+    gain_used, atten_used = _resolve_bdot_gain(
+        parsed_chain,
+        calibrated=(cal_obj is not None),
+        bdot_gain=bdot_gain,
+        bdot_atten_db=bdot_atten_db,
+        run_num=spec.run_num,
+    )
 
     pos_b = jiv.read_lp_positions(ifn, motion_group_name=BDOT_MOTION_GROUP)
     pos_lp = jiv.read_lp_positions(ifn, motion_group_name=LP_MOTION_GROUP)
@@ -511,8 +561,8 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
         "bdot_probe_id": str(probe_id),
         "bdot_area_matrix_m2": area_mat,
         "bdot_signal_chain": str(signal_chain),
-        "bdot_gain": float(bdot_gain),
-        "bdot_atten_db": float(bdot_atten_db),
+        "bdot_gain": float(gain_used),
+        "bdot_atten_db": float(atten_used),
         "bdot_channel_signs": np.asarray(channel_signs, dtype=np.int64),
         "abs_coil_polarity_verified": bool(abs_coil_polarity_verified),
     }
@@ -526,8 +576,8 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
             vx, vy, vz, f_hz,
             bdot_cal=cal_obj if isinstance(cal_obj, BdotCalibration) else None,
             bdot_area_m2=None if isinstance(cal_obj, BdotCalibration) else cal_obj,
-            bdot_gain=bdot_gain,
-            bdot_atten_db=bdot_atten_db,
+            bdot_gain=gain_used,
+            bdot_atten_db=atten_used,
             channel_signs=channel_signs,
             probe_to_lab=probe_to_lab,
         )
@@ -550,6 +600,15 @@ def _run_settings_dict(tmin_ms, tmax_ms, window, b_sign_z, by_sign,
                        bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
                        channel_signs=DEFAULT_CHANNEL_SIGNS):
     cal_obj, area_mat, probe_id = _resolve_bdot_calibration(bdot_cal, bdot_area_m2)
+    if cal_obj is None:
+        want_gain = 1.0 if bdot_gain is None else float(bdot_gain)
+        want_atten = 0.0 if bdot_atten_db is None else float(bdot_atten_db)
+    elif bdot_gain is None:
+        want_gain = None
+        want_atten = None if bdot_atten_db is None else float(bdot_atten_db)
+    else:
+        want_gain = float(bdot_gain)
+        want_atten = 0.0 if bdot_atten_db is None else float(bdot_atten_db)
     return {
         "tmin_ms": float(tmin_ms),
         "tmax_ms": float(tmax_ms),
@@ -561,8 +620,8 @@ def _run_settings_dict(tmin_ms, tmax_ms, window, b_sign_z, by_sign,
         "bdot_calibrated": bool(cal_obj is not None),
         "bdot_probe_id": str(probe_id),
         "bdot_area_matrix_m2": area_mat,
-        "bdot_gain": float(bdot_gain),
-        "bdot_atten_db": float(bdot_atten_db),
+        "bdot_gain": want_gain,
+        "bdot_atten_db": want_atten,
         "bdot_channel_signs": np.asarray(channel_signs, dtype=np.int64),
     }
 
@@ -573,6 +632,8 @@ def _run_settings_mismatch(npz_data, run_num, want):
         k = f"{run_num}__{field}"
         if k not in npz_data.files:
             diffs.append(f"{field}: missing")
+            continue
+        if val is None:
             continue
         if isinstance(val, np.ndarray):
             got = np.asarray(npz_data[k])
@@ -635,7 +696,23 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
             else:
                 for spec in specs:
                     if spec.run_num in existing_runs:
-                        diffs = _run_settings_mismatch(d, spec.run_num, want)
+                        run_want = want
+                        if want["bdot_gain"] is None or want["bdot_atten_db"] is None:
+                            try:
+                                ifn = _run_ifn(data_dir, spec.run_num)
+                            except FileNotFoundError:
+                                ifn = None
+                            if ifn is not None:
+                                parsed_chain = _read_bdot_chain(open_lapd(ifn))
+                                g_exp, a_exp = _resolve_bdot_gain(
+                                    parsed_chain,
+                                    calibrated=True,
+                                    bdot_gain=bdot_gain,
+                                    bdot_atten_db=bdot_atten_db,
+                                    run_num=spec.run_num,
+                                )
+                                run_want = dict(want, bdot_gain=g_exp, bdot_atten_db=a_exp)
+                        diffs = _run_settings_mismatch(d, spec.run_num, run_want)
                         if diffs:
                             raise ValueError(
                                 f"{out_path}: stored run '{spec.run_num}' differs "
@@ -672,6 +749,8 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
             else:
                 payload[f"{p}__{k}"] = np.asarray(v)
         for sk, sv in want.items():
+            if sv is None:
+                continue
             if isinstance(sv, np.ndarray):
                 payload[f"{p}__{sk}"] = sv
             elif isinstance(sv, bool):

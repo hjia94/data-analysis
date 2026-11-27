@@ -41,6 +41,7 @@ depends on how the probe enters the machine and is left to the campaign.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import math
 import os
 
@@ -129,7 +130,7 @@ class BdotCalibration:
         if self.area_complex_m2 is not None:
             self.area_complex_m2 = np.asarray(self.area_complex_m2, dtype=complex)
 
-    def area_at(self, freq_hz=None, *, mode="static") -> np.ndarray:
+    def area_at(self, freq_hz=None, *, mode="static", convention="exp_plus_iwt") -> np.ndarray:
         """Return effective area matrix [m^2] in ``'static'`` or ``'interpolated'`` mode.
 
         - ``mode='static'``: returns the fitted signed ``(3, 3)`` real matrix
@@ -138,7 +139,19 @@ class BdotCalibration:
           scalar ``freq_hz`` -> ``(3, 3)`` complex, or 1-D ``freq_hz`` ->
           ``(3, 3, nf)`` complex. Raises ``ValueError`` if ``freq_hz`` lies
           outside the measured VNA sweep or if complex sweeps were not stored.
+
+        ``area_complex_m2`` is measured by the VNA in the engineering
+        ``exp(+i*w*t)`` convention (``V = +i*w*A*B``). Pass
+        ``convention='exp_plus_iwt'`` (default, matching ``numpy.fft`` /
+        ``scipy.signal.stft`` / :func:`data_analysis.plasma.fields.phasor`) to
+        return ``A(f)`` as stored, or ``convention='exp_minus_iwt'`` (physics
+        convention, ``V = -i*w*conj(A)*B``) to return ``conj(A(f))`` so coil
+        phase shifts cancel rather than double.
         """
+        if convention not in ("exp_plus_iwt", "exp_minus_iwt"):
+            raise ValueError(
+                f"convention must be 'exp_plus_iwt' or 'exp_minus_iwt', got {convention!r}"
+            )
         if mode == "static":
             return self.area_matrix_m2.copy()
         if mode != "interpolated":
@@ -174,6 +187,8 @@ class BdotCalibration:
                 re = np.interp(f_1d, self.freq_hz[finite], curve.real[finite])
                 im = np.interp(f_1d, self.freq_hz[finite], curve.imag[finite])
                 out[i, j] = re + 1j * im
+        if convention == "exp_minus_iwt":
+            out = np.conj(out)
         return out[..., 0] if scalar else out
 
 
@@ -326,6 +341,14 @@ def fit_effective_area_matrix(
     )
 
 
+def _json_default(obj):
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Provenance value of type {type(obj).__name__!r} is not JSON-serializable")
+
+
 def save_bdot_calibration(path, cal: BdotCalibration):
     """Persist a :class:`BdotCalibration` to a compact ``.npz`` file."""
     path = os.fspath(path)
@@ -357,7 +380,9 @@ def save_bdot_calibration(path, cal: BdotCalibration):
 
     for k, v in (cal.provenance or {}).items():
         pk = f"prov__{k}"
-        if isinstance(v, str):
+        if v is None or isinstance(v, (dict, list, tuple)):
+            payload[f"prov_json__{k}"] = np.str_(json.dumps(v, default=_json_default))
+        elif isinstance(v, str):
             payload[pk] = np.str_(v)
         elif isinstance(v, (bool, np.bool_)):
             payload[pk] = np.bool_(v)
@@ -366,7 +391,11 @@ def save_bdot_calibration(path, cal: BdotCalibration):
         elif isinstance(v, (float, np.floating)):
             payload[pk] = np.float64(v)
         else:
-            payload[pk] = np.asarray(v)
+            arr = np.asarray(v)
+            if arr.dtype == object:
+                payload[f"prov_json__{k}"] = np.str_(json.dumps(v, default=_json_default))
+            else:
+                payload[pk] = arr
 
     np.savez(path, **payload)
     return path
@@ -410,7 +439,9 @@ def load_bdot_calibration(path) -> BdotCalibration:
 
         prov = {}
         for k in sorted(files):
-            if k.startswith("prov__"):
+            if k.startswith("prov_json__"):
+                prov[k[len("prov_json__"):]] = json.loads(str(d[k]))
+            elif k.startswith("prov__"):
                 v = d[k]
                 prov[k[len("prov__"):]] = v.item() if v.ndim == 0 else v
         # Also pick up standalone nAcalc.py bench metadata keys
@@ -449,12 +480,13 @@ def _inexact(x):
     return arr.astype(np.result_type(arr, float), copy=False)
 
 
-def inverse_area_matrix(area, gain=1.0, *, freq_hz=None, mode="static"):
+def inverse_area_matrix(area, gain=1.0, *, freq_hz=None, mode="static", convention="exp_plus_iwt"):
     """Volts -> dB/dt conversion: ``1/(gain*area)`` or ``inv(area) @ diag(1/gain)``.
 
     ``area`` is the bare effective coil area in **m^2** (multiply mm^2 by 1e-6), as:
 
-    - a :class:`BdotCalibration` (evaluated via ``area.area_at(freq_hz, mode=mode)``);
+    - a :class:`BdotCalibration` (evaluated via
+      ``area.area_at(freq_hz, mode=mode, convention=convention)``);
     - a scalar, for a single coil -> returns a scalar;
     - a length-3 sequence, for three independent coils -> diagonal 3x3;
     - a 3x3 calibration matrix ``A`` (real or complex) with ``V = G @ A @ dB/dt``,
@@ -464,9 +496,15 @@ def inverse_area_matrix(area, gain=1.0, *, freq_hz=None, mode="static"):
     amplifier/attenuator chain to real probe-terminal level before calling
     :func:`voltage_to_bdot` (leaving ``gain=1.0``). Passing a scalar or
     length-3 ``gain`` is supported for convenience and backward compatibility.
+    ``convention`` only affects :class:`BdotCalibration` in ``mode='interpolated'``
+    (``'exp_minus_iwt'`` conjugates the VNA-measured ``exp(+i*w*t)`` complex sweep).
     """
+    if convention not in ("exp_plus_iwt", "exp_minus_iwt"):
+        raise ValueError(
+            f"convention must be 'exp_plus_iwt' or 'exp_minus_iwt', got {convention!r}"
+        )
     if isinstance(area, BdotCalibration):
-        area = area.area_at(freq_hz=freq_hz, mode=mode)
+        area = area.area_at(freq_hz=freq_hz, mode=mode, convention=convention)
 
     a = _inexact(area)
     g = np.asarray(gain, dtype=float)
@@ -529,6 +567,10 @@ def phasor_voltage_to_b(
     - ``'exp_minus_iwt'`` (physics convention, ``V = -i w A B``): ``B = (+i / w) A^-1 V``
     - ``'exp_plus_iwt'`` (:func:`data_analysis.plasma.fields.phasor` convention,
       ``V = +i w A B``): ``B = (-i / w) A^-1 V``
+
+    When ``area`` is a :class:`BdotCalibration` with ``mode='interpolated'``,
+    the VNA-measured ``area_complex_m2`` (stored in ``exp(+i*w*t)``) is
+    automatically conjugated for ``convention='exp_minus_iwt'``.
     """
     if convention not in ("exp_minus_iwt", "exp_plus_iwt"):
         raise ValueError(
@@ -538,7 +580,7 @@ def phasor_voltage_to_b(
     if f <= 0.0:
         raise ValueError(f"freq_hz must be positive, got {freq_hz}")
     omega = 2.0 * np.pi * f
-    inv_area = inverse_area_matrix(area, gain=gain, freq_hz=f, mode=mode)
+    inv_area = inverse_area_matrix(area, gain=gain, freq_hz=f, mode=mode, convention=convention)
     bdot_phasor = voltage_to_bdot(v_coil_phasor, inv_area)
     factor = (1j / omega) if convention == "exp_minus_iwt" else (-1j / omega)
     return factor * bdot_phasor
@@ -550,7 +592,7 @@ def calibrate_bdot_spectrum(
     cal,
     *,
     axis=-1,
-    convention="exp_minus_iwt",
+    convention="exp_plus_iwt",
     gain=1.0,
     mode="interpolated",
 ):
@@ -560,6 +602,13 @@ def calibrate_bdot_spectrum(
     ``axis``. Zero-frequency (DC) bins are returned as ``NaN``. For 3-axis
     calibrations, ``v_coil_spec`` must carry the three coil channels on axis 0
     (and ``axis`` must not be axis 0).
+
+    Defaults to ``convention='exp_plus_iwt'`` to match ``numpy.fft`` /
+    ``scipy.fft`` / ``scipy.signal.stft`` and
+    :func:`data_analysis.plasma.fields.phasor` (``V(f) = +i*w*A(f)*B(f)``).
+    Pass ``convention='exp_minus_iwt'`` for conjugated physics-convention
+    spectra; in ``mode='interpolated'``, ``cal.area_complex_m2`` (stored in
+    the VNA ``exp(+i*w*t)`` convention) is conjugated automatically.
     """
     if convention not in ("exp_minus_iwt", "exp_plus_iwt"):
         raise ValueError(
@@ -598,7 +647,7 @@ def calibrate_bdot_spectrum(
         v_mv = np.moveaxis(v_scaled, ax, -1)
         out_mv = np.full(v_mv.shape, np.nan + 0j, dtype=complex)
         if np.any(pos):
-            A_f = cal.area_at(f[pos], mode="interpolated")      # (3, 3, nf_pos)
+            A_f = cal.area_at(f[pos], mode="interpolated", convention=convention)  # (3, 3, nf_pos)
             # Invert each (3, 3) slice -> (nf_pos, 3, 3) -> (3, 3, nf_pos)
             inv_A_f = np.linalg.inv(np.moveaxis(A_f, -1, 0))
             inv_A_f = np.moveaxis(inv_A_f, 0, -1)
@@ -607,7 +656,7 @@ def calibrate_bdot_spectrum(
         return np.moveaxis(out_mv, -1, ax)
 
     # Static calibration (scalar, (3,), (3, 3), or BdotCalibration in static mode)
-    inv_area = inverse_area_matrix(cal, gain=gain, mode="static")
+    inv_area = inverse_area_matrix(cal, gain=gain, mode="static", convention=convention)
     bdot_spec = voltage_to_bdot(v_arr, inv_area)
     bdot_mv = np.moveaxis(bdot_spec, ax, -1)
     out_mv = bdot_mv * inv_iw

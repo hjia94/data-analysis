@@ -127,7 +127,14 @@ def test_fit_effective_area_matrix_signed_and_npz_roundtrip(tmp_path):
 
     cal = bdot.fit_effective_area_matrix(
         f, H, fit_band_hz=(150e3, 500e3), offdiag_band_hz=(250e3, 1000e3),
-        bench=bench, probe_id="C16", provenance={"bench_gain": 10.0, "bench_atten_db": 0.0},
+        bench=bench, probe_id="C16",
+        provenance={
+            "bench_gain": 10.0,
+            "bench_atten_db": 0.0,
+            "notes": None,
+            "tags": ["Red", None, 2026],
+            "meta": {"upmark": "5/4/26"},
+        },
     )
     np.testing.assert_allclose(cal.area_matrix_m2, A_true, rtol=1e-12, atol=1e-18)
     assert np.all(cal.r2_matrix > 0.9999)
@@ -137,12 +144,15 @@ def test_fit_effective_area_matrix_signed_and_npz_roundtrip(tmp_path):
     assert cal.phase_deg_matrix[1, 2] == pytest.approx(-90.0, abs=1e-6)
     assert cal.phase_deg_matrix[2, 1] == pytest.approx(-90.0, abs=1e-6)
 
-    # Save & load round-trip
+    # Save & load round-trip (allow_pickle=False even with None/list/dict provenance)
     out_npz = tmp_path / "C16-bdot-calibration.npz"
     bdot.save_bdot_calibration(out_npz, cal)
     cal2 = bdot.load_bdot_calibration(out_npz)
     assert cal2.probe_id == "C16"
     assert cal2.provenance["bench_gain"] == pytest.approx(10.0)
+    assert cal2.provenance["notes"] is None
+    assert cal2.provenance["tags"] == ["Red", None, 2026]
+    assert cal2.provenance["meta"] == {"upmark": "5/4/26"}
     np.testing.assert_allclose(cal2.area_matrix_m2, A_true, rtol=1e-12)
     np.testing.assert_allclose(cal2.area_at(300e3, mode="interpolated").real, A_true, rtol=1e-12)
     with pytest.raises(ValueError):
@@ -193,13 +203,85 @@ def test_per_channel_gain_complex_phasor_and_spectrum():
     B_rec_p = bdot.phasor_voltage_to_b(+1j * w0 * (A @ B_true), f0, A, convention="exp_plus_iwt")
     np.testing.assert_allclose(B_rec_p, B_true, rtol=1e-12)
 
-    # Spectrum calibration with DC bin -> NaN
+    # Spectrum calibration with DC bin -> NaN (default convention='exp_plus_iwt' matches FFT/STFT)
     freqs = np.array([0.0, 100e3, 200e3, 400e3])
     B_spec = np.broadcast_to(B_true, (3, freqs.size)).copy()
-    V_spec = -1j * (2.0 * np.pi * freqs)[None, :] * np.einsum("ij,jf->if", A, B_spec)
-    B_out = bdot.calibrate_bdot_spectrum(freqs, V_spec, A, axis=-1, convention="exp_minus_iwt", mode="static")
-    assert np.all(np.isnan(B_out[:, 0]))
-    np.testing.assert_allclose(B_out[:, 1:], B_spec[:, 1:], rtol=1e-12)
+    V_spec_p = +1j * (2.0 * np.pi * freqs)[None, :] * np.einsum("ij,jf->if", A, B_spec)
+    B_out_p = bdot.calibrate_bdot_spectrum(freqs, V_spec_p, A, axis=-1, mode="static")
+    assert np.all(np.isnan(B_out_p[:, 0]))
+    np.testing.assert_allclose(B_out_p[:, 1:], B_spec[:, 1:], rtol=1e-12)
+    V_spec_m = -1j * (2.0 * np.pi * freqs)[None, :] * np.einsum("ij,jf->if", A, B_spec)
+    B_out_m = bdot.calibrate_bdot_spectrum(freqs, V_spec_m, A, axis=-1, convention="exp_minus_iwt", mode="static")
+    assert np.all(np.isnan(B_out_m[:, 0]))
+    np.testing.assert_allclose(B_out_m[:, 1:], B_spec[:, 1:], rtol=1e-12)
+
+
+def test_interpolated_phase_convention_and_rfft_spectrum():
+    """End-to-end time-domain check of complex VNA phase in both conventions & default rfft spectrum."""
+    bench = bdot.HelmholtzBench()
+    k0 = bench.scale_m2_hz
+    # Build a synthetic VNA sweep with non-zero coil phase lag (1-pole roll-off at 500 kHz)
+    f_vna = np.linspace(10e3, 2.5e6, 500)
+    A0 = np.array([
+        [1.15e-4, 2.0e-6, 1.2e-5],
+        [-3.0e-6, 9.8e-5, -5.0e-6],
+        [4.0e-6, -1.0e-5, 8.7e-5],
+    ])
+    # VNA measures H(f) in exp(+j*w*t): low-pass coil phase lag -> A_vna(f) = A0 / (1 + j*f/f_c)
+    pole = 1.0 / (1.0 + 1j * (f_vna / 500e3))
+    H_vna = 1j * (A0[:, :, None] / k0) * f_vna[None, None, :] * pole[None, None, :]
+    cal = bdot.fit_effective_area_matrix(
+        f_vna, H_vna, fit_band_hz=(150e3, 500e3), bench=bench, probe_id="SYN",
+    )
+
+    # Verify area_at conjugates under exp_minus_iwt
+    f_test = 400e3
+    A_plus = cal.area_at(f_test, mode="interpolated", convention="exp_plus_iwt")
+    A_minus = cal.area_at(f_test, mode="interpolated", convention="exp_minus_iwt")
+    assert np.max(np.abs(A_plus.imag)) > 0.3 * np.max(np.abs(A_plus.real))  # strong phase shift (~39 deg)
+    np.testing.assert_allclose(A_minus, np.conj(A_plus), rtol=1e-14)
+
+    # Synthesize real time-domain B(t) and physical coil voltage V(t) at an exact FFT bin (400 kHz)
+    dt = 200e-9   # fs = 5 MHz -> rfft spans 0 .. 2.5 MHz (inside VNA band for f > 0? start at 10 kHz)
+    nt = 500      # df = 10 kHz -> positive bins 10 kHz .. 2.5 MHz match f_vna exactly
+    t = np.arange(nt) * dt
+    k0_bin = int(round(f_test * nt * dt))  # bin 40 -> 400 kHz
+    assert np.isclose(np.fft.rfftfreq(nt, dt)[k0_bin], f_test)
+
+    B_plus = np.array([3e-4 * np.exp(0.4j), -2e-4 * np.exp(-0.9j), 1.5e-4 * np.exp(1.2j)])
+    w0 = 2.0 * np.pi * f_test
+    # True physical waveforms: x(t) = Re[X_plus * exp(+j*w*t)]
+    B_t = np.real(B_plus[:, None] * np.exp(1j * w0 * t[None, :]))
+    V_plus = (1j * w0) * (A_plus @ B_plus)
+    V_t = np.real(V_plus[:, None] * np.exp(1j * w0 * t[None, :]))
+
+    # 1. Single-frequency phasors extracted directly from V_t in BOTH conventions
+    V_ph_plus = fields.phasor(V_t, dt, f_test, window=None)
+    B_ph_plus = fields.phasor(B_t, dt, f_test, window=None)
+    np.testing.assert_allclose(
+        bdot.phasor_voltage_to_b(V_ph_plus, f_test, cal, convention="exp_plus_iwt", mode="interpolated"),
+        B_ph_plus, rtol=1e-10,
+    )
+    V_ph_minus = np.conj(V_ph_plus)
+    B_ph_minus = np.conj(B_ph_plus)
+    np.testing.assert_allclose(
+        bdot.phasor_voltage_to_b(V_ph_minus, f_test, cal, convention="exp_minus_iwt", mode="interpolated"),
+        B_ph_minus, rtol=1e-10,
+    )
+
+    # 2. Broadband rfft spectrum with default arguments (exp_plus_iwt, interpolated)
+    freqs_rfft = np.fft.rfftfreq(nt, dt)
+    V_rfft = np.fft.rfft(V_t, axis=-1)
+    B_rfft_true = np.fft.rfft(B_t, axis=-1)
+    B_rfft_rec = bdot.calibrate_bdot_spectrum(freqs_rfft, V_rfft, cal)
+    assert np.all(np.isnan(B_rfft_rec[:, 0]))
+    np.testing.assert_allclose(B_rfft_rec[:, k0_bin], B_rfft_true[:, k0_bin], rtol=1e-10)
+
+    # 3. Conjugated physics-convention spectrum in interpolated mode
+    B_rfft_minus = bdot.calibrate_bdot_spectrum(
+        freqs_rfft, np.conj(V_rfft), cal, convention="exp_minus_iwt", mode="interpolated",
+    )
+    np.testing.assert_allclose(B_rfft_minus[:, k0_bin], np.conj(B_rfft_true[:, k0_bin]), rtol=1e-10)
 
 
 def test_e5100a_csv_binary_dir_and_parse_bdot_gain(tmp_path):
@@ -261,12 +343,29 @@ def test_e5100a_csv_binary_dir_and_parse_bdot_gain(tmp_path):
     )
     parsed = parse_bdot_gain(desc)
     assert parsed is not None
+    assert parsed["header"] == "P28: Bdot-10T-C16"
     assert parsed["gain"] == pytest.approx(1000.0)
     assert parsed["atten_db"] == pytest.approx(0.0)
     assert parsed["effective_gain"] == pytest.approx(1000.0)
     parsed_pad = parse_bdot_gain("- P28: Bdot\n  - Connection: X100 => 20dB\n")
     assert parsed_pad["effective_gain"] == pytest.approx(10.0)
     assert parse_bdot_gain("- P29: LP only\n") is None
+
+    # Multiple active B-dot probes: ambiguous without probe=, unambiguous with probe=
+    multi_desc = (
+        "- P30: Bdot-5T-B2\n"
+        "  - Connection: X10\n"
+        "- P28: Bdot-10T-C16\n"
+        "  - Connection: 2.5BLP => X10 => 2.5BLP => X100\n"
+    )
+    with pytest.raises(ValueError):
+        parse_bdot_gain(multi_desc)
+    p28 = parse_bdot_gain(multi_desc, probe="P28")
+    p30 = parse_bdot_gain(multi_desc, probe="P30")
+    assert p28["effective_gain"] == pytest.approx(1000.0)
+    assert p30["effective_gain"] == pytest.approx(10.0)
+    assert parse_bdot_gain(multi_desc, probe="P2") is None
+    assert parse_bdot_gain(multi_desc, probe="P99") is None
 
 
 # ---------------------------------------------------------------------------

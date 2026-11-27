@@ -31,6 +31,7 @@ synthesis table.
 import datetime
 import glob
 import os
+import warnings
 
 import numpy as np
 
@@ -68,13 +69,16 @@ DZ_P29_P25_M = 1.28
 
 # Bdot-10T-C16 HDF5 run descriptions record `2.5BLP => X10 => 2.5BLP => X100`
 # (G = 1000.0), while the bench-calibrated 3x3 effective area lives in
-# `C16-bdot-calibration.npz` (from Jun2026_bdot_cal.py). Leave None by default
-# so estimate_bdot_amplitude reports raw V_perp and flux-like V_perp / omega
-# without fabricating Tesla/Gauss amplitudes unless a calibration is supplied.
+# `C16-bdot-calibration.npz` (from Jun2026_bdot_cal.py). Leave bdot_cal=None by
+# default so estimate_bdot_amplitude reports raw V_perp and V_perp / omega
+# without fabricating Tesla/Gauss amplitudes; when bdot_cal or bdot_area_m2 is
+# supplied, bdot_gain=None auto-reads the P28 signal chain from each run's HDF5
+# description (raising ValueError if absent rather than silently using 1.0).
+BDOT_PROBE_PORT = "P28"
 DEFAULT_BDOT_CAL = None
 DEFAULT_BDOT_AREA_M2 = None
-DEFAULT_BDOT_GAIN = 1.0
-DEFAULT_BDOT_ATTEN_DB = 0.0
+DEFAULT_BDOT_GAIN = None
+DEFAULT_BDOT_ATTEN_DB = None
 DEFAULT_BDOT_CHANNEL_SIGNS = (+1, +1, +1)
 
 # LAPD magnetic field polarity: +1 -> B_0 along +z so outward E_r > 0 gives
@@ -354,9 +358,6 @@ def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
     signs = np.asarray(channel_signs, dtype=float)
     if signs.shape != (3,) or not np.all(np.isin(signs, (-1.0, +1.0))):
         raise ValueError(f"channel_signs must be 3 values in {{-1, +1}}, got {channel_signs!r}")
-    eff_gain = float(bdot_gain) * (10.0 ** (-float(bdot_atten_db) / 20.0))
-    if eff_gain <= 0.0:
-        raise ValueError(f"effective bdot gain must be > 0, got {eff_gain}")
 
     # Real probe-level inverse area matrix (experiment gain removed before voltage_to_bdot)
     inv_area = inverse_area_matrix(cal_obj, gain=1.0) if calibrated else None
@@ -370,10 +371,39 @@ def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
         f0 = float(onset_table[rnum]["f_peak_hz"]) if (onset_table and rnum in onset_table) else f_fallback
         run = open_lapd(ifn)
         try:
-            parsed_chain = parse_bdot_gain(run.description().raw)
+            raw_desc = run.description().raw
         except (OSError, ValueError, NotImplementedError, KeyError):
-            parsed_chain = None
+            raw_desc = None
+        parsed_chain = parse_bdot_gain(raw_desc, probe=BDOT_PROBE_PORT) if raw_desc else None
         signal_chain = parsed_chain["chain"] if parsed_chain else ""
+
+        if not calibrated:
+            gain_used = 1.0 if bdot_gain is None else float(bdot_gain)
+            atten_used = 0.0 if bdot_atten_db is None else float(bdot_atten_db)
+        elif bdot_gain is None:
+            if parsed_chain is None:
+                raise ValueError(
+                    f"Run {rnum}: B-dot calibration requested with bdot_gain=None, "
+                    f"but no active {BDOT_PROBE_PORT} B-dot signal chain was found in "
+                    "the HDF5 description; pass bdot_gain= explicitly."
+                )
+            gain_used = float(parsed_chain["gain"])
+            atten_used = float(parsed_chain["atten_db"]) if bdot_atten_db is None else float(bdot_atten_db)
+        else:
+            gain_used = float(bdot_gain)
+            atten_used = 0.0 if bdot_atten_db is None else float(bdot_atten_db)
+
+        eff_gain = gain_used * (10.0 ** (-atten_used / 20.0))
+        if eff_gain <= 0.0:
+            raise ValueError(f"Run {rnum}: effective bdot gain must be > 0, got {eff_gain}")
+        if calibrated and parsed_chain is not None:
+            if not np.isclose(eff_gain, parsed_chain["effective_gain"], rtol=1e-3, atol=0.0):
+                warnings.warn(
+                    f"Run {rnum}: requested bdot effective gain {eff_gain:g} differs from "
+                    f"HDF5 description '{parsed_chain['chain']}' ({parsed_chain['effective_gain']:g})",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         tarr = run.time_array(scope_name="bdotscope")
         i0, i1 = clip_time_window(tarr, *BIASSCOPE_WINDOW_MS)
@@ -423,8 +453,8 @@ def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
             "bdot_probe_id": probe_id,
             "bdot_area_matrix_m2": area_mat,
             "bdot_signal_chain": signal_chain,
-            "bdot_gain": float(bdot_gain),
-            "bdot_atten_db": float(bdot_atten_db),
+            "bdot_gain": float(gain_used),
+            "bdot_atten_db": float(atten_used),
             "bdot_calibrated": bool(calibrated),
         }
     return out
