@@ -20,8 +20,22 @@ Figure functions (each reads the relevant run's saved ``.npz`` -- process first)
 * ``plot_xcorr_plane_run`` -- two-channel cross-spectrum over an xy-plane run:
   coherence and cross-phase at a single frequency as side-by-side imshow maps
   (Smith-1974).
+* ``plot_turbulence_steepening`` -- 4-panel nonlinear wave steepening vs.
+  symmetric hollow-wall curvature figure from ``turbulence_transport_jun2026.npz``.
+* ``plot_hollow_profiles`` -- clean dual-axis hollow-column ``n_e(x)`` and
+  ``T_e(x)`` radial profile plot from ``profiles_summary_jun2026.npz``.
+* ``plot_em_instability_overview`` -- 4-panel electromagnetic instability
+  overview (raw fixed-bias LP ``Isat``, simultaneous raw B-dot, FFT of both,
+  and reference-locked 2-D ``J_par`` & ``B_perp`` with shot probe markers).
+* ``plot_sheath_closure`` -- 2-panel Port-35 conducting-sheath current closure
+  figure (full bias-pulse ``I_2"`` & ``I_4"`` traces + zoomed 180-deg return
+  current window).
+* ``animate_mode_propagation`` -- side-by-side GIF animating measured 2-D
+  ``J_par`` & ``B_perp`` in the lab frame vs. co-rotating ``E x B`` plasma
+  rest frame.
 """
 
+import glob
 import os
 
 import numpy as np
@@ -793,6 +807,644 @@ def plot_turbulence_steepening(npz_path=None, *, data_dir=None,
     fig.suptitle("Jun-2026 Nonlinear Wave Steepening vs. Symmetric Wall Curvature",
                  fontsize=13.5, fontweight="bold")
     finalize_figure(fig, save_fig=_resolve_save(save_fig, "turbulence_steepening"), show=show)
+
+
+# =========================================================================== #
+#  Finding #1: Electromagnetic CWM mechanism figures & propagation GIF
+# =========================================================================== #
+
+def _run_hdf5(data_dir, run_num):
+    """Locate the single HDF5 file for ``run_num`` inside ``data_dir``."""
+    hits = sorted(glob.glob(os.path.join(data_dir, f"{run_num}-*.hdf5")))
+    if not hits:
+        raise FileNotFoundError(f"no HDF5 for run {run_num} in {data_dir}")
+    if len(hits) > 1:
+        raise ValueError(f"multiple HDF5 files for run {run_num}: {hits}")
+    return hits[0]
+
+
+def _shot_xy(pos, shot):
+    """Return ``(x_cm, y_cm)`` for integer ``shot`` from a ``ProbePositions`` or array."""
+    arr = pos.pos_array if hasattr(pos, "pos_array") else pos
+    shots = np.asarray(arr["shot_num"], dtype=int)
+    hits = np.flatnonzero(shots == int(shot))
+    if hits.size == 0:
+        raise ValueError(f"shot {shot} not found in motion positions array")
+    i = int(hits[0])
+    return float(arr["x"][i]), float(arr["y"][i])
+
+
+def _windowed_fft_amp(sig, dt_s, mask, pad_factor=8):
+    """Single-sided Hann-windowed FFT amplitude [same units as ``sig``] vs kHz."""
+    y = np.asarray(sig[mask], dtype=float)
+    y = y - float(np.mean(y))
+    n = y.size
+    win = np.hanning(n)
+    nfft = n * int(pad_factor)
+    spec = 2.0 * np.abs(np.fft.rfft(y * win, n=nfft)) / float(np.sum(win))
+    freq_khz = np.fft.rfftfreq(nfft, d=float(dt_s)) * 1e-3
+    return freq_khz, spec
+
+
+def _load_bdot_2d_snapshot(bdot_npz_path, run_num):
+    """Load complex ``h1`` 2-D ``(xs, ys, Bx, By, Jz, meta)`` from ``bdot_2d_jun2026.npz``."""
+    with np.load(bdot_npz_path, allow_pickle=True) as bd:
+        p = f"{run_num}__"
+        xs = np.asarray(bd[p + "x_cm"], dtype=float)
+        ys = np.asarray(bd[p + "y_cm"], dtype=float)
+        Bx = np.asarray(bd[p + "h1__Bx"], dtype=complex)
+        By = np.asarray(bd[p + "h1__By"], dtype=complex)
+        Jz = np.asarray(bd[p + "h1__Jz"], dtype=complex)
+        if Bx.shape == (xs.size, ys.size) and xs.size != ys.size:
+            Bx, By, Jz = Bx.T, By.T, Jz.T
+        meta = {
+            "b0_g": float(bd[p + "b0_g"]),
+            "f0_hz": float(bd[p + "f0_hz"]),
+            "bz_over_bperp": float(bd[p + "h1__bz_over_bperp"]),
+            "center_x_cm": float(bd[p + "h1__center_x_cm"]),
+            "center_y_cm": float(bd[p + "h1__center_y_cm"]),
+            "bdot_calibrated": bool(bd[p + "bdot_calibrated"]),
+        }
+    return xs, ys, Bx, By, Jz, meta
+
+
+def plot_hollow_profiles(
+    run_num="02",
+    *,
+    data_dir=None,
+    profiles_npz=None,
+    x_lim=(-9.5, 9.5),
+    save_fig=True,
+    show=False,
+):
+    """Clean dual-axis hollow-column ``n_e(x)`` and ``T_e(x)`` radial profiles.
+
+    Reads ``profiles_summary_jun2026.npz`` produced by ``Jun2026_profiles.py``
+    (zero raw HDF5 reads) and plots the pre-onset reference sweep's ``n_e``
+    (blue) and ``T_e`` (red) vs. ``x - x_c`` with ``eta_e`` annotated.
+    """
+    import Jun2026_profiles as jpr
+
+    ddir = data_dir or jpr.DATA_DIR
+    prof_path = profiles_npz or os.path.join(ddir, jpr.OUT_NAME)
+    with np.load(prof_path, allow_pickle=True) as pf:
+        p = f"{run_num}__"
+        x_cm = np.asarray(pf[p + "x_cm"], dtype=float)
+        xc_cm = float(pf[p + "x_center_cm"])
+        ir = int(pf[p + "ref_sweep_idx"])
+        ne = np.asarray(pf[p + "ne"][:, ir], dtype=float) * 1e-12  # 10^18 m^-3
+        te = np.asarray(pf[p + "Te"][:, ir], dtype=float)
+        eta_e = float(pf[p + "ref_eta_e_steep"]) if (p + "ref_eta_e_steep") in pf.files else np.nan
+        puff_ms = float(pf[p + "gas_puff_ms"]) if (p + "gas_puff_ms") in pf.files else np.nan
+
+    dx = x_cm - xc_cm
+    m_x = (dx >= float(x_lim[0])) & (dx <= float(x_lim[1]))
+
+    fig, ax = plt.subplots(figsize=(6.4, 4.5))
+    l1, = ax.plot(dx[m_x], ne[m_x], "o-", color="#1d4ed8", lw=2.2, ms=5.2, label=r"$n_e$")
+    ax.set_xlabel(r"$x - x_c$ [cm]")
+    ax.set_ylabel(r"$n_e$ [$10^{18}\;\mathrm{m}^{-3}$]", color="#1d4ed8")
+    ax.tick_params(axis="y", labelcolor="#1d4ed8")
+    ax.set_xlim(float(x_lim[0]), float(x_lim[1]))
+    ax.set_ylim(0.0, max(float(np.nanmax(ne[m_x])) * 1.18, 17.0))
+    ax.grid(alpha=0.22)
+
+    ax2 = ax.twinx()
+    l2, = ax2.plot(dx[m_x], te[m_x], "s-", color="#dc2626", lw=2.2, ms=5.0, label=r"$T_e$")
+    ax2.set_ylabel(r"$T_e$ [eV]", color="#dc2626")
+    ax2.tick_params(axis="y", labelcolor="#dc2626")
+    ax2.set_ylim(0.0, max(float(np.nanmax(te[m_x])) * 1.24, 3.1))
+
+    if np.isfinite(eta_e):
+        ax.text(0.04, 0.06, rf"$\eta_e = {eta_e:.2f}$", transform=ax.transAxes,
+                fontsize=10.5, va="bottom")
+    ax.legend(handles=[l1, l2], loc="upper right", frameon=True, framealpha=0.92)
+    puff_str = f", {puff_ms:g} ms" if np.isfinite(puff_ms) else ""
+    ax.set_title(f"Profiles (Run {run_num}{puff_str})", fontweight="bold")
+
+    save_name = "fig1a_profiles" if str(run_num) == "02" else f"fig1a_profiles_run{run_num}"
+    finalize_figure(fig, save_fig=_resolve_save(save_fig, save_name), show=show)
+
+
+def plot_em_instability_overview(
+    run_num="26",
+    shot=716,
+    *,
+    bdot_ch="C1",
+    lp_ch="C2",
+    matched_puff_run="03",
+    data_dir=None,
+    ifn=None,
+    bdot_npz=None,
+    modes_npz=None,
+    t_window_ms=(-0.5, 5.5),
+    fft_window_ms=(2.0, 4.8),
+    fmax_khz=20.0,
+    pad_factor=8,
+    save_fig=True,
+    show=False,
+):
+    """4-panel electromagnetic instability overview (default: Run 26, shot 716).
+
+    * **(a)** Raw fixed-bias Langmuir ``Isat`` trace across the bias pulse.
+    * **(b)** Simultaneous raw P28 B-dot trace (baseline-zeroed on pre-bias).
+    * **(c)** Normalized Hann-windowed FFT magnitude of both over ``fft_window_ms``.
+    * **(d)** Reference-locked 2-D ``Re[J_par]/J_max`` & ``B_perp`` from
+      ``bdot_2d_jun2026.npz`` with Port-35 ``2"``/``4"`` footprints and the
+      exact probe locations of ``shot``.
+    """
+    from matplotlib.gridspec import GridSpec
+    from matplotlib.patches import Circle
+    import Jun2026_IV as jiv
+    import Jun2026_bdot_2d as jbd
+    import Jun2026_modes as jmd
+
+    ddir = data_dir or jbd.DATA_DIR
+    hdf5_path = ifn or _run_hdf5(ddir, run_num)
+    bdot_path = bdot_npz or os.path.join(ddir, jbd.OUT_NAME)
+    modes_path = modes_npz or os.path.join(ddir, jmd.OUT_NAME)
+
+    run = open_lapd(hdf5_path)
+    tl = np.asarray(run.time_array(scope_name="lpscope"), dtype=float) * 1e3
+    tb = np.asarray(run.time_array(scope_name="bdotscope"), dtype=float) * 1e3
+    dt_l = float(tl[1] - tl[0]) * 1e-3
+    dt_b = float(tb[1] - tb[0]) * 1e-3
+
+    st_lp, _ = run.channel(lp_ch, scope_name="lpscope", shots=[int(shot)])
+    st_bd, _ = run.channel(bdot_ch, scope_name="bdotscope", shots=[int(shot)])
+    lp_raw = np.asarray(st_lp[0], dtype=float)
+    bd_raw = np.asarray(st_bd[0], dtype=float)
+
+    pos_lp = jiv.read_lp_positions(hdf5_path, motion_group_name=jbd.LP_MOTION_GROUP)
+    pos_bd = jiv.read_lp_positions(hdf5_path, motion_group_name=jbd.BDOT_MOTION_GROUP)
+    lp_x, lp_y = _shot_xy(pos_lp, shot)
+    bd_x, bd_y = _shot_xy(pos_bd, shot)
+
+    # Zero pre-bias DC offset on B-dot (inductive coil has zero DC)
+    m_pre_b = (tb >= t_window_ms[0]) & (tb <= -0.05)
+    bd_zero = bd_raw - (float(np.mean(bd_raw[m_pre_b])) if np.any(m_pre_b) else 0.0)
+
+    t_lo, t_hi = float(t_window_ms[0]), float(t_window_ms[1])
+    w_lo, w_hi = float(fft_window_ms[0]), float(fft_window_ms[1])
+    m_tl = (tl >= t_lo) & (tl <= t_hi)
+    m_tb = (tb >= t_lo) & (tb <= t_hi)
+    m_wl = (tl >= w_lo) & (tl <= w_hi)
+    m_wb = (tb >= w_lo) & (tb <= w_hi)
+
+    fl, sl = _windowed_fft_amp(lp_raw, dt_l, m_wl, pad_factor=pad_factor)
+    fb, sb = _windowed_fft_amp(bd_zero, dt_b, m_wb, pad_factor=pad_factor)
+    m_f0_l = (fl >= 2.5) & (fl <= 5.5)
+    m_f0_b = (fb >= 2.5) & (fb <= 5.5)
+    f0_khz = float(fl[m_f0_l][int(np.argmax(sl[m_f0_l]))])
+
+    xs, ys, Bx, By, Jz, meta = _load_bdot_2d_snapshot(bdot_path, run_num)
+    ph_max = np.angle(Jz[np.unravel_index(int(np.nanargmax(np.abs(Jz))), Jz.shape)])
+    rot = np.exp(-1j * ph_max)
+    Jz_r = np.real(Jz * rot)
+    Bx_r = np.real(Bx * rot)
+    By_r = np.real(By * rot)
+    Jz_norm = Jz_r / float(np.nanmax(np.abs(Jz_r)))
+
+    beta_rat = np.nan
+    if os.path.exists(modes_path):
+        with np.load(modes_path, allow_pickle=True) as md:
+            bkey = f"disp__{matched_puff_run}__beta_e_over_me_mi"
+            if bkey in md.files:
+                beta_rat = float(md[bkey])
+
+    ch_map = {"C1": r"$\dot{B}_x$", "C2": r"$\dot{B}_y$", "C3": r"$\dot{B}_z$"}
+    b_lbl = ch_map.get(bdot_ch, bdot_ch)
+
+    fig = plt.figure(figsize=(14.4, 7.6))
+    gs = GridSpec(3, 2, figure=fig, width_ratios=[1.18, 1.0], wspace=0.22, hspace=0.44)
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_b = fig.add_subplot(gs[1, 0], sharex=ax_a)
+    ax_c = fig.add_subplot(gs[2, 0])
+    ax_d = fig.add_subplot(gs[:, 1])
+
+    # (a) Raw Langmuir Isat
+    ax_a.plot(tl[m_tl], lp_raw[m_tl], color="#1d4ed8", lw=0.9)
+    ax_a.axvspan(w_lo, w_hi, color="0.91", alpha=0.65, zorder=0)
+    ax_a.set_ylabel(r"Langmuir $I_{\mathrm{sat}}$ [V]")
+    ax_a.set_xlim(t_lo, t_hi)
+    ax_a.grid(alpha=0.22)
+    ax_a.set_title(f"(a) Raw Langmuir Probe (Run {run_num}, shot {shot})", fontweight="bold")
+
+    # (b) Raw B-dot (symmetric y-limit scaled to active oscillation so turn-off spike doesn't squash)
+    bd_mv = bd_zero[m_tb] * 1e3
+    bd_win_p99 = float(np.nanpercentile(np.abs(bd_zero[m_wb] * 1e3), 99.5))
+    ylim_b = max(1.5 * bd_win_p99, 100.0)
+    ax_b.plot(tb[m_tb], bd_mv, color="#dc2626", lw=0.8)
+    ax_b.axvspan(w_lo, w_hi, color="0.91", alpha=0.65, zorder=0)
+    ax_b.set_xlabel("Time relative to bias turn-on [ms]")
+    ax_b.set_ylabel(f"B-dot {b_lbl} [mV]")
+    ax_b.set_xlim(t_lo, t_hi)
+    ax_b.set_ylim(-ylim_b, ylim_b)
+    ax_b.grid(alpha=0.22)
+    ax_b.set_title("(b) Raw Magnetic Probe (P28 B-dot, same shot)", fontweight="bold")
+
+    # (c) Normalized FFT magnitude
+    m_fl = fl <= float(fmax_khz)
+    m_fb = fb <= float(fmax_khz)
+    sl_norm = sl[m_fl] / float(sl[m_f0_l].max())
+    sb_norm = sb[m_fb] / float(sb[m_f0_b].max())
+
+    ax_c.plot(fl[m_fl], sl_norm, color="#1d4ed8", lw=1.9, label=r"Langmuir $I_{\mathrm{sat}}$")
+    ax_c.plot(fb[m_fb], sb_norm, color="#dc2626", lw=1.6, ls="--", label=f"B-dot {b_lbl}")
+    for k, lbl in ((1, r"$f_0$"), (2, r"$2f_0$"), (3, r"$3f_0$"), (4, r"$4f_0$")):
+        fk = k * f0_khz
+        if fk > fmax_khz - 0.5:
+            continue
+        mkl = (fl[m_fl] >= fk - 0.5) & (fl[m_fl] <= fk + 0.5)
+        mkb = (fb[m_fb] >= fk - 0.5) & (fb[m_fb] <= fk + 0.5)
+        if not (np.any(mkl) and np.any(mkb)):
+            continue
+        yl, yb = float(sl_norm[mkl].max()), float(sb_norm[mkb].max())
+        yk = max(yl, yb)
+        f_pk = (float(fb[m_fb][mkb][int(np.argmax(sb_norm[mkb]))])
+                if yb >= yl else float(fl[m_fl][mkl][int(np.argmax(sl_norm[mkl]))]))
+        ax_c.annotate(
+            f"{lbl} ({f_pk:.1f} kHz)" if k == 1 else lbl,
+            xy=(f_pk, yk), xytext=(f_pk + 0.45, min(yk + 0.16, 1.13)),
+            fontsize=9.3, fontweight="bold", color="0.15",
+            arrowprops=dict(arrowstyle="->", color="0.35", lw=0.9),
+        )
+    ax_c.set_xlabel("Frequency [kHz]")
+    ax_c.set_ylabel("Normalized FFT")
+    ax_c.set_xlim(0.0, float(fmax_khz))
+    ax_c.set_ylim(0.0, 1.28)
+    ax_c.grid(alpha=0.22)
+    ax_c.legend(loc="upper right", frameon=True, framealpha=0.92)
+    ax_c.set_title(f"(c) FFT Magnitude ({w_lo:.1f}–{w_hi:.1f} ms shaded window)", fontweight="bold")
+
+    # (d) 2-D J_par & B_perp with shot probe markers
+    XX, YY = np.meshgrid(xs, ys)
+    im = ax_d.pcolormesh(XX, YY, Jz_norm, cmap="RdBu_r", vmin=-1.0, vmax=1.0, shading="auto")
+    cb = fig.colorbar(im, ax=ax_d, fraction=0.046, pad=0.03, shrink=0.84)
+    cb.set_label(r"$\mathrm{Re}[J_\parallel] / J_{\max}$")
+
+    bscale = float(np.nanpercentile(np.hypot(Bx_r, By_r), 95))
+    if bscale > 0.0:
+        ax_d.quiver(XX, YY, Bx_r / bscale, By_r / bscale, color="k", scale=14.0, width=0.0042, alpha=0.82)
+
+    ax_d.add_patch(Circle((0.0, 0.0), 2.54, fill=False, ec="#16a34a", ls="-", lw=1.7, label='2" / 4" plates'))
+    ax_d.add_patch(Circle((0.0, 0.0), 5.08, fill=False, ec="#16a34a", ls="--", lw=1.5))
+    ax_d.plot(bd_x, bd_y, marker="*", ms=13, color="#facc15", mec="k", mew=1.0, ls="none", zorder=6,
+              label=f"Shot {shot} B-dot ({bd_x:+.0f}, {bd_y:+.0f})".replace("+0", "0").replace("-0", "0"))
+    ax_d.plot(lp_x, lp_y, marker="D", ms=7.5, color="#38bdf8", mec="k", mew=1.0, ls="none", zorder=6,
+              label=f"Shot {shot} LP ({lp_x:+.0f}, {lp_y:+.0f})".replace("+0", "0").replace("-0", "0"))
+
+    ax_d.set_aspect("equal")
+    ax_d.set_xlim(float(xs[0]), float(xs[-1]))
+    ax_d.set_ylim(float(ys[0]), float(ys[-1]))
+    ax_d.set_xlabel(r"$x$ [cm]")
+    ax_d.set_ylabel(r"$y$ [cm]")
+    note_lines = [f"$|\\delta B_z| / |\\delta B_\\perp| = {meta['bz_over_bperp']:.2f}$"]
+    if np.isfinite(beta_rat):
+        note_lines.append(f"$\\beta_e / (m_e/m_i) = {beta_rat:.1f}$")
+    ax_d.text(
+        0.04, 0.04, "\n".join(note_lines),
+        transform=ax_d.transAxes, fontsize=9.8, va="bottom",
+        bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.86),
+    )
+    ax_d.legend(loc="upper left", frameon=True, framealpha=0.90)
+    ax_d.set_title(
+        rf"(d) 2-D $J_\parallel$ & $\mathbf{{B}}_\perp$ (Run {run_num}, $f_0 = {meta['f0_hz']*1e-3:.1f}$ kHz)",
+        fontweight="bold",
+    )
+
+    fig.subplots_adjust(left=0.065, right=0.945, top=0.94, bottom=0.08)
+    save_name = "fig1_em_instability" if str(run_num) == "26" else f"fig1_em_instability_run{run_num}"
+    finalize_figure(fig, save_fig=_resolve_save(save_fig, save_name), show=show)
+
+
+def plot_sheath_closure(
+    run_num="02",
+    shot=100,
+    *,
+    data_dir=None,
+    ifn=None,
+    modes_npz=None,
+    t_window_ms=(-0.5, 5.5),
+    zoom_window_ms=(2.8, 3.8),
+    shunt_a_per_v=100.0,
+    downsample_q=25,
+    save_fig=True,
+    show=False,
+):
+    """2-panel Port-35 conducting-sheath current closure figure (default: Run 02).
+
+    * **(a)** Full bias-pulse ``I_2"`` and ``I_4"`` currents [A] showing quiet
+      pre-onset DC current erupting into ~4 kHz oscillations at mode onset.
+    * **(b)** Zoomed ``zoom_window_ms`` AC current traces (``dI_2"``, ``dI_4"``)
+      showing equal-and-opposite 180-deg return current between the ``2"`` disc
+      and ``4"`` ring, annotated with ``gamma^2`` and ``dphi`` from
+      ``modes_dispersion_jun2026.npz``.
+    """
+    import Jun2026_modes as jmd
+
+    ddir = data_dir or jmd.DATA_DIR
+    hdf5_path = ifn or _run_hdf5(ddir, run_num)
+    modes_path = modes_npz or os.path.join(ddir, jmd.OUT_NAME)
+
+    run = open_lapd(hdf5_path)
+    tb_ms = np.asarray(run.time_array(scope_name="biasscope"), dtype=float) * 1e3 - jmd.BIASSCOPE_OFFSET_MS
+    st_i2, _ = run.channel("C1", scope_name="biasscope", shots=[int(shot)])
+    st_i4, _ = run.channel("C2", scope_name="biasscope", shots=[int(shot)])
+
+    t_lo, t_hi = float(t_window_ms[0]), float(t_window_ms[1])
+    z_lo, z_hi = float(zoom_window_ms[0]), float(zoom_window_ms[1])
+    m_full = (tb_ms >= t_lo) & (tb_ms <= t_hi)
+    t_raw = tb_ms[m_full]
+    i2_raw = np.asarray(st_i2[0][m_full], dtype=float) * float(shunt_a_per_v)
+    i4_raw = np.asarray(st_i4[0][m_full], dtype=float) * float(shunt_a_per_v)
+
+    # Zero tiny pre-bias DC offset using [-0.5, -0.05] ms (bias off -> 0 A)
+    m_pre = (t_raw >= t_lo) & (t_raw <= -0.05)
+    if np.any(m_pre):
+        i2_raw = i2_raw - float(np.mean(i2_raw[m_pre]))
+        i4_raw = i4_raw - float(np.mean(i4_raw[m_pre]))
+
+    q = max(int(downsample_q), 1)
+    t_ms, i2 = downsample_blockmean(t_raw, i2_raw, q)
+    _, i4 = downsample_blockmean(t_raw, i4_raw, q)
+
+    m_z = (t_ms >= z_lo) & (t_ms <= z_hi)
+    di2 = i2[m_z] - float(np.mean(i2[m_z]))
+    di4 = i4[m_z] - float(np.mean(i4[m_z]))
+
+    g2_24 = dphi_24 = np.nan
+    if os.path.exists(modes_path):
+        with np.load(modes_path, allow_pickle=True) as md:
+            k_g2 = f"bias__{run_num}__g2_I2_I4"
+            k_ph = f"bias__{run_num}__dphi_I4_minus_I2_deg"
+            if k_g2 in md.files:
+                g2_24 = float(md[k_g2])
+            if k_ph in md.files:
+                dphi_24 = abs(float(md[k_ph]))
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8.2, 6.2),
+                                   gridspec_kw={"height_ratios": [1.15, 1.0]})
+
+    # (a) Full bias pulse
+    ax1.axvspan(z_lo, z_hi, color="0.90", alpha=0.65, zorder=0)
+    ax1.plot(t_ms, i2, "-", color="#7c3aed", lw=1.6, label=r'Port-35 2" disc ($I_{2^{\prime\prime}}$)')
+    ax1.plot(t_ms, i4, "-", color="#ea580c", lw=1.6, label=r'Port-35 4" ring ($I_{4^{\prime\prime}}$)')
+    ax1.set_xlim(t_lo, t_hi)
+    ax1.set_ylim(-2.0, max(float(np.max(i2)), float(np.max(i4))) * 1.15)
+    ax1.set_xlabel("Time relative to bias turn-on [ms]")
+    ax1.set_ylabel("End-plate current $I$ [A]")
+    ax1.grid(alpha=0.22)
+    ax1.legend(loc="lower center", frameon=True, framealpha=0.92)
+    ax1.set_title(
+        f"(a) Port-35 End-Plate Currents Across Full Bias Pulse (Run {run_num}, shot {shot})",
+        fontweight="bold",
+    )
+
+    # (b) Zoomed AC closure window
+    ax2.axhline(0.0, color="0.45", ls=":", lw=1.0)
+    ax2.plot(t_ms[m_z], di2, "-", color="#7c3aed", lw=2.0, label=r'$\delta I_{2^{\prime\prime}}$')
+    ax2.plot(t_ms[m_z], di4, "--", color="#ea580c", lw=2.0, label=r'$\delta I_{4^{\prime\prime}}$')
+    ax2.set_xlim(z_lo, z_hi)
+    ymax = max(float(np.max(np.abs(di2))), float(np.max(np.abs(di4)))) * 1.28
+    ax2.set_ylim(-ymax, ymax)
+    ax2.set_xlabel("Time [ms]")
+    ax2.set_ylabel(r"Oscillating current $\delta I$ [A]")
+    ax2.grid(alpha=0.22)
+    if np.isfinite(g2_24) and np.isfinite(dphi_24):
+        ax2.text(
+            0.03, 0.06,
+            f"$\\gamma^2 = {g2_24:.2f},\\; \\Delta\\phi = {dphi_24:.0f}^\\circ$",
+            transform=ax2.transAxes, fontsize=10.0, va="bottom",
+        )
+    ax2.legend(loc="upper right", frameon=True, framealpha=0.92)
+    ax2.set_title(
+        f"(b) Zoomed Shaded Window ({z_lo:.1f}–{z_hi:.1f} ms): $180^\\circ$ Out-of-Phase Closure",
+        fontweight="bold",
+    )
+
+    fig.tight_layout(pad=1.2)
+    save_name = "fig2_sheath_closure" if str(run_num) == "02" else f"fig2_sheath_closure_run{run_num}"
+    finalize_figure(fig, save_fig=_resolve_save(save_fig, save_name), show=show)
+
+
+def animate_mode_propagation(
+    run_num="26",
+    *,
+    matched_puff_run="03",
+    f_exb_khz=None,
+    seamless_loop=True,
+    data_dir=None,
+    bdot_npz=None,
+    modes_npz=None,
+    n_frames=60,
+    fps=15,
+    dpi=100,
+    r_orbit_cm=3.2,
+    save_fig=True,
+    preview_png=None,
+):
+    """Side-by-side GIF animating 2-D ``J_par`` & ``B_perp`` in lab vs. plasma frame.
+
+    Reads ``bdot_2d_jun2026.npz`` (and ``modes_dispersion_jun2026.npz`` for the
+    matched ``E x B`` Doppler frequency when ``f_exb_khz is None``) with zero
+    raw HDF5 reads:
+
+    * **Left (Lab frame):** measured ``m = -1`` dipole rotates CW at ``f_lab``
+      while an ``E x B`` plasma fluid marker rotates CW faster at ``f_ExB``.
+    * **Right (Plasma rest frame, co-rotating with ``E x B``):** fluid marker is
+      stationary and the dipole rotates CCW at ``f_ExB - f_lab``, along the
+      electron ``grad(Te)`` drift and opposite to ``grad(ne)`` drift.
+
+    Returns the saved GIF path (or ``None`` if ``save_fig`` is falsey).
+    """
+    from matplotlib.patches import Circle, FancyArrowPatch
+    from PIL import Image
+    from scipy.ndimage import map_coordinates
+    import Jun2026_bdot_2d as jbd
+    import Jun2026_modes as jmd
+
+    ddir = data_dir or jbd.DATA_DIR
+    bdot_path = bdot_npz or os.path.join(ddir, jbd.OUT_NAME)
+    modes_path = modes_npz or os.path.join(ddir, jmd.OUT_NAME)
+
+    xs, ys, Bx, By, Jz, meta = _load_bdot_2d_snapshot(bdot_path, run_num)
+    cx, cy = meta["center_x_cm"], meta["center_y_cm"]
+    f_lab_khz = meta["f0_hz"] * 1e-3
+
+    if f_exb_khz is None:
+        with np.load(modes_path, allow_pickle=True) as md:
+            f_exb_meas = float(md[f"disp__{matched_puff_run}__f_doppler_exb_hz"]) * 1e-3
+    else:
+        f_exb_meas = float(f_exb_khz)
+
+    if seamless_loop and f_exb_meas > f_lab_khz:
+        # Snap to nearest half-integer harmonic (e.g. 3/2) for an exact loop:
+        # 2 lab turns = 3 E x B turns = 1 full CCW plasma-frame turn (0.7% shift on Run 26).
+        half_mult = max(int(round(2.0 * f_exb_meas / f_lab_khz)), 3)
+        f_exb_eff = 0.5 * half_mult * f_lab_khz
+        t_loop_ms = 2.0 / f_lab_khz
+    else:
+        f_exb_eff = f_exb_meas
+        t_loop_ms = 1.0 / max(abs(f_exb_eff - f_lab_khz), 0.1)
+    f_pl_khz = f_exb_eff - f_lab_khz
+
+    ph0 = np.angle(Jz[np.unravel_index(int(np.nanargmax(np.abs(Jz))), Jz.shape)])
+    Jz = Jz * np.exp(-1j * ph0)
+    Bx = Bx * np.exp(-1j * ph0)
+    By = By * np.exp(-1j * ph0)
+
+    Jz_n = Jz / float(np.nanmax(np.abs(Jz)))
+    b_scale = float(np.nanpercentile(np.hypot(np.abs(Bx), np.abs(By)), 95))
+    Bx_n = Bx / b_scale
+    By_n = By / b_scale
+
+    x0, dx = float(xs[0]), float(xs[1] - xs[0])
+    y0, dy = float(ys[0]), float(ys[1] - ys[0])
+    xf = np.linspace(float(xs[0]), float(xs[-1]), 129)
+    yf = np.linspace(float(ys[0]), float(ys[-1]), 129)
+    XF, YF = np.meshgrid(xf, yf)
+    XQ, YQ = np.meshgrid(xs, ys)
+
+    def _sample_complex(arr, x_pts, y_pts):
+        iy = (y_pts - y0) / dy
+        ix = (x_pts - x0) / dx
+        re = map_coordinates(np.real(arr), [iy, ix], order=1, mode="constant", cval=0.0)
+        im = map_coordinates(np.imag(arr), [iy, ix], order=1, mode="constant", cval=0.0)
+        return re + 1j * im
+
+    Jz_lab_f = _sample_complex(Jz_n, XF, YF)
+
+    def _eval_frame(t_ms):
+        wt = 2.0 * np.pi * f_lab_khz * t_ms
+        alpha = 2.0 * np.pi * f_exb_eff * t_ms
+        phase = np.exp(-1j * wt)
+
+        jz_l = np.real(Jz_lab_f * phase)
+        bx_l = np.real(Bx_n * phase)
+        by_l = np.real(By_n * phase)
+
+        ca, sa = np.cos(alpha), np.sin(alpha)
+        dx_f, dy_f = XF - cx, YF - cy
+        xl_f = cx + dx_f * ca + dy_f * sa
+        yl_f = cy - dx_f * sa + dy_f * ca
+        jz_p = np.real(_sample_complex(Jz_n, xl_f, yl_f) * phase)
+
+        dx_q, dy_q = XQ - cx, YQ - cy
+        xl_q = cx + dx_q * ca + dy_q * sa
+        yl_q = cy - dx_q * sa + dy_q * ca
+        bx_lq = np.real(_sample_complex(Bx_n, xl_q, yl_q) * phase)
+        by_lq = np.real(_sample_complex(By_n, xl_q, yl_q) * phase)
+        bx_p = bx_lq * ca - by_lq * sa
+        by_p = bx_lq * sa + by_lq * ca
+        return jz_l, bx_l, by_l, jz_p, bx_p, by_p, np.pi / 2.0 - alpha
+
+    def _add_curved_arrow(ax, r, ang1_deg, ang2_deg, color, label, rad, text_ang_deg, r_text):
+        a1, a2 = np.deg2rad(ang1_deg), np.deg2rad(ang2_deg)
+        arr = FancyArrowPatch(
+            (cx + r * np.cos(a1), cy + r * np.sin(a1)),
+            (cx + r * np.cos(a2), cy + r * np.sin(a2)),
+            connectionstyle=f"arc3,rad={rad}",
+            arrowstyle="-|>,head_length=6.5,head_width=4.0",
+            color=color, lw=2.3, zorder=7,
+        )
+        ax.add_patch(arr)
+        at = np.deg2rad(text_ang_deg)
+        ax.text(
+            cx + r_text * np.cos(at), cy + r_text * np.sin(at),
+            label, color=color, fontsize=9.2, fontweight="bold", ha="center", va="center",
+            bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.82),
+            zorder=8,
+        )
+
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(11.4, 5.5), dpi=int(dpi))
+    fig.subplots_adjust(left=0.06, right=0.89, top=0.85, bottom=0.11, wspace=0.16)
+
+    jz_l0, bx_l0, by_l0, jz_p0, bx_p0, by_p0, th0 = _eval_frame(0.0)
+    ext = [float(xs[0]), float(xs[-1]), float(ys[0]), float(ys[-1])]
+    im_l = ax_l.imshow(jz_l0, extent=ext, origin="lower", cmap="RdBu_r", vmin=-1.0, vmax=1.0)
+    qv_l = ax_l.quiver(XQ, YQ, bx_l0, by_l0, color="k", scale=14.0, width=0.0045, alpha=0.78)
+    im_r = ax_r.imshow(jz_p0, extent=ext, origin="lower", cmap="RdBu_r", vmin=-1.0, vmax=1.0)
+    qv_r = ax_r.quiver(XQ, YQ, bx_p0, by_p0, color="k", scale=14.0, width=0.0045, alpha=0.78)
+
+    for ax in (ax_l, ax_r):
+        ax.add_patch(Circle((cx, cy), float(r_orbit_cm), fill=False, ec="#15803d",
+                            ls="--", lw=1.1, alpha=0.65, zorder=4))
+        ax.set_aspect("equal")
+        ax.set_xlim(ext[0], ext[1])
+        ax.set_ylim(ext[2], ext[3])
+        ax.set_xlabel(r"$x$ [cm]")
+    ax_l.set_ylabel(r"$y$ [cm]")
+    ax_r.set_yticklabels([])
+
+    dot_l, = ax_l.plot(cx + r_orbit_cm * np.cos(th0), cy + r_orbit_cm * np.sin(th0),
+                       "o", ms=9.5, color="#22c55e", mec="k", mew=1.2, zorder=9,
+                       label=rf"$E\times B$ plasma ({f_exb_meas:.1f} kHz CW)")
+    ax_r.plot(cx, cy + r_orbit_cm, "o", ms=9.5, color="#22c55e", mec="k", mew=1.2, zorder=9,
+              label=r"$E\times B$ plasma (fixed)")
+
+    _add_curved_arrow(ax_l, 5.3, 165, 110, "0.15", f"Mode ({f_lab_khz:.1f} kHz CW)", -0.28, 140, 6.9)
+    _add_curved_arrow(ax_r, 5.3, 110, 165, "#dc2626", r"$\nabla T_e$ drift (CCW)", 0.28, 142, 6.9)
+    _add_curved_arrow(ax_r, 5.3, 250, 195, "#1d4ed8", r"$\nabla n_e$ drift (CW)", -0.28, 222, 6.9)
+
+    ax_l.legend(loc="lower left", frameon=True, framealpha=0.88, fontsize=8.6)
+    ax_r.legend(loc="lower left", frameon=True, framealpha=0.88, fontsize=8.6)
+    ax_l.set_title("Lab Frame\n(Mode lags behind CW $E\\times B$ flow)", fontweight="bold")
+    ax_r.set_title(
+        f"Plasma Rest Frame (co-rotating with $E\\times B$)\n"
+        f"(Mode moves CCW at {abs(f_pl_khz):.1f} kHz — with $\\nabla T_e$)",
+        fontweight="bold",
+    )
+
+    cax = fig.add_axes([0.905, 0.14, 0.018, 0.68])
+    cb = fig.colorbar(im_r, cax=cax)
+    cb.set_label(r"$\mathrm{Re}[J_\parallel] / J_{\max}$")
+    time_txt = fig.suptitle(f"Run {run_num} ({meta['b0_g']:.0f} G)  —  t = 0.00 ms",
+                            fontsize=12.0, fontweight="bold", y=0.975)
+
+    n_fr = int(n_frames)
+    frames = []
+    preview_idx = {0, n_fr // 4, n_fr // 2}
+    preview_imgs = []
+    for k in range(n_fr):
+        t_ms = t_loop_ms * (k / n_fr)
+        jz_l, bx_l, by_l, jz_p, bx_p, by_p, th_fl = _eval_frame(t_ms)
+        im_l.set_data(jz_l)
+        qv_l.set_UVC(bx_l, by_l)
+        im_r.set_data(jz_p)
+        qv_r.set_UVC(bx_p, by_p)
+        dot_l.set_data([cx + r_orbit_cm * np.cos(th_fl)], [cy + r_orbit_cm * np.sin(th_fl)])
+        time_txt.set_text(f"Run {run_num} ({meta['b0_g']:.0f} G)  —  t = {t_ms:.2f} ms")
+        fig.canvas.draw()
+        rgba = np.asarray(fig.canvas.buffer_rgba())
+        img = Image.fromarray(rgba[:, :, :3])
+        frames.append(img.quantize(colors=128, method=Image.Quantize.MEDIANCUT))
+        if preview_png and k in preview_idx:
+            preview_imgs.append(img.copy())
+    plt.close(fig)
+
+    save_name = "fig3_mode_propagation" if str(run_num) == "26" else f"fig3_mode_propagation_run{run_num}"
+    out_gif = plot_utils.fig_path(save_name, FIG_SUBDIR, ext=".gif") if save_fig is True else (save_fig or None)
+    if out_gif:
+        os.makedirs(os.path.dirname(os.path.abspath(out_gif)), exist_ok=True)
+        frames[0].save(
+            out_gif,
+            save_all=True,
+            append_images=frames[1:],
+            duration=max(int(round(1000.0 / float(fps))), 20),
+            loop=0,
+            optimize=True,
+        )
+        print(f"Animation saved to: {out_gif} ({n_fr} frames)")
+
+    if preview_png and preview_imgs:
+        w, h = preview_imgs[0].size
+        strip = Image.new("RGB", (w, h * len(preview_imgs)))
+        for i, im in enumerate(preview_imgs):
+            strip.paste(im, (0, i * h))
+        strip.save(preview_png)
+
+    return out_gif
 
 
 if __name__ == '__main__':
