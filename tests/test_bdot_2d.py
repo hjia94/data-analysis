@@ -153,21 +153,21 @@ class TestElectromagnetic2DHelpers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out_npz = os.path.join(tmp, "bdot_2d.npz")
             with mock.patch.object(jb2, "analyze_run", return_value=fake) as m_ar:
-                jb2.batch_all(data_dir=tmp, runs=["26", "31"], out_path=out_npz)
+                jb2.batch_all(data_dir=tmp, runs=["26", "31"], out_path=out_npz, bdot_cal=None)
                 self.assertEqual(m_ar.call_count, 2)
 
             # Matching settings skip cleanly
             with mock.patch.object(jb2, "analyze_run") as m_ar:
-                jb2.batch_all(data_dir=tmp, runs=["26", "31"], out_path=out_npz, overwrite=False)
+                jb2.batch_all(data_dir=tmp, runs=["26", "31"], out_path=out_npz, bdot_cal=None, overwrite=False)
                 m_ar.assert_not_called()
 
             # Mismatched tmin_ms raises ValueError
             with self.assertRaises(ValueError):
-                jb2.batch_all(data_dir=tmp, runs=["26"], tmin_ms=1.5, out_path=out_npz, overwrite=False)
+                jb2.batch_all(data_dir=tmp, runs=["26"], tmin_ms=1.5, out_path=out_npz, bdot_cal=None, overwrite=False)
 
             # Partial overwrite refreshes only Run 26 while preserving Run 31
             with mock.patch.object(jb2, "analyze_run", return_value=fake) as m_ar:
-                jb2.batch_all(data_dir=tmp, runs=["26"], tmin_ms=1.5, out_path=out_npz, overwrite=True)
+                jb2.batch_all(data_dir=tmp, runs=["26"], tmin_ms=1.5, out_path=out_npz, bdot_cal=None, overwrite=True)
                 self.assertEqual(m_ar.call_count, 1)
             with np.load(out_npz) as d:
                 self.assertAlmostEqual(float(d["26__tmin_ms"]), 1.5)

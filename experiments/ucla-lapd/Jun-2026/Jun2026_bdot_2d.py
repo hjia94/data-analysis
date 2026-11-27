@@ -76,6 +76,8 @@ REF_SCOPE_CHAN = ("lpscope", "C3")
 LP_SCOPE_CHAN = ("lpscope", "C2")
 BDOT_CHANNELS = (("C1", "Bx"), ("C2", "By"), ("C3", "Bz"))
 
+_UNSET = object()
+
 DEFAULT_TMIN_MS = 2.4             # strictly post-onset for Run 26 (1.40 ms) & Run 31 (2.25 ms)
 DEFAULT_TMAX_MS = 4.8
 DEFAULT_WINDOW = "hann"
@@ -85,7 +87,7 @@ DEFAULT_ON_POLARITY_MISMATCH = "raise"  # "raise" | "flip" | "ignore"
 DEFAULT_ABS_COIL_POLARITY_VERIFIED = False  # True once one in-plane coil abs sign is bench-verified
 DEFAULT_MJ_GAMMA2_MIN = 0.5       # transverse B-dot coherence threshold on current-bearing interior
 DEFAULT_GRID_STEP_CM = 1.0
-DEFAULT_BDOT_CAL = None           # BdotCalibration or .npz path (e.g. C16-bdot-calibration.npz)
+DEFAULT_BDOT_CAL = r"D:\data\LAPD\BDOT CALIBRATION\Bdot-10T-C16\C16-bdot-calibration.npz"
 DEFAULT_BDOT_AREA_M2 = None       # bare coil area [m^2]: scalar, (3,), or (3, 3)
 DEFAULT_BDOT_GAIN = None          # None: auto-read from HDF5 P28 chain when calibrated (1.0 uncalibrated)
 DEFAULT_BDOT_ATTEN_DB = None      # None: auto-read from HDF5 P28 chain when bdot_gain is None (else 0.0)
@@ -119,6 +121,8 @@ def _run_ifn(data_dir, run_num):
 
 def _resolve_bdot_calibration(bdot_cal=None, bdot_area_m2=None):
     """Normalize ``bdot_cal`` / ``bdot_area_m2`` -> ``(cal_or_area, area_matrix_3x3, probe_id)``."""
+    if bdot_cal is _UNSET:
+        bdot_cal = None if bdot_area_m2 is not None else DEFAULT_BDOT_CAL
     if bdot_cal is not None and bdot_area_m2 is not None:
         raise ValueError("Pass either bdot_cal or bdot_area_m2, not both")
     if bdot_cal is not None:
@@ -481,7 +485,7 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
                 by_sign=DEFAULT_BY_SIGN,
                 on_polarity_mismatch=DEFAULT_ON_POLARITY_MISMATCH,
                 abs_coil_polarity_verified=DEFAULT_ABS_COIL_POLARITY_VERIFIED,
-                bdot_cal=DEFAULT_BDOT_CAL,
+                bdot_cal=_UNSET,
                 bdot_area_m2=DEFAULT_BDOT_AREA_M2,
                 bdot_gain=DEFAULT_BDOT_GAIN,
                 bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
@@ -660,7 +664,7 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
               by_sign=DEFAULT_BY_SIGN,
               on_polarity_mismatch=DEFAULT_ON_POLARITY_MISMATCH,
               abs_coil_polarity_verified=DEFAULT_ABS_COIL_POLARITY_VERIFIED,
-              bdot_cal=DEFAULT_BDOT_CAL,
+              bdot_cal=_UNSET,
               bdot_area_m2=DEFAULT_BDOT_AREA_M2,
               bdot_gain=DEFAULT_BDOT_GAIN,
               bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,

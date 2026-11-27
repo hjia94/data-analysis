@@ -68,14 +68,15 @@ OUT_NAME = "modes_dispersion_jun2026.npz"
 DZ_P29_P25_M = 1.28
 
 # Bdot-10T-C16 HDF5 run descriptions record `2.5BLP => X10 => 2.5BLP => X100`
-# (G = 1000.0), while the bench-calibrated 3x3 effective area lives in
-# `C16-bdot-calibration.npz` (from Jun2026_bdot_cal.py). Leave bdot_cal=None by
-# default so estimate_bdot_amplitude reports raw V_perp and V_perp / omega
-# without fabricating Tesla/Gauss amplitudes; when bdot_cal or bdot_area_m2 is
-# supplied, bdot_gain=None auto-reads the P28 signal chain from each run's HDF5
-# description (raising ValueError if absent rather than silently using 1.0).
+# (G = 1000.0), while the campaign-independent bare 3x3 effective area `.npz`
+# is generated once per probe by `experiments/ucla-lapd/bdot_cal.py` (or
+# standalone `nAcalc.py`). By default, estimate_bdot_amplitude loads
+# `DEFAULT_BDOT_CAL` and auto-reads the P28 signal chain from each run's HDF5
+# description (raising ValueError if absent rather than silently using 1.0);
+# pass `bdot_cal=None` explicitly for uncalibrated raw V_perp / omega output.
+_UNSET = object()
 BDOT_PROBE_PORT = "P28"
-DEFAULT_BDOT_CAL = None
+DEFAULT_BDOT_CAL = r"D:\data\LAPD\BDOT CALIBRATION\Bdot-10T-C16\C16-bdot-calibration.npz"
 DEFAULT_BDOT_AREA_M2 = None
 DEFAULT_BDOT_GAIN = None
 DEFAULT_BDOT_ATTEN_DB = None
@@ -312,7 +313,7 @@ def analyze_axial_kpar(data_dir=DATA_DIR, onset_table=None, *,
 
 
 def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
-                            bdot_cal=DEFAULT_BDOT_CAL,
+                            bdot_cal=_UNSET,
                             bdot_area_m2=DEFAULT_BDOT_AREA_M2,
                             bdot_gain=DEFAULT_BDOT_GAIN,
                             bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
@@ -321,14 +322,15 @@ def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
     """Measure P28 B-dot p95 RMS voltage and (when calibrated) ``delta_B_perp / B_0``.
 
     Always computes raw ``v_perp_p95_v`` [V] and ``v_perp_over_omega_vs``
-    [V*s = ``gain * area * delta_B_perp``]. When bench-calibrated ``bdot_cal``
-    (:class:`BdotCalibration` or ``.npz`` path) or ``bdot_area_m2`` (scalar,
-    length-3, or 3x3) is provided, divides out ``bdot_gain``/``bdot_atten_db``
-    to real probe-terminal voltage and applies 3-axis
-    :func:`data_analysis.plasma.bdot.voltage_to_bdot` **before** taking RMS,
-    ``hypot(dBx, dBy)``, and the 95th percentile; otherwise calibrated fields
-    stay ``NaN`` with ``bdot_calibrated=False``.
+    [V*s = ``gain * area * delta_B_perp``]. Defaults to ``DEFAULT_BDOT_CAL``
+    (bare 3x3 ``.npz``) and auto-reads ``bdot_gain``/``bdot_atten_db`` from the
+    run's P28 HDF5 description; converts to real probe-terminal voltage and
+    applies 3-axis :func:`data_analysis.plasma.bdot.voltage_to_bdot` **before**
+    taking RMS, ``hypot(dBx, dBy)``, and the 95th percentile. Pass
+    ``bdot_cal=None`` explicitly for uncalibrated output.
     """
+    if bdot_cal is _UNSET:
+        bdot_cal = None if bdot_area_m2 is not None else DEFAULT_BDOT_CAL
     if bdot_cal is not None and bdot_area_m2 is not None:
         raise ValueError("Pass either bdot_cal or bdot_area_m2, not both")
 
@@ -640,7 +642,7 @@ def build_dispersion_table(data_dir=DATA_DIR, *, r_cm=DISPERSION_R_CM,
 
 
 def batch_all(data_dir=DATA_DIR, out_path=None, *, include_biasscope=True,
-              include_bdot_amp=True, bdot_cal=DEFAULT_BDOT_CAL,
+              include_bdot_amp=True, bdot_cal=_UNSET,
               bdot_area_m2=DEFAULT_BDOT_AREA_M2,
               bdot_gain=DEFAULT_BDOT_GAIN,
               bdot_atten_db=DEFAULT_BDOT_ATTEN_DB,
