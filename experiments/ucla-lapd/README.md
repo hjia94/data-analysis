@@ -131,8 +131,8 @@
 |---|---|---|
 | Upstream/downstream face ratio | [`face_ratio`](../../src/data_analysis/plasma/mach.py#L59) | `j+/j-` per tip pair, masked by [`valid_current_mask`](../../src/data_analysis/plasma/mach.py#L46) |
 | Area ratio from two orientations | [`area_ratio`](../../src/data_analysis/plasma/mach.py#L85) | geometry-only; cannot be fooled by a design-matrix sign error, so it cross-checks `fit_calibration` |
-| Mach number, two opposing orientations | [`mach_number`](../../src/data_analysis/plasma/mach.py#L106) | `M = flow_sign·(K/4)·ln(R_a/R_b)` (`flow_sign=-1` when `+` tip faces `+axis`); κ cancels in the ratio |
-| Mach number, one orientation + known κ | [`mach_single`](../../src/data_analysis/plasma/mach.py#L117) | `M = flow_sign·(K/2)·ln(R/κ)` (`flow_sign=-1` for lab-axis flow when `+` tip faces `+axis`); limited by κ's systematic error |
+| Mach number, two opposing orientations | [`mach_number`](../../src/data_analysis/plasma/mach.py#L106) | `M = flow_sign·(K/2)·ln(R_a/R_b)` (`K = M_c = 0.45`, `flow_sign=-1` when `+` tip faces `+axis`); κ cancels in the ratio |
+| Mach number, one orientation + known κ | [`mach_single`](../../src/data_analysis/plasma/mach.py#L118) | `M = flow_sign·K·ln(R/κ)` (`K = M_c = 0.45`, `flow_sign=-1` for lab-axis flow when `+` tip faces `+axis`); limited by κ's systematic error |
 | Mach → velocity via sound speed | [`flow_velocity`](../../src/data_analysis/plasma/mach.py#L114) | `v = M·c_s ∝ sqrt(T_e)`; **`T_e` is an input assumption**, so a wrong `T_e` rescales every velocity without changing any diagnostic |
 
 ## 12. B-dot probes and gridded field operators

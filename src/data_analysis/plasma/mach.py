@@ -1,15 +1,17 @@
 """Mach-probe estimator maths -- campaign-agnostic.
 
 A Mach probe reads ion saturation current on two opposed faces of one axis. In
-the magnetised fluid model, the upstream-facing tip collects enhanced current:
+the magnetised fluid model (Hutchinson, *Phys. Fluids* **30**, 3777 (1987)),
+the ratio of opposed-face currents obeys ``R = j_+/j_- = kappa * exp(s * M_lab / K)``
+with ``K = M_c = 0.45``, i.e. per face:
 
-    j_pm = j_sat * kappa_pm * exp(pm * s * M_lab / K)
+    j_pm = j_sat * kappa_pm * exp(pm * s * M_lab / (2 * K))
 
 where ``s = flow_sign`` maps face orientation to the lab axis: when the
 hardware ``+`` tip physically faces ``+axis`` (e.g. ``X+`` faces ``+x``,
 ``Y+`` faces ``+y``, ``Z+`` faces ``+z``), plasma flowing *toward* ``+axis``
 strikes the ``-`` face (``j_- > j_+``), so ``s = FLOW_SIGN_PLUS_FACING_AXIS = -1``
-and ``M_lab = -(K/2) ln(R/kappa)`` is positive for flow along ``+axis``.
+and ``M_lab = -K ln(R/kappa)`` is positive for flow along ``+axis``.
 If a probe's ``+`` tip instead faces ``-axis`` (looking upstream into
 ``+axis`` flow), pass ``flow_sign=+1``.
 
@@ -18,7 +20,7 @@ on a fixed DAQ channel -- *not* "the face pointing upstream". Under that
 convention a 180 deg rotation inverts the flow exponent while leaving kappa
 alone::
 
-    R_a = kappa * exp(+2 s M_lab / K)        R_b = kappa * exp(-2 s M_lab / K)
+    R_a = kappa * exp(+s M_lab / K)        R_b = kappa * exp(-s M_lab / K)
 
 so the **product** isolates the area ratio and the **ratio** isolates the flow.
 Flow-referenced treatments (where ``J_+`` means the upstream face by definition)
@@ -42,14 +44,16 @@ import numpy as np
 from data_analysis.plasma.formulas import ion_sound_speed
 
 # Magnetised fluid model, Hutchinson, Phys. Fluids 30, 3777 (1987). The
-# calibration constant relating ln(j_+/j_-) to the Mach number; unmagnetised and
-# kinetic models give other values, so it is a parameter everywhere below.
+# calibration constant M_c relating the current ratio R = j_+/j_- to the Mach
+# number via R = kappa * exp(s * M / K) <=> M = s * K * ln(R / kappa);
+# unmagnetised and kinetic models give other values, so it is a parameter
+# everywhere below.
 K_HUTCHINSON = 0.45
 
 #: Authoritative lab-axis sign convention when the ``+`` tip faces ``+axis``
 #: (e.g. ``X+`` faces ``+x``, ``Y+`` faces ``+y``, ``Z+`` faces ``+z``):
 #: flow moving along ``+axis`` strikes the ``-`` face (``j_- > j_+``), so
-#: ``M_lab = FLOW_SIGN_PLUS_FACING_AXIS * (K/2) * ln(R/kappa)`` is positive for
+#: ``M_lab = FLOW_SIGN_PLUS_FACING_AXIS * K * ln(R/kappa)`` is positive for
 #: flow along ``+axis``. Pass ``flow_sign=+1`` only if ``+`` faces ``-axis``.
 FLOW_SIGN_PLUS_FACING_AXIS = -1
 
@@ -104,26 +108,26 @@ def area_ratio(R_a, R_b):
 
 
 def mach_number(R_a, R_b, K=K_HUTCHINSON, flow_sign=FLOW_SIGN_PLUS_FACING_AXIS):
-    """Lab-axis Mach number from two opposing orientations -> ``flow_sign * (K/4) ln(R_a/R_b)``.
+    """Lab-axis Mach number from two opposing orientations -> ``flow_sign * (K/2) ln(R_a/R_b)``.
 
     The **ratio**: kappa cancels, leaving the flow along the lab axis of
     orientation ``a`` (positive along ``+axis`` when ``flow_sign=-1`` and the
     ``+`` face points toward ``+axis``). Swapping ``R_a``/``R_b`` flips sign.
     """
-    return float(flow_sign) * (K / 4.0) * np.log(
+    return float(flow_sign) * (K / 2.0) * np.log(
         np.asarray(R_a, dtype=float) / np.asarray(R_b, dtype=float)
     )
 
 
 def mach_single(R, kappa, K=K_HUTCHINSON, flow_sign=FLOW_SIGN_PLUS_FACING_AXIS):
-    """Lab-axis Mach number from one orientation given kappa -> ``flow_sign * (K/2) ln(R/kappa)``.
+    """Lab-axis Mach number from one orientation given kappa -> ``flow_sign * K ln(R/kappa)``.
 
     With ``flow_sign=FLOW_SIGN_PLUS_FACING_AXIS`` (``-1``), positive ``M``
     denotes plasma flowing toward ``+axis`` when the ``+`` tip physically faces
     ``+axis`` (upstream-collecting ``-`` tip sees higher current).
     Accuracy is limited by kappa's systematic error, not by shot noise.
     """
-    return float(flow_sign) * (K / 2.0) * np.log(
+    return float(flow_sign) * float(K) * np.log(
         np.asarray(R, dtype=float) / np.asarray(kappa, dtype=float)
     )
 
@@ -292,7 +296,7 @@ def fit_calibration(ln_R, sigma, design):
     Solves ``ln_R = design @ params`` with weights ``1/sigma``, for the linear
     model that one row per measurement expresses::
 
-        ln R(axis, run) = ln kappa_axis + (2/K) * s * M_lab
+        ln R(axis, run) = ln kappa_axis + (1/K) * s * M_lab
 
     Returns ``(params, cov, residuals, chi2_dof)``: the fitted parameter vector in
     the caller's column order, its covariance, per-row residuals in ``ln R``, and

@@ -36,7 +36,7 @@ drift-wave literature (Pace et al. 2008; Maggs & Morales 2011; Friedman et al.
    cylindrical shear-flow energy production
    ``P_shear = -<dM_r * dM_theta> * r * d(M_theta / r) / dr``, AND an explicit
    benchmark of the finite-tip ``grad(n)`` artifact
-   ``-(K_H * d / 4) * d<(dn/n)^2>/dr`` against measured ``<dn/n * dM_r>`` (which
+   ``-(K_H * d / 2) * d<(dn/n)^2>/dr`` against measured ``<dn/n * dM_r>`` (which
    shows raw Mach-probe radial flux is gradient-confounded at ``0.3–1.9x``).
 5. **Nonlinear wave steepening vs. symmetric wall-curvature decomposition:**
    Computes the bispectral biphase ``beta = phi_2 - 2*phi_1`` (separating
@@ -779,8 +779,8 @@ def _eich_manz_shear_transfer(
 def _mach_linear_tip_bracket(recs, kappa, fs_hz, f0_hz):
     """Model-dependence bracket: apparent M steepening if tip currents, not M, were linear sinusoids.
 
-    Under Hutchinson's exponential Mach law ``I_+- ~ n * exp(-+ M / K_H)``, the
-    log-ratio ``M = -(K_H/2) ln(I_+ / (kappa I_-))`` cancels density fluctuations
+    Under Hutchinson's exponential Mach law ``I_+- ~ n * exp(-+ M / (2 K_H))``, the
+    log-ratio ``M = -K_H ln(I_+ / (kappa I_-))`` cancels density fluctuations
     exactly and returns ``0`` steepening for a pure-sinusoid ``M`` even at large
     ``dn/n``.  Conversely, if the probe tip response at ``~4 kHz`` were linear
     (purely sinusoidal tip currents rather than exponential), passing those
@@ -892,7 +892,7 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
     # Collect wall [2.5, 4.5) cm positions for 4-quadrant Cartesian-artifact audit
     quad_th_deg, quad_crt, quad_cnr = [], [], []
     # Band-level harmonic steepening on density (isat0) and velocity (mr, mt),
-    # plus an unsubtracted linear-tip model-dependence bracket for M = -(K_H/2) ln(I_+/I_-).
+    # plus an unsubtracted linear-tip model-dependence bracket for M = -K_H ln(I_+/I_-).
     steep_tags = ("isat0", "mr", "mt")
     steep_metrics = ("a2_a1", "biphase_lock", "biphase_lock_crit", "biphase_deg",
                      "curvature_comp", "steepening_comp", "skewness",
@@ -1071,16 +1071,16 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
     )
 
     # Finite-probe-size grad(n) artifact benchmark for typical Mach tip separations d = 0.3, 0.5 cm.
-    # Under mach.py's convention M = -(K_H / 2) * ln(I_+ / (kappa I_-)) with K_H = 0.45:
-    #   dM_grad,r = -(K_H / 2) * d * d(dn/n)/dr
-    #   <dn/n * dM_grad,r>   = -(K_H / 4) * d * d<(dn/n)^2>/dr
-    #   <dM_grad,r * dM_g,t> = +(K_H * d / 2)^2 * (m * dPhi/dr / r) * <(dn/n)^2>
+    # Under Hutchinson's law M = -K_H * ln(I_+ / (kappa I_-)) with K_H = M_c = 0.45:
+    #   dM_grad,r = -K_H * d * d(dn/n)/dr
+    #   <dn/n * dM_grad,r>   = -(K_H / 2) * d * d<(dn/n)^2>/dr
+    #   <dM_grad,r * dM_g,t> = +(K_H * d)^2 * (m * dPhi/dr / r) * <(dn/n)^2>
     dn2 = dn_band ** 2
     ddn2_dr = np.gradient(dn2, r_mids)
-    flux_grad_d0p3 = -(K_HUTCHINSON / 4.0) * 0.3 * ddn2_dr
-    flux_grad_d0p5 = -(K_HUTCHINSON / 4.0) * 0.5 * ddn2_dr
-    rs_grad_d0p3 = ((K_HUTCHINSON * 0.3 / 2.0) ** 2) * (m_times_dphi_dr / r_mids) * dn2
-    rs_grad_d0p5 = ((K_HUTCHINSON * 0.5 / 2.0) ** 2) * (m_times_dphi_dr / r_mids) * dn2
+    flux_grad_d0p3 = -(K_HUTCHINSON / 2.0) * 0.3 * ddn2_dr
+    flux_grad_d0p5 = -(K_HUTCHINSON / 2.0) * 0.5 * ddn2_dr
+    rs_grad_d0p3 = ((K_HUTCHINSON * 0.3) ** 2) * (m_times_dphi_dr / r_mids) * dn2
+    rs_grad_d0p5 = ((K_HUTCHINSON * 0.5) ** 2) * (m_times_dphi_dr / r_mids) * dn2
     flux_confounded = bool(np.any(np.abs(flux_grad_d0p3) >= 0.5 * np.abs(flux_f0_band)))
 
     # 4-quadrant wall audit on [2.5, 4.5) cm

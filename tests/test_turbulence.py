@@ -91,20 +91,23 @@ class TestTurbulenceHelpers(unittest.TestCase):
         w = 2.0 * np.pi * 4000.0
         # Construct X+, X-, Y+, Y- with known dn/n (10%), dM_r in quadrature (+90 deg to dn),
         # and dM_theta in phase with dM_r (so c_nr ~ 0, c_rt ~ +1)!
-        K = 1.34
+        from data_analysis.plasma.mach import K_HUTCHINSON
+
         dn = 0.10 * np.cos(w * t)
         dmr = 0.05 * np.sin(w * t)
         dmt = 0.05 * np.sin(w * t)
-        # mach_single uses FLOW_SIGN = -1 -> I_+/I_- = kappa * exp(-K * M)
-        xp = (1.0 + dn) * np.exp(-0.5 * K * dmr)
-        xm = (1.0 + dn) * np.exp(+0.5 * K * dmr)
-        yp = (1.0 + dn) * np.exp(-0.5 * K * dmt)
-        ym = (1.0 + dn) * np.exp(+0.5 * K * dmt)
+        # mach_single uses FLOW_SIGN = -1 -> I_+- = n * exp(-+ M / (2 * K_H)), I_+/I_- = exp(-M / K_H)
+        xp = (1.0 + dn) * np.exp(-dmr / (2.0 * K_HUTCHINSON))
+        xm = (1.0 + dn) * np.exp(+dmr / (2.0 * K_HUTCHINSON))
+        yp = (1.0 + dn) * np.exp(-dmt / (2.0 * K_HUTCHINSON))
+        ym = (1.0 + dn) * np.exp(+dmt / (2.0 * K_HUTCHINSON))
         ch_d = {k: np.tile(v, (4, 1)) for k, v in (("X+", xp), ("X-", xm), ("Y+", yp), ("Y-", ym))}
         rec = jtb._compute_mach_transport_at_position(
             ch_d, {"X": 1.0, "Y": 1.0}, dx_cm=3.0, dy_cm=0.0, fs_hz=fs, ref_ds=np.tile(1.0 + dn, (4, 1))
         )
         self.assertIsNotNone(rec)
+        self.assertAlmostEqual(rec["mr_rms"], float(np.std(dmr)), delta=0.005)
+        self.assertAlmostEqual(rec["mt_rms"], float(np.std(dmt)), delta=0.005)
         self.assertAlmostEqual(rec["c_nr"], 0.0, delta=0.05)
         self.assertAlmostEqual(rec["c_rt"], +1.0, delta=0.05)
         self.assertGreater(rec["rs_f0"], 0.0)
@@ -284,10 +287,10 @@ class TestTurbulenceHelpers(unittest.TestCase):
 
     def test_mach_linear_tip_bracket_exponential_vs_linear_tip_models(self):
         # Verify BOTH sides of the Mach model-dependence bracket:
-        # (a) Under Hutchinson's exponential law I_+- = n * exp(-+ M / K_H), a pure
+        # (a) Under Hutchinson's exponential law I_+- = n * exp(-+ M / (2 K_H)), a pure
         #     sinusoidal M + 20% sinusoidal density wave yields 0.000 measured M
         #     steepening (exact density cancellation), while the linear-tip bracket
-        #     reads ~0.09 (proving the bracket must NOT be subtracted).
+        #     reads ~0.10 (proving the bracket must NOT be subtracted).
         # (b) Under linear sinusoidal tips (20% / 20%, 20 deg lag), the bracket
         #     reproduces ~0.10 apparent M steepening while geometric-mean Isat_0 ~ 0.
         from data_analysis.plasma.mach import K_HUTCHINSON, mach_single
@@ -296,13 +299,14 @@ class TestTurbulenceHelpers(unittest.TestCase):
         t = np.arange(0, 2000) / fs
         w = 2.0 * np.pi * 4000.0
         n_t = 1.0 + 0.20 * np.cos(w * t)
-        m_true = 0.15 * np.sin(w * t)
-        # mach_single: M = -(K_H / 2) * ln(I_+/I_-) -> I_+- = n * exp(-+ M / K_H)
-        xp_h = np.tile(n_t * np.exp(-m_true / K_HUTCHINSON), (6, 1))
-        xm_h = np.tile(n_t * np.exp(+m_true / K_HUTCHINSON), (6, 1))
+        m_true = 0.30 * np.sin(w * t)
+        # mach_single: M = -K_H * ln(I_+/I_-) -> I_+- = n * exp(-+ M / (2 * K_H))
+        xp_h = np.tile(n_t * np.exp(-m_true / (2.0 * K_HUTCHINSON)), (6, 1))
+        xm_h = np.tile(n_t * np.exp(+m_true / (2.0 * K_HUTCHINSON)), (6, 1))
         yp_h = np.tile(n_t, (6, 1))
         ym_h = np.tile(n_t, (6, 1))
         m_meas = mach_single(xp_h / xm_h, 1.0)
+        np.testing.assert_allclose(m_meas[0], m_true, atol=1e-12)
         st_meas = harmonic_steepening(m_meas, fs, 4000.0, gate_unlocked=False)
         self.assertLess(st_meas.a2_a1_med, 0.005)
         self.assertAlmostEqual(abs(st_meas.steepening_comp), 0.0, delta=0.005)

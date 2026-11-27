@@ -16,7 +16,7 @@ for hollow filaments in Van Compernolle, Poulos & Morales (2022, *Phys. Plasmas*
 2. **Continuous P33 Mach-line flow-cancelled ``Isat_0(r, t)`` & ``M_rot(t)``
    (Runs 08–14, 23–45 ms puff, 800 G):**
    Uses opposite azimuthal Mach faces ``Isat_0 = sqrt(I_Y+ * I_Y-)`` (exact
-   first-order flow cancellation under Hutchinson's ``exp(+- K M / 2)`` law;
+   first-order flow cancellation under Hutchinson's ``exp(+- M / (2 K_H))`` law;
    ``machscope/C1`` = ``X+`` is undigitized on Runs 08–14) over the full
    ``[-1.0, +7.0] ms`` record at ``50 us`` resolution, plus ``10 us``
    single-shot onset-aligned core / wall / ring traces (Runs 11–14) to test
@@ -280,7 +280,7 @@ def analyze_mach_line_relaxation(data_dir=DATA_DIR, *, cal_npz=None,
                 arr = -arr
             tip_I[tip] = arr
 
-        # Geometric mean cancels first-order Mach flow asymmetry exp(+- K*M/2).
+        # Geometric mean cancels first-order Mach flow asymmetry exp(+- M / (2*K_H)).
         valid_pair = (tip_I["Y+"] > 0.0) & (tip_I["Y-"] > 0.0)
         isat0 = np.where(
             valid_pair,

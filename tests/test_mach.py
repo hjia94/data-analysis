@@ -20,7 +20,10 @@ from data_analysis.plasma.flow import (
 )
 from data_analysis.plasma.mach import (
     FLOW_SIGN_PLUS_FACING_AXIS,
+    K_HUTCHINSON,
+    area_ratio,
     binned_face_ratio,
+    fit_calibration,
     flow_velocity,
     mach_number,
     mach_single,
@@ -113,6 +116,46 @@ class TestMachRescalingAndFlowShear(unittest.TestCase):
             -mach_single(R=2.0, kappa=1.0),
             places=12,
         )
+
+    def test_hutchinson_ratio_calibration_exact_factor(self):
+        # Hutchinson (1987): R = kappa * exp(s * M / M_c) with M_c = K_HUTCHINSON = 0.45.
+        # For R = exp(1 / 0.45), kappa = 1: |M| must be 1.0 (not 0.5).
+        self.assertAlmostEqual(K_HUTCHINSON, 0.45, places=12)
+        self.assertAlmostEqual(
+            mach_single(R=np.exp(1.0 / K_HUTCHINSON), kappa=1.0), -1.0, places=12
+        )
+        self.assertAlmostEqual(
+            mach_single(R=np.exp(-1.0 / K_HUTCHINSON), kappa=1.0), +1.0, places=12
+        )
+        self.assertAlmostEqual(
+            mach_single(R=np.exp(1.0 / K_HUTCHINSON), kappa=1.0, flow_sign=+1),
+            +1.0,
+            places=12,
+        )
+        # Opposing orientations: R_a = kappa * exp(s * M / K), R_b = kappa * exp(-s * M / K)
+        kappa_true, M_true = 1.35, 0.42
+        R_a = kappa_true * np.exp(FLOW_SIGN_PLUS_FACING_AXIS * M_true / K_HUTCHINSON)
+        R_b = kappa_true * np.exp(-FLOW_SIGN_PLUS_FACING_AXIS * M_true / K_HUTCHINSON)
+        self.assertAlmostEqual(area_ratio(R_a, R_b), kappa_true, places=12)
+        self.assertAlmostEqual(mach_number(R_a, R_b), M_true, places=12)
+        self.assertAlmostEqual(mach_single(R_a, kappa_true), M_true, places=12)
+        # Joint calibration design matrix: ln R = ln kappa + (s / K) * sign * M_lab
+        k_y, k_z, m1, m2 = 1.18, 0.92, 0.25, -0.15
+        design = np.array([
+            [1.0, 0.0, FLOW_SIGN_PLUS_FACING_AXIS / K_HUTCHINSON, 0.0],
+            [1.0, 0.0, -FLOW_SIGN_PLUS_FACING_AXIS / K_HUTCHINSON, 0.0],
+            [1.0, 0.0, 0.0, FLOW_SIGN_PLUS_FACING_AXIS / K_HUTCHINSON],
+            [1.0, 0.0, 0.0, -FLOW_SIGN_PLUS_FACING_AXIS / K_HUTCHINSON],
+            [0.0, 1.0, 0.0, FLOW_SIGN_PLUS_FACING_AXIS / K_HUTCHINSON],
+            [0.0, 1.0, 0.0, -FLOW_SIGN_PLUS_FACING_AXIS / K_HUTCHINSON],
+            [0.0, 1.0, FLOW_SIGN_PLUS_FACING_AXIS / K_HUTCHINSON, 0.0],
+            [0.0, 1.0, -FLOW_SIGN_PLUS_FACING_AXIS / K_HUTCHINSON, 0.0],
+        ])
+        truth = np.array([np.log(k_y), np.log(k_z), m1, m2])
+        ln_R = design @ truth
+        params, _, residuals, _ = fit_calibration(ln_R, np.full(8, 0.01), design)
+        np.testing.assert_allclose(params, truth, atol=1e-12)
+        np.testing.assert_allclose(residuals, 0.0, atol=1e-12)
 
     def test_rescale_mach_velocity_errors_and_invalid_te(self):
         M = np.array([0.0, 0.25, -0.5])

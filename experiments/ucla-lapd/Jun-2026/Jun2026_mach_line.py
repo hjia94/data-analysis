@@ -489,8 +489,8 @@ def rescale_line_with_iv(mach_run, data_dir=DATA_DIR, *, profiles_npz=None,
 
     rescaled = {}
     for i, a in enumerate(axes):
-        # Systematic Mach error from area-ratio calibration: dM = (K/2) * (dkappa/kappa).
-        m_err_sys = (0.5 * K_hutch * (kappa_err[i] / kappa[i])
+        # Systematic Mach error from area-ratio calibration: dM = K * (dkappa/kappa).
+        m_err_sys = (K_hutch * (kappa_err[i] / kappa[i])
                      if kappa[i] > 0 else np.nan)
         v_a, v_a_err = rescale_mach_velocity(
             M_by_axis[a], Te_bin, ion_mu, te_err_ev=Te_err_bin, M_err=m_err_sys,
