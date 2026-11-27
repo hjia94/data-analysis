@@ -1003,14 +1003,18 @@ def plot_em_instability_overview(
     Jz_r = np.real(Jz * rot)
     Bx_r = np.real(Bx * rot)
     By_r = np.real(By * rot)
-    Jz_norm = Jz_r / float(np.nanmax(np.abs(Jz_r)))
+    is_cal = bool(meta["bdot_calibrated"])
 
     beta_rat = np.nan
+    db_over_b0 = np.nan
     if os.path.exists(modes_path):
         with np.load(modes_path, allow_pickle=True) as md:
             bkey = f"disp__{matched_puff_run}__beta_e_over_me_mi"
             if bkey in md.files:
                 beta_rat = float(md[bkey])
+            dkey = f"bdot__{run_num}__delta_b_perp_over_b0"
+            if is_cal and dkey in md.files:
+                db_over_b0 = float(md[dkey])
 
     ch_map = {"C1": r"$\dot{B}_x$", "C2": r"$\dot{B}_y$", "C3": r"$\dot{B}_z$"}
     b_lbl = ch_map.get(bdot_ch, bdot_ch)
@@ -1079,13 +1083,40 @@ def plot_em_instability_overview(
 
     # (d) 2-D J_par & B_perp with shot probe markers
     XX, YY = np.meshgrid(xs, ys)
-    im = ax_d.pcolormesh(XX, YY, Jz_norm, cmap="RdBu_r", vmin=-1.0, vmax=1.0, shading="auto")
-    cb = fig.colorbar(im, ax=ax_d, fraction=0.046, pad=0.03, shrink=0.84)
-    cb.set_label(r"$\mathrm{Re}[J_\parallel] / J_{\max}$")
+    if is_cal:
+        j_max_a = float(np.nanmax(np.abs(Jz_r)))
+        j_scale, j_unit = (1e-3, r"kA/m$^2$") if j_max_a >= 1e3 else (1.0, r"A/m$^2$")
+        j_plot = Jz_r * j_scale
+        j_lim = j_max_a * j_scale
+        im = ax_d.pcolormesh(XX, YY, j_plot, cmap="RdBu_r", vmin=-j_lim, vmax=j_lim, shading="auto")
+        cb = fig.colorbar(im, ax=ax_d, fraction=0.046, pad=0.03, shrink=0.84)
+        cb.set_label(rf"$\mathrm{{Re}}[J_\parallel]$ [{j_unit}]")
 
-    bscale = float(np.nanpercentile(np.hypot(Bx_r, By_r), 95))
-    if bscale > 0.0:
-        ax_d.quiver(XX, YY, Bx_r / bscale, By_r / bscale, color="k", scale=14.0, width=0.0042, alpha=0.82)
+        Bx_g, By_g = Bx_r * 1e4, By_r * 1e4
+        bscale_g = float(np.nanpercentile(np.hypot(Bx_g, By_g), 95))
+        if bscale_g > 0.0:
+            from matplotlib.patches import FancyBboxPatch
+            qv = ax_d.quiver(XX, YY, Bx_g, By_g, color="k", scale=bscale_g * 14.0, width=0.0042, alpha=0.82)
+            key_g = 0.2 if bscale_g >= 0.15 else 0.1
+            ax_d.add_patch(FancyBboxPatch(
+                (0.72, 0.025), 0.25, 0.065,
+                boxstyle="round,pad=0.012", transform=ax_d.transAxes,
+                fc="white", ec="none", alpha=0.88, zorder=7,
+            ))
+            qk = ax_d.quiverkey(
+                qv, 0.80, 0.058, key_g, f"{key_g:g} G",
+                labelpos="E", coordinates="axes", fontproperties={"size": 9.4, "weight": "bold"},
+            )
+            qk.set_zorder(8)
+    else:
+        Jz_norm = Jz_r / float(np.nanmax(np.abs(Jz_r)))
+        im = ax_d.pcolormesh(XX, YY, Jz_norm, cmap="RdBu_r", vmin=-1.0, vmax=1.0, shading="auto")
+        cb = fig.colorbar(im, ax=ax_d, fraction=0.046, pad=0.03, shrink=0.84)
+        cb.set_label(r"$\mathrm{Re}[J_\parallel] / J_{\max}$")
+
+        bscale = float(np.nanpercentile(np.hypot(Bx_r, By_r), 95))
+        if bscale > 0.0:
+            ax_d.quiver(XX, YY, Bx_r / bscale, By_r / bscale, color="k", scale=14.0, width=0.0042, alpha=0.82)
 
     ax_d.add_patch(Circle((0.0, 0.0), 2.54, fill=False, ec="#16a34a", ls="-", lw=1.7, label='2" / 4" plates'))
     ax_d.add_patch(Circle((0.0, 0.0), 5.08, fill=False, ec="#16a34a", ls="--", lw=1.5))
@@ -1100,6 +1131,10 @@ def plot_em_instability_overview(
     ax_d.set_xlabel(r"$x$ [cm]")
     ax_d.set_ylabel(r"$y$ [cm]")
     note_lines = [f"$|\\delta B_z| / |\\delta B_\\perp| = {meta['bz_over_bperp']:.2f}$"]
+    if np.isfinite(db_over_b0) and db_over_b0 > 0.0:
+        exp = int(np.floor(np.log10(db_over_b0)))
+        mant = db_over_b0 / (10.0 ** exp)
+        note_lines.append(rf"$\delta B_\perp / B_0 = {mant:.1f}\times 10^{{{exp}}}$")
     if np.isfinite(beta_rat):
         note_lines.append(f"$\\beta_e / (m_e/m_i) = {beta_rat:.1f}$")
     ax_d.text(
@@ -1294,7 +1329,17 @@ def animate_mode_propagation(
     Bx = Bx * np.exp(-1j * ph0)
     By = By * np.exp(-1j * ph0)
 
-    Jz_n = Jz / float(np.nanmax(np.abs(Jz)))
+    is_cal = bool(meta["bdot_calibrated"])
+    j_max = float(np.nanmax(np.abs(Jz)))
+    if is_cal:
+        j_scale, j_unit = (1e-3, r"kA/m$^2$") if j_max >= 1e3 else (1.0, r"A/m$^2$")
+        Jz_n = Jz * j_scale
+        j_vlim = j_max * j_scale
+        cb_label = rf"$\mathrm{{Re}}[J_\parallel]$ [{j_unit}]"
+    else:
+        Jz_n = Jz / j_max
+        j_vlim = 1.0
+        cb_label = r"$\mathrm{Re}[J_\parallel] / J_{\max}$"
     b_scale = float(np.nanpercentile(np.hypot(np.abs(Bx), np.abs(By)), 95))
     Bx_n = Bx / b_scale
     By_n = By / b_scale
@@ -1362,9 +1407,9 @@ def animate_mode_propagation(
 
     jz_l0, bx_l0, by_l0, jz_p0, bx_p0, by_p0, th0 = _eval_frame(0.0)
     ext = [float(xs[0]), float(xs[-1]), float(ys[0]), float(ys[-1])]
-    im_l = ax_l.imshow(jz_l0, extent=ext, origin="lower", cmap="RdBu_r", vmin=-1.0, vmax=1.0)
+    im_l = ax_l.imshow(jz_l0, extent=ext, origin="lower", cmap="RdBu_r", vmin=-j_vlim, vmax=j_vlim)
     qv_l = ax_l.quiver(XQ, YQ, bx_l0, by_l0, color="k", scale=14.0, width=0.0045, alpha=0.78)
-    im_r = ax_r.imshow(jz_p0, extent=ext, origin="lower", cmap="RdBu_r", vmin=-1.0, vmax=1.0)
+    im_r = ax_r.imshow(jz_p0, extent=ext, origin="lower", cmap="RdBu_r", vmin=-j_vlim, vmax=j_vlim)
     qv_r = ax_r.quiver(XQ, YQ, bx_p0, by_p0, color="k", scale=14.0, width=0.0045, alpha=0.78)
 
     for ax in (ax_l, ax_r):
@@ -1398,7 +1443,7 @@ def animate_mode_propagation(
 
     cax = fig.add_axes([0.905, 0.14, 0.018, 0.68])
     cb = fig.colorbar(im_r, cax=cax)
-    cb.set_label(r"$\mathrm{Re}[J_\parallel] / J_{\max}$")
+    cb.set_label(cb_label)
     time_txt = fig.suptitle(f"Run {run_num} ({meta['b0_g']:.0f} G)  —  t = 0.00 ms",
                             fontsize=12.0, fontweight="bold", y=0.975)
 
