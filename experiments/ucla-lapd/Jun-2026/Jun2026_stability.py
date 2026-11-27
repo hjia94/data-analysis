@@ -502,7 +502,8 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
     ``I_delta = I_dc - I_pre`` (verified against ``V_bias > V_p``) and the
     off-center ``m = -1`` disc overlap ``c_4in`` from ``bdot_2d_jun2026.npz``
     (``r_ext_eff_4in = c_4in**2 * R_ext_4in / R_sh_4in``). Matched 2" disc
-    parameters (``r = 0-2.54 cm``) are stored alongside without mixing.
+    parameters (``r = 0-2.54 cm``, evaluated on the hollow-core plasma footprint
+    ``ne_2in, Te_2in, lambda_2in``) are stored alongside without mixing.
     """
     prof_path = profiles_npz or os.path.join(data_dir, jpr.OUT_NAME)
     onset_path = onset_npz or os.path.join(data_dir, jon.OUT_NAME)
@@ -527,15 +528,27 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
             st, lam = _extract_wall_state(pf, r, ref_idx, b0_g=800.0)
             k_perp = float(np.hypot(st.k_theta_m, k_r))
 
-            # Matched footprint Vp on 2" disc (0-2.54 cm) and 4" annulus (2.54-5.08 cm)
+            # Matched footprint Vp, ne, Te, lambda on 2" core disc (r <= 2.54 cm)
+            # and Vp on 4" wall annulus (2.54-5.08 cm)
             x_cm = pf[f"{r}__x_cm"]
             xc = float(pf[f"{r}__x_center_cm"])
             rr = np.abs(x_cm - xc)
             vp_prof = pf[f"{r}__Vp"][:, ref_idx]
-            m2 = (rr < 2.54) & np.isfinite(vp_prof)
+            ne_prof = pf[f"{r}__ne"][:, ref_idx]
+            te_prof = pf[f"{r}__Te"][:, ref_idx]
+            lam_prof = pf[f"{r}__lambda"][:, ref_idx]
+            m2 = (rr <= 2.54) & np.isfinite(vp_prof)
             m4 = (rr >= 2.54) & (rr < 5.08) & np.isfinite(vp_prof)
+            m2_ne = (rr <= 2.54) & np.isfinite(ne_prof) & (ne_prof > 0.0)
+            m2_te = (rr <= 2.54) & np.isfinite(te_prof) & (te_prof > 0.0)
+            m2_lam = (rr <= 2.54) & np.isfinite(lam_prof) & (lam_prof > 0.0)
             vp_2in = float(np.nanmedian(vp_prof[m2])) if np.any(m2) else float(pf[f"{r}__ref_vp_core_v"])
             vp_4in = float(np.nanmedian(vp_prof[m4])) if np.any(m4) else float(pf[f"{r}__ref_vp_ring_v"])
+            ne_2in_m3 = (
+                float(np.nanmedian(ne_prof[m2_ne])) if np.any(m2_ne) else float(pf[f"{r}__ref_ne_core_cm3"])
+            ) * 1e6
+            te_2in_ev = float(np.nanmedian(te_prof[m2_te])) if np.any(m2_te) else float(pf[f"{r}__ref_te_core_ev"])
+            lam_2in = float(np.nanmedian(lam_prof[m2_lam])) if np.any(m2_lam) else lam
 
             # Use baseline-corrected currents (I_dc - I_pre) and verify shunt sign against V_bias > V_p
             i2_net = float(bs["I_2in_delta"])
@@ -566,7 +579,7 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
             r_ext_4 = float(bs["R_ext_4in_ohm"]) if (bs["g2_VI_4in"] >= 0.5 and bs["R_ext_4in_ohm"] > 0.0) else 0.18
             p2 = biased_sheath_parameters(
                 i2_net, DISC_AREAS_M2["2in"], r_ext_2,
-                st.ne_m3, st.te_ev, sheath_lambda=lam, l_ohm_m=L_P29_TO_P35_M,
+                ne_2in_m3, te_2in_ev, sheath_lambda=lam_2in, l_ohm_m=L_P29_TO_P35_M,
                 mode_coupling=c_2in,
             )
             p4 = biased_sheath_parameters(
@@ -611,6 +624,9 @@ def analyze_biased_sheath(data_dir=DATA_DIR, *, profiles_npz=None, onset_npz=Non
                 "mode_coupling_4in": float(c_4in),
                 "vp_2in_v": vp_2in,
                 "vp_4in_v": vp_4in,
+                "ne_2in_m3": ne_2in_m3,
+                "te_2in_ev": te_2in_ev,
+                "lambda_2in": lam_2in,
                 "vp_minus_v2_v": vp_2in - float(bs["V_2in_dc"]),
                 "vp_minus_v4_v": vp_4in - float(bs["V_4in_dc"]),
                 "shunt_sign_status": overall_sign_status,

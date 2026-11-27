@@ -108,6 +108,45 @@ class TestTurbulenceHelpers(unittest.TestCase):
         self.assertAlmostEqual(rec["c_nr"], 0.0, delta=0.05)
         self.assertAlmostEqual(rec["c_rt"], +1.0, delta=0.05)
         self.assertGreater(rec["rs_f0"], 0.0)
+        self.assertGreater(rec["et_f0"], 0.0)
+        self.assertLessEqual(abs(rec["rs_f0"]) / rec["et_f0"], 1.0 + 1e-9)
+
+    def test_eich_manz_shear_transfer_invariance_and_signs(self):
+        r_cm = np.array([2.0, 3.0, 4.0, 5.0, 6.25])
+        rs = np.full_like(r_cm, +2.0e-4)
+        et = np.full_like(r_cm, 4.0e-4)  # rs / et = +0.5
+        te = np.full_like(r_cm, 1.0)
+        ne = np.full_like(r_cm, 1.0e13)
+        # Constant clockwise E x B velocity: v_ExB = -Er/B0 = -1000 m/s -> Er = +0.8 V/cm at 800 G
+        er = np.full_like(r_cm, +0.8)
+        mth = np.full_like(r_cm, -0.20)
+        res = jtb._eich_manz_shear_transfer(
+            r_cm, mth, rs, rs, et, et, te, ne, er,
+            b0_g=800.0, gamma_exp_s=2000.0, gamma_cwm_s=1000.0,
+        )
+        # Exact c_s and K_H invariance for LP v_ExB when Te & ne are uniform:
+        # rescaling rs & et by any factor k^2 (same as changing K_H) or scaling Te by 4x
+        # leaves gamma_sh_exb_f0_s identically unchanged!
+        res_scaled = jtb._eich_manz_shear_transfer(
+            r_cm, mth, 4.0 * rs, 4.0 * rs, 4.0 * et, 4.0 * et, 4.0 * te, ne, er,
+            b0_g=800.0, gamma_exp_s=2000.0, gamma_cwm_s=1000.0,
+        )
+        self.assertGreater(res["gamma_sh_mach_f0_s"], 0.0)
+        self.assertGreater(res["gamma_sh_exb_f0_s"], 0.0)
+        self.assertAlmostEqual(res["gamma_sh_exb_f0_s"], res_scaled["gamma_sh_exb_f0_s"], places=8)
+        self.assertAlmostEqual(
+            res["R_em_mach_f0_vs_exp"], res["gamma_sh_mach_f0_s"] / 2000.0, places=12
+        )
+        self.assertAlmostEqual(
+            res["R_em_exb_f0_vs_cwm"], res["gamma_sh_exb_f0_s"] / 1000.0, places=12
+        )
+        # Rigid-body rotation (v_theta proportional to r) -> zero shear transfer
+        res_rigid = jtb._eich_manz_shear_transfer(
+            r_cm, -0.05 * r_cm, rs, rs, et, et, te, ne, +0.2 * r_cm,
+            b0_g=800.0, gamma_exp_s=2000.0,
+        )
+        self.assertAlmostEqual(res_rigid["gamma_sh_mach_f0_s"], 0.0, places=9)
+        self.assertAlmostEqual(res_rigid["gamma_sh_exb_f0_s"], 0.0, places=9)
 
     def test_amplitude_normalized_cross_phase_separates_growth_from_saturation(self):
         # Exact synthetic test: exponential ramp (gamma = 10 ms^-1) with 0 deg cross-phase during

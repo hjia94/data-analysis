@@ -373,6 +373,81 @@ class TestLinearStabilitySolvers(unittest.TestCase):
             with np.load(out_npz) as d:
                 self.assertEqual(int(d["sentinel"]), 7)
 
+    def test_analyze_biased_sheath_uses_matched_core_footprint_for_2in_disc(self):
+        # Synthetic hollow-core profile: hot, low-ne core (r <= 2.54 cm) vs cooler,
+        # denser wall (r = 2-4 cm). The 2" disc diagnostic (p2) must evaluate
+        # dv_ohm_2in_v on the matched core (ne_2in, Te_2in), while the 4" annulus
+        # (p4) stays matched to the wall state.
+        x = np.arange(-8.0, 9.0, 1.0)
+        rr = np.abs(x)
+        ne = np.where(rr <= 2.54, 3.0e12, 1.2e13)[:, None]
+        te = np.where(rr <= 2.54, 4.0, 1.0)[:, None]
+        vp = np.where(rr <= 2.54, 24.0, 20.0)[:, None]
+        lam = np.where(rr <= 2.54, 4.2, 3.4)[:, None]
+        zeros = np.zeros_like(ne)
+        dln_ne = np.full_like(ne, +0.3)
+        dln_te = np.full_like(ne, -0.3)
+        er = np.full_like(ne, +1.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            prof_p = os.path.join(tmp, "profiles_summary_jun2026.npz")
+            np.savez(
+                prof_p,
+                **{
+                    "00__x_cm": x,
+                    "00__x_center_cm": np.float64(0.0),
+                    "00__ref_sweep_idx": np.int64(0),
+                    "00__ne": ne,
+                    "00__Te": te,
+                    "00__Vp": vp,
+                    "00__lambda": lam,
+                    "00__dln_ne_dr": dln_ne,
+                    "00__dln_te_dr": dln_te,
+                    "00__er_r_v_cm": er,
+                    "00__ref_vp_core_v": np.float64(24.0),
+                    "00__ref_vp_ring_v": np.float64(20.0),
+                    "00__ref_ne_core_cm3": np.float64(3.0e12),
+                    "00__ref_te_core_ev": np.float64(4.0),
+                },
+            )
+            bs_data = {
+                "00": {
+                    "gas_puff_ms": 24.0,
+                    "f0_hz": 3500.0,
+                    "I_2in_delta": 18.0,
+                    "I_4in_delta": 22.0,
+                    "V_2in_dc": 40.0,
+                    "V_4in_dc": 40.0,
+                    "R_ext_2in_ohm": 0.15,
+                    "R_ext_4in_ohm": 0.18,
+                    "g2_VI_2in": 0.9,
+                    "g2_VI_4in": 0.9,
+                },
+            }
+            out = jst.analyze_biased_sheath(
+                data_dir=tmp, profiles_npz=prof_p, onset_npz=os.path.join(tmp, "none.npz"),
+                bdot_2d_npz=os.path.join(tmp, "none_bdot.npz"),
+                n_nodes=16, biasscope_data=bs_data,
+            )
+            r0 = out["00"]
+            exp_p2 = biased_sheath_parameters(
+                18.0, jst.DISC_AREAS_M2["2in"], 0.15, 3.0e18, 4.0,
+                sheath_lambda=4.2, l_ohm_m=jst.L_P29_TO_P35_M,
+                mode_coupling=r0["mode_coupling_2in"],
+            )
+            wall_p2 = biased_sheath_parameters(
+                18.0, jst.DISC_AREAS_M2["2in"], 0.15, 1.2e19, 1.0,
+                sheath_lambda=3.4, l_ohm_m=jst.L_P29_TO_P35_M,
+                mode_coupling=r0["mode_coupling_2in"],
+            )
+            self.assertAlmostEqual(r0["ne_2in_m3"], 3.0e18, places=6)
+            self.assertAlmostEqual(r0["te_2in_ev"], 4.0, places=12)
+            self.assertAlmostEqual(r0["lambda_2in"], 4.2, places=12)
+            self.assertAlmostEqual(r0["dv_ohm_2in_v"], exp_p2["dv_ohm_v"], places=12)
+            # Core Te=4 eV gives ~8x smaller Ohmic drop than cooler wall Te=1 eV
+            self.assertLess(r0["dv_ohm_2in_v"], 0.25 * wall_p2["dv_ohm_v"])
+            self.assertAlmostEqual(r0["j0_2in_norm"], exp_p2["j0_norm"], places=12)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -63,7 +63,10 @@ import glob
 import os
 
 import numpy as np
+from scipy import constants as const
 from scipy import signal
+
+trapezoid = getattr(np, "trapezoid", None) or np.trapz
 
 from data_analysis.io import open_lapd, parse_shunts, position_shots
 from data_analysis.plasma.flow import find_flow_centre, polar_components
@@ -605,6 +608,8 @@ def _compute_mach_transport_at_position(ch_data, kappa, dx_cm, dy_cm, fs_hz,
     sig_n = float(np.std(dn_f0))
     sig_r = float(np.std(mr_f0))
     sig_t = float(np.std(mt_f0))
+    et_f0 = 0.5 * (float(np.mean(mr_f0 ** 2)) + float(np.mean(mt_f0 ** 2)))
+    et_bb = 0.5 * (float(np.mean(mr_bb ** 2)) + float(np.mean(mt_bb ** 2)))
     flux_f0 = float(np.mean(dn_f0 * mr_f0))
     rs_f0 = float(np.mean(mr_f0 * mt_f0))
 
@@ -622,6 +627,8 @@ def _compute_mach_transport_at_position(ch_data, kappa, dx_cm, dy_cm, fs_hz,
         "dn_rms": sig_n,
         "mr_rms": sig_r,
         "mt_rms": sig_t,
+        "et_f0": et_f0,
+        "et_bb": et_bb,
         "flux_f0": flux_f0,
         "flux_bb": float(np.mean(dn_bb * mr_bb)),
         "rs_f0": rs_f0,
@@ -635,6 +642,137 @@ def _compute_mach_transport_at_position(ch_data, kappa, dx_cm, dy_cm, fs_hz,
         "tips_raw": {"X+": xp, "X-": xm, "Y+": yp, "Y-": ym},
         "ur": ur,
         "ut": ut,
+    }
+
+
+def _eich_manz_shear_transfer(
+    r_mids_cm,
+    mth_band,
+    rs_f0_band,
+    rs_bb_band,
+    et_f0_mean,
+    et_bb_mean,
+    te_band_ev,
+    ne_band_cm3,
+    er_band_v_cm,
+    *,
+    b0_g=800.0,
+    gamma_exp_s=np.nan,
+    gamma_cwm_s=np.nan,
+    mu=4.0,
+    b_sign_z=+1,
+    wall_r_max_cm=4.5,
+):
+    """Physical-velocity Reynolds transfer & Eich-Manz (NF 2021, Eq. H.2) ratio ``P_EM / (gamma E_t)``.
+
+    Uses Cauchy-Schwarz-consistent band-mean fluctuation kinetic energy
+    ``E_t = 0.5 * (<dM_r^2> + <dM_theta^2>) * c_s(r)^2`` and mass-weighted
+    cylindrical integration ``int n_0(r) * P_EM(r) * r dr / int n_0(r) * E_t(r) * r dr``
+    with mean-flow-budget sign ``P_EM = +<dv_r dv_theta> * r * d(v_theta / r) / dr``
+    (positive = turbulence feeds mean shear flow, opposite sign to ``P_shear``).
+
+    Evaluates both radial-``Te(r)``-rescaled Mach velocity (``gamma = 1`` isothermal
+    and ``gamma = 5/3`` adiabatic) and independent Langmuir-probe ``v_ExB = -Er / B0``
+    (where both ``c_s`` and Hutchinson's ``K_H`` cancel identically in the local ratio).
+    """
+    r_cm = np.asarray(r_mids_cm, dtype=float)
+    r_m = r_cm * 1e-2
+    mth = np.asarray(mth_band, dtype=float)
+    rs_f0 = np.asarray(rs_f0_band, dtype=float)
+    rs_bb = np.asarray(rs_bb_band, dtype=float)
+    et_f0 = np.asarray(et_f0_mean, dtype=float)
+    et_bb = np.asarray(et_bb_mean, dtype=float)
+    te = np.asarray(te_band_ev, dtype=float)
+    ne = np.asarray(ne_band_cm3, dtype=float)
+    er = np.asarray(er_band_v_cm, dtype=float)
+
+    mi_kg = float(mu) * const.proton_mass
+    b0_t = float(b0_g) * 1e-4
+    sgn = int(np.sign(b_sign_z or 1))
+    valid_te = np.isfinite(te) & (te > 0.0)
+    cs1 = np.where(valid_te, np.sqrt(const.e * np.where(valid_te, te, 1.0) / mi_kg), np.nan)
+    cs53 = cs1 * np.sqrt(5.0 / 3.0)
+
+    v_mach1 = mth * cs1
+    v_mach53 = mth * cs53
+    v_exb = -sgn * (er * 1e2) / b0_t
+
+    def _cyl_shear(v_arr):
+        ok = np.isfinite(v_arr) & np.isfinite(r_m) & (r_m > 0.0)
+        if int(np.sum(ok)) < 2:
+            return np.full_like(r_m, np.nan)
+        out_g = np.full_like(r_m, np.nan)
+        rv = r_m[ok]
+        out_g[ok] = rv * np.gradient(v_arr[ok] / rv, rv)
+        return out_g
+
+    gE_mach1 = _cyl_shear(v_mach1)
+    gE_mach53 = _cyl_shear(v_mach53)
+    gE_exb = _cyl_shear(v_exb)
+
+    w_mass = np.where(np.isfinite(ne) & (ne > 0.0), ne, np.nan)
+    wall_m = r_cm < float(wall_r_max_cm)
+
+    def _rate(rs_arr, et_arr, cs_arr, gE_arr):
+        p_em = rs_arr * (cs_arr ** 2) * gE_arr
+        et_p = et_arr * (cs_arr ** 2)
+        ok = np.isfinite(p_em) & np.isfinite(et_p) & np.isfinite(w_mass) & (et_p > 0.0)
+        if int(np.sum(ok)) >= 2:
+            num = float(trapezoid(w_mass[ok] * p_em[ok] * r_m[ok], r_m[ok]))
+            den = float(trapezoid(w_mass[ok] * et_p[ok] * r_m[ok], r_m[ok]))
+            g_full = num / den if den > 0.0 else np.nan
+        else:
+            g_full = np.nan
+        ok_w = ok & wall_m
+        if int(np.sum(ok_w)) >= 2:
+            num_w = float(trapezoid(w_mass[ok_w] * p_em[ok_w] * r_m[ok_w], r_m[ok_w]))
+            den_w = float(trapezoid(w_mass[ok_w] * et_p[ok_w] * r_m[ok_w], r_m[ok_w]))
+            g_wall = num_w / den_w if den_w > 0.0 else np.nan
+        else:
+            g_wall = np.nan
+        return p_em, g_full, g_wall
+
+    p_em_m1_f0, g_m1_f0, g_m1_f0_w = _rate(rs_f0, et_f0, cs1, gE_mach1)
+    _, g_m53_f0, g_m53_f0_w = _rate(rs_f0, et_f0, cs53, gE_mach53)
+    p_em_exb_f0, g_exb_f0, g_exb_f0_w = _rate(rs_f0, et_f0, cs1, gE_exb)
+    _, g_m1_bb, g_m1_bb_w = _rate(rs_bb, et_bb, cs1, gE_mach1)
+    _, g_exb_bb, g_exb_bb_w = _rate(rs_bb, et_bb, cs1, gE_exb)
+
+    def _ratio(g_sh, g_ref):
+        return float(g_sh / g_ref) if (np.isfinite(g_sh) and np.isfinite(g_ref) and g_ref > 0.0) else np.nan
+
+    return {
+        "te_band_ev": te,
+        "ne_band_cm3": ne,
+        "er_band_v_cm": er,
+        "cs1_band_m_s": cs1,
+        "v_theta_mach_m_s": v_mach1,
+        "v_theta_exb_m_s": v_exb,
+        "gamma_E_mach_s": gE_mach1,
+        "gamma_E_exb_s": gE_exb,
+        "p_em_mach_f0_m2_s3": p_em_m1_f0,
+        "p_em_exb_f0_m2_s3": p_em_exb_f0,
+        "gamma_sh_mach_f0_s": g_m1_f0,
+        "gamma_sh_mach_f0_wall_s": g_m1_f0_w,
+        "gamma_sh_mach_f0_gam53_s": g_m53_f0,
+        "gamma_sh_mach_f0_gam53_wall_s": g_m53_f0_w,
+        "gamma_sh_exb_f0_s": g_exb_f0,
+        "gamma_sh_exb_f0_wall_s": g_exb_f0_w,
+        "gamma_sh_mach_bb_s": g_m1_bb,
+        "gamma_sh_mach_bb_wall_s": g_m1_bb_w,
+        "gamma_sh_exb_bb_s": g_exb_bb,
+        "gamma_sh_exb_bb_wall_s": g_exb_bb_w,
+        "gamma_exp_ref_s": float(gamma_exp_s),
+        "gamma_cwm_ref_s": float(gamma_cwm_s),
+        "R_em_mach_f0_vs_exp": _ratio(g_m1_f0, gamma_exp_s),
+        "R_em_mach_f0_wall_vs_exp": _ratio(g_m1_f0_w, gamma_exp_s),
+        "R_em_mach_f0_vs_cwm": _ratio(g_m1_f0, gamma_cwm_s),
+        "R_em_mach_f0_gam53_vs_exp": _ratio(g_m53_f0, gamma_exp_s),
+        "R_em_exb_f0_vs_exp": _ratio(g_exb_f0, gamma_exp_s),
+        "R_em_exb_f0_wall_vs_exp": _ratio(g_exb_f0_w, gamma_exp_s),
+        "R_em_exb_f0_vs_cwm": _ratio(g_exb_f0, gamma_cwm_s),
+        "R_em_mach_bb_vs_exp": _ratio(g_m1_bb, gamma_exp_s),
+        "R_em_exb_bb_vs_exp": _ratio(g_exb_bb, gamma_exp_s),
     }
 
 
@@ -739,6 +877,8 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
     dn_band = np.full(nb, np.nan, dtype=float)
     mr_band = np.full(nb, np.nan, dtype=float)
     mt_band = np.full(nb, np.nan, dtype=float)
+    et_f0_band = np.full(nb, np.nan, dtype=float)
+    et_bb_band = np.full(nb, np.nan, dtype=float)
     flux_f0_band = np.full(nb, np.nan, dtype=float)
     flux_bb_band = np.full(nb, np.nan, dtype=float)
     c_nr_band = np.full(nb, np.nan, dtype=float)
@@ -823,6 +963,8 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
         dn_band[bi] = float(np.median([r["dn_rms"] for r in recs]))
         mr_band[bi] = float(np.median([r["mr_rms"] for r in recs]))
         mt_band[bi] = float(np.median([r["mt_rms"] for r in recs]))
+        et_f0_band[bi] = float(np.mean([r["et_f0"] for r in recs]))
+        et_bb_band[bi] = float(np.mean([r["et_bb"] for r in recs]))
         flux_f0_band[bi] = float(np.mean([r["flux_f0"] for r in recs]))
         flux_bb_band[bi] = float(np.mean([r["flux_bb"] for r in recs]))
         c_nr_band[bi] = float(np.median([r["c_nr"] for r in recs]))
@@ -891,6 +1033,43 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
     # Cylindrical shear-flow energy transfer P_shear = -<dM_r dM_theta> * r*d(M_theta/r)/dr
     prod = reynolds_shear_production(r_mids, rs_f0_band, mth_band)
 
+    # Physical-velocity Reynolds transfer & Eich-Manz (NF 2021, Eq. H.2) ratio using matched
+    # Run 03 (35 ms, 800 G) radial Te(r), ne(r), Er(r) and linear growth rates when available.
+    te_band = np.full(nb, np.nan, dtype=float)
+    ne_band = np.full(nb, np.nan, dtype=float)
+    er_band = np.full(nb, np.nan, dtype=float)
+    gamma_exp_ref = np.nan
+    gamma_cwm_ref = np.nan
+    prof_p = os.path.join(data_dir, "profiles_summary_jun2026.npz")
+    if os.path.isfile(prof_p):
+        with np.load(prof_p, allow_pickle=True) as pf:
+            if "03__Te" in pf.files and "03__ref_sweep_idx" in pf.files:
+                x03 = np.asarray(pf["03__x_cm"], dtype=float)
+                xc03 = float(pf["03__x_center_cm"])
+                ir03 = int(pf["03__ref_sweep_idx"])
+                rr03 = np.abs(x03 - xc03)
+                for bi, (r0, r1) in enumerate(bands):
+                    mb = (rr03 >= r0) & (rr03 < r1)
+                    if np.any(mb):
+                        te_band[bi] = float(np.nanmedian(pf["03__Te"][mb, ir03]))
+                        ne_band[bi] = float(np.nanmedian(pf["03__ne"][mb, ir03]))
+                        er_band[bi] = float(np.nanmedian(pf["03__er_r_v_cm"][mb, ir03]))
+    onset_p = os.path.join(data_dir, jon.OUT_NAME)
+    if os.path.isfile(onset_p):
+        with np.load(onset_p, allow_pickle=True) as of:
+            if "03__gamma_med_s" in of.files:
+                gamma_exp_ref = float(of["03__gamma_med_s"])
+    stab_p = os.path.join(data_dir, "stability_linear_jun2026.npz")
+    if os.path.isfile(stab_p):
+        with np.load(stab_p, allow_pickle=True) as sf:
+            if "puff__03__rad_cwm_sh_cent_gamma_s" in sf.files:
+                gamma_cwm_ref = float(sf["puff__03__rad_cwm_sh_cent_gamma_s"])
+    em_res = _eich_manz_shear_transfer(
+        r_mids, mth_band, rs_f0_band, rs_bb_band, et_f0_band, et_bb_band,
+        te_band, ne_band, er_band,
+        b0_g=800.0, gamma_exp_s=gamma_exp_ref, gamma_cwm_s=gamma_cwm_ref,
+    )
+
     # Finite-probe-size grad(n) artifact benchmark for typical Mach tip separations d = 0.3, 0.5 cm.
     # Under mach.py's convention M = -(K_H / 2) * ln(I_+ / (kappa I_-)) with K_H = 0.45:
     #   dM_grad,r = -(K_H / 2) * d * d(dn/n)/dr
@@ -932,6 +1111,10 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
         "r32__dn_rms": dn_band,
         "r32__mr_rms": mr_band,
         "r32__mt_rms": mt_band,
+        "r32__et_f0_mean": et_f0_band,
+        "r32__et_bb_mean": et_bb_band,
+        "r32__rs_over_et_f0": np.where(et_f0_band > 0.0, rs_f0_band / et_f0_band, np.nan),
+        "r32__rs_over_et_bb": np.where(et_bb_band > 0.0, rs_bb_band / et_bb_band, np.nan),
         "r32__flux_nr_f0": flux_f0_band,
         "r32__flux_nr_bb": flux_bb_band,
         "r32__flux_grad_art_d0p3": flux_grad_d0p3,
@@ -953,6 +1136,8 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
         "r32__wall_quad_c_nr_med": quad_cnr_med,
         "r32__steep_phase_rad": r32_phase_rad,
     }
+    for k_em, v_em in em_res.items():
+        out32[f"r32__{k_em}"] = v_em
     for k_st, v_st in r32_steep.items():
         out32[f"r32__steep_{k_st}"] = v_st
     for t_st, v_lk in r32_steep_locked.items():
@@ -1051,6 +1236,16 @@ def print_summary(res):
             f"(grad_art@0.3cm={res['r32__flux_grad_art_d0p3'][i]:+.2e}) | "
             f"<dMr*dMt>={res['r32__rs_rt_f0'][i]:+.2e} (art={res['r32__rs_grad_art_d0p3'][i]:+.2e}, c={res['r32__c_rt_med'][i]:+.2f}) | "
             f"shear={res['r32__shear_per_cm'][i]:+.4f} -> P_sh={res['r32__p_shear_local'][i]:+.2e}"
+        )
+    if "r32__gamma_sh_mach_f0_s" in res and np.isfinite(float(res["r32__gamma_sh_mach_f0_s"])):
+        print(
+            f"  Eich-Manz Eq.(H.2) physical-velocity P_EM/(gamma*E_t) [mass-w, vs EXP Run 03 = {float(res['r32__gamma_exp_ref_s'])*1e-3:.2f} ms^-1]:\n"
+            f"    Mach v_th(r) (gam=1):   f0 full={float(res['r32__gamma_sh_mach_f0_s'])*1e-3:+.2f} ms^-1 "
+            f"(R_exp={float(res['r32__R_em_mach_f0_vs_exp']):+.2f}, wall={float(res['r32__R_em_mach_f0_wall_vs_exp']):+.2f}, "
+            f"R_cwm={float(res['r32__R_em_mach_f0_vs_cwm']):+.2f}) | BB(1-25kHz) R_exp={float(res['r32__R_em_mach_bb_vs_exp']):+.2f}\n"
+            f"    LP v_ExB (cs&K_H inv):  f0 full={float(res['r32__gamma_sh_exb_f0_s'])*1e-3:+.2f} ms^-1 "
+            f"(R_exp={float(res['r32__R_em_exb_f0_vs_exp']):+.2f}, wall={float(res['r32__R_em_exb_f0_wall_vs_exp']):+.2f}, "
+            f"R_cwm={float(res['r32__R_em_exb_f0_vs_cwm']):+.2f}) | BB(1-25kHz) R_exp={float(res['r32__R_em_exb_bb_vs_exp']):+.2f}"
         )
 
     if "spec_02__biphase_deg" in res:
