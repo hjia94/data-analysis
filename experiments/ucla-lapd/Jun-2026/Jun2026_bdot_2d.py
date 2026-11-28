@@ -99,7 +99,11 @@ DEFAULT_BDOT_ATTEN_DB = None      # None: auto-read from HDF5 P28 chain when bdo
 # Pre-inversion hardware polarity on (C1, C2, C3) relative to the C16 bench frame:
 # uniquely determined by (1) Maxwell div/curl = 0.330, (2) By->Pz cross-talk cancellation
 # (|<Bz By*>|: 0.85 -> 0.38, |Bz|/|B_perp| = 0.134), (3) DC bias turn-on Ampère's law
-# (I_int = -25.8 A vs +22.1 A at turn-off), and (4) core diamagnetic dB_z = +0.25 G / -0.29 G.
+# (I_int = -25.7 A vs +22.0 A at turn-off), and (4) core diamagnetic dB_z = +0.27 G / -0.30 G.
+# Physical premises behind this sign assignment:
+#   - Right-handed LAPD lab frame: (x = West, y = Up, z = North toward Port 35), x × y = +z.
+#   - Guide field B_0 points along +z (DEFAULT_B_SIGN_Z = +1); reversing B_0 flips the
+#     expected sign of the diamagnetic dB_z step (turn-on dB_z < 0, turn-off dB_z > 0).
 DEFAULT_CHANNEL_SIGNS = (-1, -1, +1)
 JUN2026_BDOT_SIGNAL_CHAIN = "2.5BLP => X10 => 2.5BLP => X100"
 JUN2026_BDOT_GAIN = 1000.0
@@ -591,6 +595,7 @@ def analyze_dc_bias_steps(
     sens_dur_ms=DEFAULT_DC_SENS_DUR_MS,
     center_xy_cm=DEFAULT_DC_CENTER_XY_CM,
     by_sign=DEFAULT_BY_SIGN,
+    b_sign_z=DEFAULT_B_SIGN_Z,
 ):
     """Pure-array 2-D DC bias turn-on/turn-off step reconstruction and polarity proof.
 
@@ -602,12 +607,16 @@ def analyze_dc_bias_steps(
     ``6"``: ``5.08 < r <= 7.62 cm``) and ``15x15`` interior, core/wall median
     diamagnetic ``dB_z``, and integration-window sensitivity.
 
-    Checks all four in-situ absolute-polarity criteria for electrons collected
-    into positively biased ``+z`` Port 35 with core pressure hollowing:
-    ``I_int_on < 0``, ``I_int_off > 0``, ``dBz_core_on > 0``, ``dBz_core_off < 0``.
+    Checks all four in-situ absolute-polarity criteria in the right-handed
+    ``(West, Up, North/+z)`` frame for electrons collected into positively biased
+    ``+z`` Port 35 with core pressure hollowing and guide field ``b_sign_z * B_0 z_hat``:
+    ``I_int_on < 0``, ``I_int_off > 0``, ``b_sign_z * dBz_core_on > 0``, and
+    ``b_sign_z * dBz_core_off < 0``.
     """
     if by_sign not in (+1, -1):
         raise ValueError(f"by_sign must be +1 or -1, got {by_sign!r}")
+    if b_sign_z not in (+1, -1):
+        raise ValueError(f"b_sign_z must be +1 or -1, got {b_sign_z!r}")
     x_cm = np.asarray(x_cm, dtype=float)
     y_cm = np.asarray(y_cm, dtype=float)
     t_s = np.asarray(t_s, dtype=float)
@@ -662,15 +671,16 @@ def analyze_dc_bias_steps(
         sens_bz_on[idx_s] = s_on["dBz_core"]
         sens_bz_off[idx_s] = s_off["dBz_core"]
 
+    bsgn = float(b_sign_z)
     pol_i_on = bool(np.isfinite(on["I_int"]) and (on["I_int"] < 0.0))
     pol_i_off = bool(np.isfinite(off["I_int"]) and (off["I_int"] > 0.0))
-    pol_bz_on = bool(np.isfinite(on["dBz_core"]) and (on["dBz_core"] > 0.0))
-    pol_bz_off = bool(np.isfinite(off["dBz_core"]) and (off["dBz_core"] < 0.0))
+    pol_bz_on = bool(np.isfinite(on["dBz_core"]) and (bsgn * on["dBz_core"] > 0.0))
+    pol_bz_off = bool(np.isfinite(off["dBz_core"]) and (bsgn * off["dBz_core"] < 0.0))
     pol_ok = bool(pol_i_on and pol_i_off and pol_bz_on and pol_bz_off)
     pol_bz_sens_ok = bool(
         n_sens > 0
-        and np.all(np.isfinite(sens_bz_on)) and np.all(sens_bz_on > 0.0)
-        and np.all(np.isfinite(sens_bz_off)) and np.all(sens_bz_off < 0.0)
+        and np.all(np.isfinite(sens_bz_on)) and np.all(bsgn * sens_bz_on > 0.0)
+        and np.all(np.isfinite(sens_bz_off)) and np.all(bsgn * sens_bz_off < 0.0)
     )
 
     return {
@@ -796,6 +806,7 @@ def analyze_run_dc_bias_steps(
     spec,
     data_dir=DATA_DIR,
     *,
+    b_sign_z=DEFAULT_B_SIGN_Z,
     by_sign=DEFAULT_BY_SIGN,
     bdot_cal=_UNSET,
     bdot_area_m2=DEFAULT_BDOT_AREA_M2,
@@ -870,6 +881,7 @@ def analyze_run_dc_bias_steps(
         sens_dur_ms=sens_dur_ms,
         center_xy_cm=center_xy_cm,
         by_sign=by_sign,
+        b_sign_z=b_sign_z,
     )
     res["n_shots_per_pos"] = int(pos_b.nshot)
     res["n_pos"] = int(pos_b.npos)
@@ -1040,6 +1052,7 @@ def analyze_run(spec, data_dir=DATA_DIR, onset_table=None, *,
             sens_dur_ms=dc_sens_dur_ms,
             center_xy_cm=dc_center_xy_cm,
             by_sign=by_sign,
+            b_sign_z=b_sign_z,
         )
         dc_res["n_shots_per_pos"] = int(pos_b.nshot)
         dc_res["n_pos"] = int(pos_b.npos)
@@ -1227,6 +1240,7 @@ def batch_dc_bias_steps(
     runs=None,
     out_path=None,
     *,
+    b_sign_z=DEFAULT_B_SIGN_Z,
     by_sign=DEFAULT_BY_SIGN,
     bdot_cal=_UNSET,
     bdot_area_m2=DEFAULT_BDOT_AREA_M2,
@@ -1312,6 +1326,7 @@ def batch_dc_bias_steps(
         dc_res = analyze_run_dc_bias_steps(
             spec,
             data_dir=data_dir,
+            b_sign_z=b_sign_z,
             by_sign=by_sign,
             bdot_cal=bdot_cal,
             bdot_area_m2=bdot_area_m2,

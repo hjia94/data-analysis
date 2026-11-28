@@ -946,10 +946,10 @@ def plot_em_instability_overview(
 ):
     """4-panel electromagnetic instability overview (default: Run 26, shot 716).
 
-    * **(a)** Raw fixed-bias Langmuir ``Isat`` trace across the bias pulse.
+    * **(a)** Raw Langmuir ``Isat`` trace across the bias pulse.
     * **(b)** Simultaneous raw P28 B-dot trace (baseline-zeroed on pre-bias).
     * **(c)** Normalized Hann-windowed FFT magnitude of both over ``fft_window_ms``.
-    * **(d)** Reference-locked 2-D ``Re[J_par]/J_max`` & ``B_perp`` from
+    * **(d)** Reference-locked 2-D ``Re[J_par]`` & ``B_perp`` from
       ``bdot_2d_jun2026.npz`` with Port-35 ``2"``/``4"`` footprints and the
       exact probe locations of ``shot``.
     """
@@ -1007,14 +1007,16 @@ def plot_em_instability_overview(
 
     beta_rat = np.nan
     db_over_b0 = np.nan
+    if is_cal and np.isfinite(meta.get("b0_g", np.nan)) and meta["b0_g"] > 0.0:
+        # Compute f0 time-RMS peak |dB_perp| / B0 directly from the plotted calibrated
+        # h1 map (avoids any broadband/2f0 inflation from dividing std(dB/dt) by w0).
+        bp_rms_t = np.sqrt(0.5 * (np.abs(Bx) ** 2 + np.abs(By) ** 2))
+        db_over_b0 = float(np.nanmax(bp_rms_t)) / (float(meta["b0_g"]) * 1e-4)
     if os.path.exists(modes_path):
         with np.load(modes_path, allow_pickle=True) as md:
             bkey = f"disp__{matched_puff_run}__beta_e_over_me_mi"
             if bkey in md.files:
                 beta_rat = float(md[bkey])
-            dkey = f"bdot__{run_num}__delta_b_perp_over_b0"
-            if is_cal and dkey in md.files:
-                db_over_b0 = float(md[dkey])
 
     ch_map = {"C1": r"$\dot{B}_x$", "C2": r"$\dot{B}_y$", "C3": r"$\dot{B}_z$"}
     b_lbl = ch_map.get(bdot_ch, bdot_ch)

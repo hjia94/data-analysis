@@ -82,6 +82,8 @@ DEFAULT_BDOT_GAIN = None
 DEFAULT_BDOT_ATTEN_DB = None
 # Matches Jun2026_bdot_2d.DEFAULT_CHANNEL_SIGNS: uniquely verified from Maxwell
 # div/curl, By->Pz cross-talk cancellation, DC turn-on/off Ampère's law, and core dB_z.
+# Premises: right-handed (x = West, y = Up, z = North toward Port 35) lab frame and
+# guide field B_0 along +z (B_SIGN_Z = +1; reversing B_0 flips the expected dB_z sign).
 DEFAULT_BDOT_CHANNEL_SIGNS = (-1, -1, +1)
 
 # LAPD magnetic field polarity: +1 -> B_0 along +z so outward E_r > 0 gives
@@ -314,6 +316,28 @@ def analyze_axial_kpar(data_dir=DATA_DIR, onset_table=None, *,
     return results
 
 
+def _spectral_b_rms(bd_stack, dt_s, f_min_hz):
+    """Integrate ``dB/dt`` to time-RMS ``B`` via per-bin ``1 / (2*pi*f)`` above ``f_min_hz``.
+
+    Avoids the harmonic/broadband inflation of dividing broadband ``std(dB/dt)``
+    by a single fundamental ``omega_0`` (which overweights ``2 f_0`` by ``2x``
+    in amplitude, ``4x`` in power).
+    """
+    arr = np.asarray(bd_stack, dtype=float)
+    arr = arr - arr.mean(axis=-1, keepdims=True)
+    n = arr.shape[-1]
+    freqs = np.fft.rfftfreq(n, d=float(dt_s))
+    spec = np.fft.rfft(arr, axis=-1)
+    weights = np.full(freqs.size, 2.0, dtype=float)
+    weights[0] = 1.0
+    if n % 2 == 0:
+        weights[-1] = 1.0
+    mask = freqs >= float(f_min_hz)
+    b_spec = np.zeros_like(spec)
+    b_spec[..., mask] = spec[..., mask] / (2.0 * np.pi * freqs[mask])
+    return np.sqrt(np.sum(weights * (np.abs(b_spec) ** 2), axis=-1)) / float(n)
+
+
 def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
                             bdot_cal=_UNSET,
                             bdot_area_m2=DEFAULT_BDOT_AREA_M2,
@@ -326,10 +350,11 @@ def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
     Always computes raw ``v_perp_p95_v`` [V] and ``v_perp_over_omega_vs``
     [V*s = ``gain * area * delta_B_perp``]. Defaults to ``DEFAULT_BDOT_CAL``
     (bare 3x3 ``.npz``) and auto-reads ``bdot_gain``/``bdot_atten_db`` from the
-    run's P28 HDF5 description; converts to real probe-terminal voltage and
-    applies 3-axis :func:`data_analysis.plasma.bdot.voltage_to_bdot` **before**
-    taking RMS, ``hypot(dBx, dBy)``, and the 95th percentile. Pass
-    ``bdot_cal=None`` explicitly for uncalibrated output.
+    run's P28 HDF5 description; converts to real probe-terminal voltage, applies
+    3-axis :func:`data_analysis.plasma.bdot.voltage_to_bdot`, and integrates
+    ``dB/dt`` spectrally via per-bin ``1 / (2*pi*f)`` above ``0.5 * f0``
+    (:func:`_spectral_b_rms`) before taking ``hypot(dBx, dBy)`` and the 95th
+    percentile. Pass ``bdot_cal=None`` explicitly for uncalibrated output.
     """
     if bdot_cal is _UNSET:
         bdot_cal = None if bdot_area_m2 is not None else DEFAULT_BDOT_CAL
@@ -430,13 +455,15 @@ def estimate_bdot_amplitude(data_dir=DATA_DIR, onset_table=None, *,
         omega = 2.0 * np.pi * f0
 
         if calibrated:
-            # Stack (3, nshot, nt) -> real probe-terminal voltage -> 3x3 dB/dt -> RMS/hypot
+            # Stack (3, nshot, nt) -> real probe-terminal voltage -> 3x3 dB/dt ->
+            # exact per-bin 1/(2*pi*f) spectral integration above 0.5*f0
+            dt_b = float(tarr[1] - tarr[0])
             v_stack = np.stack(segs, axis=0)
             v_coil = (signs[:, None, None] * v_stack) / eff_gain
             bd_stack = voltage_to_bdot(v_coil, inv_area)
-            bd_rms = np.std(bd_stack, axis=-1)  # (3, nshot), T/s
-            b_perp_t = float(np.percentile(np.hypot(bd_rms[0], bd_rms[1]), 95)) / omega
-            b_z_t = float(np.percentile(bd_rms[2], 95)) / omega
+            b_rms = _spectral_b_rms(bd_stack, dt_b, f_min_hz=0.5 * f0)  # (3, nshot), T
+            b_perp_t = float(np.percentile(np.hypot(b_rms[0], b_rms[1]), 95))
+            b_z_t = float(np.percentile(b_rms[2], 95))
             b0_t = b0_g * 1e-4
             db_perp_g = b_perp_t * 1e4
             db_z_g = b_z_t * 1e4

@@ -204,6 +204,23 @@ class TestModesAndDispersion(unittest.TestCase):
             self.assertTrue(np.isfinite(r06["f_star_n_hz"]))
             self.assertTrue(np.isfinite(r06["f_alfven_hz"]))
 
+    def test_spectral_b_rms_eliminates_harmonic_inflation(self):
+        # Two-tone B(t) = A1 cos(w0 t) + A2 cos(2 w0 t):
+        # true time-RMS is sqrt((A1^2 + A2^2) / 2), whereas std(dB/dt) / w0
+        # inflates to sqrt((A1^2 + 4 A2^2) / 2).
+        dt = 1e-6
+        n = 5000  # 5.0 ms -> exact integer cycles for 4 kHz & 8 kHz (df = 200 Hz)
+        t = np.arange(n) * dt
+        f0 = 4000.0
+        w0 = 2.0 * np.pi * f0
+        a1, a2 = 2.0e-5, 1.5e-5
+        bdot = -w0 * a1 * np.sin(w0 * t) - (2.0 * w0) * a2 * np.sin(2.0 * w0 * t)
+        b_rms = float(jmo._spectral_b_rms(bdot[None, :], dt, f_min_hz=0.5 * f0)[0])
+        b_true = float(np.sqrt(0.5 * (a1 ** 2 + a2 ** 2)))
+        b_naive = float(np.std(bdot) / w0)
+        self.assertAlmostEqual(b_rms, b_true, delta=1e-11)
+        self.assertGreater(b_naive, 1.3 * b_true)
+
     def test_require_xcorr_raises_keyerror_and_batch_all_skips_by_default(self):
         with mock.patch.object(jpl, "_load_xcorr_run", return_value=None):
             with self.assertRaises(KeyError):

@@ -429,7 +429,7 @@ class TestElectromagnetic2DHelpers(unittest.TestCase):
         self.assertTrue(res_xy["polarity_dbz_off_ok"])
         self.assertFalse(res_xy["polarity_consistent"])
 
-        # Z-coil inversion must fail dBz polarity checks
+        # Z-coil inversion must fail dBz polarity checks (and reversing b_sign_z flips expectation)
         bdot_z_flip = bdot.copy()
         bdot_z_flip[2] *= -1.0
         res_z = jb2.analyze_dc_bias_steps(x_cm, y_cm, t_s, bdot_z_flip, calibrated=True)
@@ -440,6 +440,11 @@ class TestElectromagnetic2DHelpers(unittest.TestCase):
         self.assertFalse(res_z["polarity_consistent"])
         self.assertFalse(res_z["polarity_dbz_sens_consistent"])
         self.assertTrue(res["polarity_dbz_sens_consistent"])
+        res_z_rev = jb2.analyze_dc_bias_steps(x_cm, y_cm, t_s, bdot_z_flip, calibrated=True, b_sign_z=-1)
+        self.assertTrue(res_z_rev["polarity_dbz_on_ok"])
+        self.assertTrue(res_z_rev["polarity_dbz_off_ok"])
+        self.assertTrue(res_z_rev["polarity_consistent"])
+        self.assertTrue(res_z_rev["polarity_dbz_sens_consistent"])
 
     def test_batch_dc_bias_steps_merges_and_preserves_harmonic_keys(self):
         fake_dc = {
@@ -490,7 +495,9 @@ class TestElectromagnetic2DHelpers(unittest.TestCase):
                 },
             )
             with mock.patch.object(jb2, "analyze_run_dc_bias_steps", return_value=fake_dc) as m_dc:
-                jb2.batch_dc_bias_steps(data_dir=tmp, runs=["26", "31"], out_path=out_npz)
+                jb2.batch_dc_bias_steps(
+                    data_dir=tmp, runs=["26", "31"], out_path=out_npz, bdot_cal=None,
+                )
                 self.assertEqual(m_dc.call_count, 2)
 
             with np.load(out_npz) as d:
@@ -505,25 +512,29 @@ class TestElectromagnetic2DHelpers(unittest.TestCase):
 
             # Second call with overwrite=False skips cleanly
             with mock.patch.object(jb2, "analyze_run_dc_bias_steps") as m_dc:
-                jb2.batch_dc_bias_steps(data_dir=tmp, runs=["26", "31"], out_path=out_npz, overwrite=False)
+                jb2.batch_dc_bias_steps(
+                    data_dir=tmp, runs=["26", "31"], out_path=out_npz, bdot_cal=None, overwrite=False,
+                )
                 m_dc.assert_not_called()
 
             # Mismatched channel_signs or by_sign with overwrite=False must raise
             with self.assertRaises(ValueError):
                 jb2.batch_dc_bias_steps(
                     data_dir=tmp, runs=["26"], out_path=out_npz,
-                    channel_signs=(+1, +1, +1), overwrite=False,
+                    bdot_cal=None, channel_signs=(+1, +1, +1), overwrite=False,
                 )
             with self.assertRaises(ValueError):
                 jb2.batch_dc_bias_steps(
                     data_dir=tmp, runs=["26"], out_path=out_npz,
-                    by_sign=-1, overwrite=False,
+                    bdot_cal=None, by_sign=-1, overwrite=False,
                 )
 
             # Partial overwrite refreshes only Run 26 dc__* while preserving Run 31 dc__* and all h1 keys
             fake_dc_v2 = dict(fake_dc, I_int_on=-26.1)
             with mock.patch.object(jb2, "analyze_run_dc_bias_steps", return_value=fake_dc_v2) as m_dc:
-                jb2.batch_dc_bias_steps(data_dir=tmp, runs=["26"], out_path=out_npz, overwrite=True)
+                jb2.batch_dc_bias_steps(
+                    data_dir=tmp, runs=["26"], out_path=out_npz, bdot_cal=None, overwrite=True,
+                )
                 self.assertEqual(m_dc.call_count, 1)
             with np.load(out_npz) as d:
                 self.assertAlmostEqual(float(d["26__dc__I_int_on"]), -26.1)

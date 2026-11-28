@@ -1242,6 +1242,26 @@ def compute_em_momentum_energy_flutter(
     projected about the same ``(cx, cy)`` and summed in quadrature/covariance
     (exact by Fourier orthogonality between ``f_0`` and ``2 f_0``) as an
     ``h1`` vs. ``h1 + h2`` sanity check.
+
+    Physics caveats
+    ---------------
+    1. **Reference-locked ``f_0`` phasor vs. narrowband Reynolds stress:**
+       ``Bx, By`` from ``bdot_2d_jun2026.npz`` capture the component coherent
+       with the stationary reference at ``f_0``, whereas Run 32 ``rs_rt_f0``
+       integrates all power in ``[0.65 f_0, 1.35 f_0]``. In the active wall
+       (``2.5–5.5 cm``), measured B-dot coherence is ``gamma^2 = 0.975–0.979``
+       on Run 26 (``0.937–0.947`` on Run 31), bounding the omitted incoherent
+       ``f_0`` fraction to ``< 3%`` (``< 7%`` on Run 31).
+    2. **Rechester-Rosenbluth flutter upper bound:** ``delta_r_B = L_par * dB_r / B_0``
+       and ``chi_RR = chi_par * (dB_r / B_0)^2`` assume a stochastic magnetic
+       field and ``k_par ~ 0`` over the full ``L_par = 14 m`` column; applied to
+       a single coherent mode they provide a conservative **upper bound**, not
+       an actual stochastic diffusivity.
+    3. **Cross-run & cross-``B_0`` ratios:** ``W_K``, ``|E/B|/v_A``, and
+       ``M_rt / R_rt`` pair B-dot (Run 26 at 800 G or Run 31 at 600 G) with
+       Run 32's 800 G Mach velocity and Run 03's 800 G profiles. Only Run 26
+       is ``B_0``-matched (``b0_matched_to_r32=True``); Run 31 ratios are
+       order-of-magnitude reference comparisons only.
     """
     x_arr = np.asarray(x_cm, dtype=float)
     y_arr = np.asarray(y_cm, dtype=float)
