@@ -50,7 +50,7 @@ import numpy as np
 # opening a pydaq/legacy file. Matches the lazy-import convention in io/scope_reader.py.
 
 __all__ = ["open_lapd", "LapdRun", "LapdSession", "detect_backend", "compare_runs",
-           "gas_puff", "parse_gas_puff", "position_shots",
+           "gas_puff", "parse_gas_puff", "parse_bdot_gain", "position_shots",
            "list_all_channels", "print_run_description"]
 
 
@@ -274,6 +274,92 @@ def parse_shunts(text, tips=None):
             ohms = found.pop()
             return {t.upper(): ohms for t in tips}
     return {}
+
+
+# B-dot signal chain inside a probe description block, e.g.
+#   - P28: Bdot-10T-C16
+#     - Connection: 2.5BLP => X10 => 2.5BLP =>X100
+_BDOT_HEADER_RE = re.compile(r"^\s*-\s*(?:(?:\(NOT\s+US\w*\)\s*)?.*bdot.*)$", re.IGNORECASE)
+_CONN_RE = re.compile(r"connection\s*:\s*(.+)$", re.IGNORECASE)
+_GAIN_STAGE_RE = re.compile(r"(?<![A-Za-z0-9])X\s*(\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_ATTEN_DB_RE = re.compile(r"(\d+(?:\.\d+)?)\s*dB\b", re.IGNORECASE)
+
+
+def parse_bdot_gain(text, probe=None):
+    """Extract a B-dot probe's recorded amplifier/attenuator chain from a run description.
+
+    Scans active (non-``(NOT USED)``) B-dot probe blocks for a ``Connection:``
+    line such as ``Connection: 2.5BLP => X10 => 2.5BLP =>X100``, multiplying
+    ``X<n>`` linear gain stages and folding any ``<n> dB`` attenuator pads.
+
+    Pass ``probe`` (e.g. ``'P28'`` or ``'C16'``, matched as a case-insensitive
+    whole token against the probe header line) to select one probe when a run
+    lists multiple active B-dot probes. Raises ``ValueError`` if multiple
+    active B-dot blocks match (never silently picks the first).
+
+    Returns ``{'header': str, 'chain': str, 'gain': float, 'atten_db': float, 'effective_gain': float}``
+    when a unique matching B-dot connection line with at least one gain/attenuator
+    token is found, or ``None`` when no matching B-dot signal chain is recorded.
+    """
+    if not text:
+        return None
+    lines = text.splitlines()
+    in_bdot = False
+    bdot_indent = 0
+    bdot_header = ""
+    matches = []
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        indent = len(line) - len(stripped)
+        if _BDOT_HEADER_RE.match(line):
+            if re.search(r"\(NOT\s+US\w*\)", line, re.IGNORECASE):
+                in_bdot = False
+                continue
+            in_bdot = True
+            bdot_indent = indent
+            bdot_header = stripped.lstrip("-").strip()
+            continue
+        if in_bdot:
+            if indent <= bdot_indent and stripped.startswith("-"):
+                in_bdot = False
+                continue
+            m = _CONN_RE.search(line)
+            if m:
+                chain = m.group(1).strip()
+                gains = [float(g) for g in _GAIN_STAGE_RE.findall(chain)]
+                attens = [float(a) for a in _ATTEN_DB_RE.findall(chain)]
+                if not gains and not attens:
+                    continue
+                gain = float(np.prod(gains)) if gains else 1.0
+                atten_db = float(sum(attens)) if attens else 0.0
+                eff = gain * (10.0 ** (-atten_db / 20.0))
+                matches.append({
+                    "header": bdot_header,
+                    "chain": chain,
+                    "gain": gain,
+                    "atten_db": atten_db,
+                    "effective_gain": eff,
+                })
+                in_bdot = False
+
+    if probe is not None:
+        tok = str(probe).strip()
+        if not tok:
+            raise ValueError("probe filter must be a non-empty string")
+        pat = re.compile(rf"(?<![A-Za-z0-9]){re.escape(tok)}(?![A-Za-z0-9])", re.IGNORECASE)
+        matches = [entry for entry in matches if pat.search(entry["header"])]
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        headers = [entry["header"] for entry in matches]
+        raise ValueError(
+            f"Multiple active B-dot signal chains matched ({headers}); "
+            "pass probe= (e.g. probe='P28') to select one."
+        )
+    return matches[0]
 
 
 def list_all_channels(fn):

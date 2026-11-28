@@ -85,9 +85,18 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("run", type=int)
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    ap.add_argument("--norm", action="store_true",
+                    help="Force normalized |B_perp| and J_z maps even when calibrated")
     args = ap.parse_args()
     r = load(args.out_dir / f"{args.run:02d}-bdot-phasors.npz")
     checks(r)
+
+    # area may be a scalar or a 3x3 calibration matrix; 1.0 is the uncalibrated placeholder
+    if "calibrated" in r:
+        calibrated = bool(r["calibrated"])
+    else:
+        calibrated = not (np.ndim(r["area"]) == 0 and float(r["area"]) == 1.0)
+    use_phys = calibrated and not args.norm
 
     xs, ys, grid = grid_modes(r)
     print("[5] linearity |B_AB - (B_A + B_B)| / |B_AB|:",
@@ -118,15 +127,28 @@ def main():
         bp = np.sqrt(np.abs(G[0]) ** 2 + np.abs(G[1]) ** 2)
         rot = np.exp(-1j * np.angle(Jz.flat[np.nanargmax(np.abs(Jz))]))   # phase of peak J_z
         a = ax[row, 0]
-        im = a.imshow(bp / np.nanmax(bp), origin="lower", extent=ext, cmap="viridis")
+        if use_phys:
+            bp_g = bp * 1e4
+            b_scale, b_unit = (1e3, "mG") if float(np.nanmax(bp_g)) < 1.0 else (1.0, "G")
+            im = a.imshow(bp_g * b_scale, origin="lower", extent=ext, cmap="viridis")
+            a.set_title(f"mode {k}: |B_perp| ({b_unit}), Re(B_perp) at J_z-peak phase")
+        else:
+            im = a.imshow(bp / np.nanmax(bp), origin="lower", extent=ext, cmap="viridis")
+            a.set_title(f"mode {k}: |B_perp| (norm.), Re(B_perp) at J_z-peak phase")
         s = (slice(None, None, step),) * 2
         a.quiver(X[s], Y[s], (G[0] * rot).real[s], (G[1] * rot).real[s], color="w")
-        a.set_title(f"mode {k}: |B_perp| (norm.), Re(B_perp) at J_z-peak phase")
         fig.colorbar(im, ax=a)
-        lim = np.nanmax(np.abs((Jz * rot).real))
+        jz_re = (Jz * rot).real
+        lim = np.nanmax(np.abs(jz_re))
         a = ax[row, 1]
-        im = a.imshow((Jz * rot).real / lim, origin="lower", extent=ext, cmap="RdBu_r", vmin=-1, vmax=1)
-        a.set_title("Re(J_z) = curl_z B / mu_0 (norm.)")
+        if use_phys:
+            j_scale, j_unit = (1e-3, "kA/m$^2$") if lim >= 1e3 else (1.0, "A/m$^2$")
+            im = a.imshow(jz_re * j_scale, origin="lower", extent=ext, cmap="RdBu_r",
+                          vmin=-lim * j_scale, vmax=lim * j_scale)
+            a.set_title(f"Re(J_z) = curl_z B / mu_0 ({j_unit})")
+        else:
+            im = a.imshow(jz_re / lim, origin="lower", extent=ext, cmap="RdBu_r", vmin=-1, vmax=1)
+            a.set_title("Re(J_z) = curl_z B / mu_0 (norm.)")
         fig.colorbar(im, ax=a)
         a = ax[row, 2]
         im = a.imshow(np.abs(dv) / np.nanmax(np.abs(cz)), origin="lower", extent=ext, cmap="magma", vmin=0, vmax=1)
@@ -139,10 +161,9 @@ def main():
         a.set(xlabel="t (ms)", ylim=(0, 1.6), title="wave |B_perp| envelope (cycle_means)")
     for a in ax[:, :3].ravel():
         a.set(xlabel="x (cm)", ylabel="y (cm)")
-    # area may be a scalar or a 3x3 calibration matrix; 1.0 is the uncalibrated placeholder
-    uncalibrated = np.ndim(r["area"]) == 0 and float(r["area"]) == 1.0
-    fig.suptitle(f"Aug-2026 run {args.run:02d}: {float(r['freq'])/1e3:.1f} kHz Alfvén wave, P28 B-dot"
-                 + (" (unit coil area: relative scale)" if uncalibrated else ""))
+    probe_tag = f" ({r['probe_id']})" if ("probe_id" in r and str(r["probe_id"])) else ""
+    fig.suptitle(f"Aug-2026 run {args.run:02d}: {float(r['freq'])/1e3:.1f} kHz Alfvén wave, P28 B-dot{probe_tag}"
+                 + ("" if calibrated else " (unit coil area: relative scale)"))
     out = args.out_dir / "figures" / f"{args.run:02d}-bdot-plane.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=80)
