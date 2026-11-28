@@ -16,7 +16,6 @@ Same read path as ``Jun2026_IV`` / ``Jun2026_Isat``: channels via
 the coherence/phase is what matters, not absolute current scaling.
 """
 
-import glob
 import os
 from typing import NamedTuple
 import numpy as np
@@ -24,7 +23,12 @@ from tqdm import tqdm
 
 from data_analysis.io import open_lapd, position_shots, probe_channel_map
 from data_analysis.io.probe_map import STATIONARY, UNMAPPED
-from data_analysis.utils import merge_save_npz, run_num_of
+from data_analysis.utils import (
+    find_run_hdf5,
+    merge_save_npz,
+    npz_settings_mismatch,
+    run_num_of,
+)
 from data_analysis.signal import (
     cross_correlation,
     coherence_spectrum,
@@ -667,44 +671,20 @@ def _as_pair_spec(spec):
 def _pair_settings_mismatch(npz_data, key, tmin_ms, tmax_ms, nperseg,
                             t_offset_b_ms, motion_group_name=None):
     """Return human-readable diffs between a stored pair and requested settings."""
-    diffs = []
-    checks = [
-        ("tmin_ms", float(tmin_ms), 1e-9),
-        ("tmax_ms", float(tmax_ms), 1e-9),
-        ("t_offset_b_ms", float(t_offset_b_ms), 1e-9),
-    ]
-    for field, want, tol in checks:
-        k = f"{key}__{field}"
-        if k not in npz_data.files:
-            diffs.append(f"{field}: missing in npz (requested {want:g})")
-        else:
-            got = float(npz_data[k])
-            if not np.isclose(got, want, atol=tol, rtol=0.0):
-                diffs.append(f"{field}: stored {got:g} != requested {want:g}")
-    kn = f"{key}__nperseg"
-    if kn not in npz_data.files:
-        diffs.append(f"nperseg: missing in npz (requested {int(nperseg)})")
-    elif int(npz_data[kn]) != int(nperseg):
-        diffs.append(f"nperseg: stored {int(npz_data[kn])} != requested {int(nperseg)}")
+    want = {
+        "tmin_ms": float(tmin_ms),
+        "tmax_ms": float(tmax_ms),
+        "t_offset_b_ms": float(t_offset_b_ms),
+        "nperseg": int(nperseg),
+    }
     if motion_group_name is not None:
-        km = f"{key}__motion_group"
-        if km not in npz_data.files:
-            diffs.append(f"motion_group: missing in npz (requested {motion_group_name!r})")
-        else:
-            got_mg = str(npz_data[km])
-            if got_mg != motion_group_name:
-                diffs.append(f"motion_group: stored {got_mg!r} != requested {motion_group_name!r}")
-    return diffs
+        want["motion_group"] = str(motion_group_name)
+    return npz_settings_mismatch(npz_data, key, want)
 
 
 def xcorr_ifn(data_dir, run_num):
     """Resolve the raw HDF5 for a zero-padded run number (e.g. ``"26"``)."""
-    hits = sorted(glob.glob(os.path.join(data_dir, f"{run_num}-*.hdf5")))
-    if not hits:
-        raise FileNotFoundError(f"no HDF5 for run {run_num} in {data_dir}")
-    if len(hits) > 1:
-        raise ValueError(f"multiple HDF5 files for run {run_num}: {hits}")
-    return hits[0]
+    return find_run_hdf5(data_dir, run_num)
 
 
 def batch_all(data_dir=DATA_DIR, runs=None, tmin_ms=TMIN_MS, tmax_ms=TMAX_MS,

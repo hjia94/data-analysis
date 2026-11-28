@@ -31,6 +31,7 @@ Application to plasma data:
     :func:`inverse_area_matrix` builds ``A^-1`` (or ``(1/G) A^-1``),
     :func:`voltage_to_bdot` converts time-domain or phasor voltages to dB/dt,
     :func:`integrate_bdot` integrates dB/dt in time with drift removal,
+    :func:`spectral_b_rms` integrates dB/dt spectrally via ``1 / (2*pi*f)`` to RMS B,
     :func:`phasor_voltage_to_b` converts single-frequency voltage phasors to B,
     and :func:`calibrate_bdot_spectrum` calibrates broadband FFT/STFT spectra.
 
@@ -760,3 +761,27 @@ def integrate_bdot(bdot, dt, baseline="pretrigger", *, pretrigger=None,
         B = B - _smooth_last_axis(B, sigma)
 
     return B
+
+
+def spectral_b_rms(bdot, dt, f_min_hz=0.0):
+    """Integrate ``dB/dt`` along the last axis to time-RMS ``B`` via ``1 / (2*pi*f)``.
+
+    Uses per-bin spectral division above ``f_min_hz`` (always excluding DC) so
+    multi-harmonic or broadband ``dB/dt`` fluctuations are integrated without
+    the harmonic inflation of dividing ``std(dB/dt)`` by a single fundamental
+    ``omega_0`` (which overweights ``2 f_0`` by ``2x`` in amplitude, ``4x`` in
+    power).
+    """
+    arr = np.asarray(bdot, dtype=float)
+    arr = arr - arr.mean(axis=-1, keepdims=True)
+    n = arr.shape[-1]
+    freqs = np.fft.rfftfreq(n, d=float(dt))
+    spec = np.fft.rfft(arr, axis=-1)
+    weights = np.full(freqs.size, 2.0, dtype=float)
+    weights[0] = 1.0
+    if n % 2 == 0:
+        weights[-1] = 1.0
+    mask = (freqs >= float(f_min_hz)) & (freqs > 0.0)
+    b_spec = np.zeros_like(spec)
+    b_spec[..., mask] = spec[..., mask] / (2.0 * np.pi * freqs[mask])
+    return np.sqrt(np.sum(weights * (np.abs(b_spec) ** 2), axis=-1)) / float(n)

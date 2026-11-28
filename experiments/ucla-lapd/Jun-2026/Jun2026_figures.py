@@ -16,7 +16,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import glob
 import os
 from typing import Callable, NamedTuple
 
@@ -147,9 +146,9 @@ def _resolve_onset_channel(onf, hdf5_path, run_num, scope=None, chan=None):
     2. ``<run>__scope`` and ``<run>__chan`` stored in ``onset_summary_jun2026.npz``
        (guarantees panel (a) matches the exact channel that produced ``shot_nums``
        and panel (b)'s PSD).
-    3. HDF5 probe wiring table (:func:`data_analysis.io.probe_map.channel_wiring`)
-       matching ``P33`` ``Isat`` channels, falling back to
-       ``Jun2026_onset.ONSET_RUN_MAP``.
+    3. ``Jun2026_onset.ONSET_RUN_MAP`` for the requested run.
+    4. Unambiguous HDF5 probe wiring match (:func:`data_analysis.io.probe_map.channel_wiring`)
+       for ``P33`` ``Isat`` (raises ``ValueError`` if multiple channels match).
     """
     if scope is not None and chan is not None:
         return str(scope), str(chan)
@@ -161,18 +160,6 @@ def _resolve_onset_channel(onf, hdf5_path, run_num, scope=None, chan=None):
             str(chan) if chan is not None else str(onf[k_ch]),
         )
 
-    try:
-        from data_analysis.io.probe_map import channel_wiring
-
-        wiring = channel_wiring(hdf5_path)
-        for (w_scope, w_chan), desc in wiring.items():
-            d_lo = desc.lower()
-            if "p33" in d_lo and "isat" in d_lo:
-                if (scope is None or w_scope == scope) and (chan is None or w_chan == chan):
-                    return w_scope, w_chan
-    except (OSError, ValueError, KeyError):
-        pass
-
     import Jun2026_onset as jon
 
     if str(run_num) in jon.ONSET_RUN_MAP:
@@ -181,9 +168,32 @@ def _resolve_onset_channel(onf, hdf5_path, run_num, scope=None, chan=None):
             str(scope) if scope is not None else spec.scope,
             str(chan) if chan is not None else spec.chan,
         )
+
+    try:
+        from data_analysis.io.probe_map import channel_wiring
+
+        wiring = channel_wiring(hdf5_path)
+        matches = [
+            (w_scope, w_chan)
+            for (w_scope, w_chan), desc in wiring.items()
+            if "p33" in desc.lower() and "isat" in desc.lower()
+            and (scope is None or w_scope == scope)
+            and (chan is None or w_chan == chan)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous P33 Isat wiring for run {run_num} in {hdf5_path}: "
+                f"{matches}; pass scope/chan explicitly"
+            )
+    except (OSError, KeyError):
+        pass
+
     raise KeyError(
         f"Cannot resolve stationary reference (scope, chan) for run {run_num}: "
-        f"missing '{k_sc}'/'{k_ch}' in onset npz and no matching P33 Isat wiring in {hdf5_path}"
+        f"missing '{k_sc}'/'{k_ch}' in onset npz, absent from ONSET_RUN_MAP, "
+        f"and no matching P33 Isat wiring in {hdf5_path}"
     )
 
 

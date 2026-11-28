@@ -38,7 +38,6 @@ Saves ``bdot_2d_jun2026.npz`` in ``DATA_DIR`` and prints a concise summary.
 """
 
 import datetime
-import glob
 import os
 import warnings
 from typing import NamedTuple
@@ -58,7 +57,6 @@ from data_analysis.plasma.fields import (
     circular_polarization,
     curl,
     divergence_2d,
-    reference_locked_phasor,
 )
 from data_analysis.plasma.modes import fit_azimuthal_mode
 from data_analysis.signal import clip_time_window

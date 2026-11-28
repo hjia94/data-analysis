@@ -27,7 +27,6 @@ beside it, so a later measured-T_e pass rescales v without re-reading the run.
 
 import datetime
 import os
-import re
 import warnings
 
 import numpy as np
@@ -46,7 +45,8 @@ from data_analysis.plasma.mach import (FLOW_SIGN_PLUS_FACING_AXIS,
                                        rescale_mach_velocity)
 from data_analysis.plasma.profiles import (local_drift_scales,
                                            radial_profile_gradients)
-from data_analysis.utils import merge_save_npz, run_num_of
+from data_analysis.utils import (merge_save_npz, pack_npz_entries,
+                                 prepare_incremental_npz, run_num_of)
 
 DATA_DIR = jmf.DATA_DIR
 CAL_NPZ = jmf.CAL_NPZ
@@ -652,28 +652,6 @@ def _rescaled_settings(x_center_cm, smooth_window, smooth_poly, te_mode):
     }
 
 
-def _rescaled_settings_mismatch(npz_data, run_num, want):
-    diffs = []
-    for field, val in want.items():
-        k = f"{run_num}__{field}"
-        if k not in npz_data.files:
-            diffs.append(f"{field}: missing in npz (requested {val!r})")
-            continue
-        if isinstance(val, str):
-            got = str(npz_data[k])
-            if got != val:
-                diffs.append(f"{field}: stored {got!r} != requested {val!r}")
-        elif isinstance(val, int):
-            got = int(npz_data[k])
-            if got != val:
-                diffs.append(f"{field}: stored {got} != requested {val}")
-        else:
-            got = float(npz_data[k])
-            if not np.isclose(got, val, atol=1e-9, rtol=0.0):
-                diffs.append(f"{field}: stored {got:g} != requested {val:g}")
-    return diffs
-
-
 def batch_rescaled_summary(data_dir=DATA_DIR, runs=None, *, profiles_npz=None,
                            onset_npz=None, out_path=None,
                            x_center_cm=DEFAULT_X_CENTER_CM, smooth_window=5,
@@ -683,29 +661,10 @@ def batch_rescaled_summary(data_dir=DATA_DIR, runs=None, *, profiles_npz=None,
     out_path = out_path or os.path.join(data_dir, RESCALED_OUT_NAME)
     want = _rescaled_settings(x_center_cm, smooth_window, smooth_poly, te_mode)
 
-    if overwrite and runs is None and os.path.isfile(out_path):
-        os.remove(out_path)
-
-    existing_runs = set()
-    drop_keys = []
-    if os.path.isfile(out_path):
-        with np.load(out_path) as d:
-            existing_runs = {
-                k.split("__", 1)[0] for k in d.files if k.endswith("__ref_bin_idx")
-            }
-            if overwrite:
-                prefixes = tuple(f"{r}__" for r in run_list)
-                drop_keys = [k for k in d.files if k.startswith(prefixes)]
-                existing_runs -= set(run_list)
-            else:
-                for r in run_list:
-                    if r in existing_runs:
-                        diffs = _rescaled_settings_mismatch(d, r, want)
-                        if diffs:
-                            raise ValueError(
-                                f"{out_path}: stored run '{r}' differs from "
-                                f"requested settings ({'; '.join(diffs)}); "
-                                "pass overwrite=True to regenerate")
+    existing_runs, drop_keys = prepare_incremental_npz(
+        out_path, run_list, "__ref_bin_idx",
+        overwrite=overwrite, full_overwrite=(runs is None), want=want,
+    )
 
     payload = {
         "updated": np.str_(datetime.datetime.now().isoformat(timespec="seconds")),
@@ -719,24 +678,8 @@ def batch_rescaled_summary(data_dir=DATA_DIR, runs=None, *, profiles_npz=None,
             x_center_cm=x_center_cm, smooth_window=smooth_window,
             smooth_poly=smooth_poly, te_mode=te_mode,
         )
-        for k, v in res.items():
-            if isinstance(v, str):
-                payload[f"{r}__{k}"] = np.str_(v)
-            elif isinstance(v, (bool, np.bool_)):
-                payload[f"{r}__{k}"] = np.bool_(v)
-            elif isinstance(v, (int, np.integer)):
-                payload[f"{r}__{k}"] = np.int64(v)
-            elif isinstance(v, (float, np.floating)):
-                payload[f"{r}__{k}"] = np.float64(v)
-            else:
-                payload[f"{r}__{k}"] = np.asarray(v)
-        for sk, sv in want.items():
-            if isinstance(sv, str):
-                payload[f"{r}__{sk}"] = np.str_(sv)
-            elif isinstance(sv, int):
-                payload[f"{r}__{sk}"] = np.int64(sv)
-            else:
-                payload[f"{r}__{sk}"] = np.float64(sv)
+        payload.update(pack_npz_entries(r, res))
+        payload.update(pack_npz_entries(r, want))
         ran_any = True
 
     if ran_any or not os.path.isfile(out_path):

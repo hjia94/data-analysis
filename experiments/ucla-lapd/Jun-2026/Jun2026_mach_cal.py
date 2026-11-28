@@ -23,7 +23,6 @@ be trusted, so it travels with the data.
 
 import datetime
 import os
-import re
 
 import matplotlib.pyplot as plt
 import numpy as np

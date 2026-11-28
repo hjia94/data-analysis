@@ -42,7 +42,6 @@ Saves ``spindown_pedersen_jun2026.npz`` in ``DATA_DIR`` and prints a summary.
 """
 
 import datetime
-import glob
 import os
 
 import numpy as np
@@ -61,7 +60,12 @@ from data_analysis.plasma.stability import (
     solve_radial_cylindrical_modes,
 )
 from data_analysis.signal import clip_time_window
-from data_analysis.utils import merge_save_npz, pack_nested_npz, pack_npz_entries
+from data_analysis.utils import (
+    find_run_hdf5,
+    merge_save_npz,
+    pack_nested_npz,
+    pack_npz_entries,
+)
 
 import Jun2026_IV as jiv
 import Jun2026_mach_flow as jmf
@@ -120,10 +124,7 @@ def extract_biasscope_turnoff(data_dir=DATA_DIR, runs=None, max_shots=20,
     t_win = (biasscope_offset_ms + 4.8, biasscope_offset_ms + 5.4)
 
     for rnum in run_nums:
-        hits = sorted(glob.glob(os.path.join(data_dir, f"{rnum}-*.hdf5")))
-        if not hits:
-            raise FileNotFoundError(f"no HDF5 for run {rnum} in {data_dir}")
-        run = open_lapd(hits[0])
+        run = open_lapd(find_run_hdf5(data_dir, rnum))
         tb = run.time_array(scope_name="biasscope")
         shots = np.asarray(run.shots(scope_name="biasscope"), dtype=int)[:max_shots].tolist()
         v2, _ = run.channel("C4", scope_name="biasscope", shots=shots)
@@ -175,10 +176,7 @@ def analyze_spindown_runs(data_dir=DATA_DIR, *, cal_npz=None,
     kappa, _, _ = jmf.load_calibration(cal_path)
     out = {}
     for rm, riv, puff in PUFF_PAIRS:
-        hits = sorted(glob.glob(os.path.join(data_dir, f"{rm}-*.hdf5")))
-        if not hits:
-            raise FileNotFoundError(f"no HDF5 for Mach run {rm} in {data_dir}")
-        ifn = hits[0]
+        ifn = find_run_hdf5(data_dir, rm)
         run = open_lapd(ifn)
         chans = jml.tip_channels(ifn)
         shunts = parse_shunts(run.description().raw)

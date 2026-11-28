@@ -40,7 +40,6 @@ summary table.
 """
 
 import datetime
-import glob
 import os
 
 import numpy as np

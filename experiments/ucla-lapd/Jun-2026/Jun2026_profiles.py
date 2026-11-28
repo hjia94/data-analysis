@@ -34,7 +34,6 @@ import numpy as np
 from tqdm import tqdm
 
 from data_analysis.plasma.langmuir import (
-    discover_channels,
     load_plasma_data,
     load_sweep_data,
     ne_is_calibrated,

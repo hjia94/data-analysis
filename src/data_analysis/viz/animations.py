@@ -81,7 +81,9 @@ def _resolve_loop_frequencies(f_lab, f_exb_meas, *, seamless_loop,
             UserWarning,
             stacklevel=3,
         )
-    return f_exb_meas, 1.0 / max(abs(f_exb_meas - f_lab), 0.1)
+    t_beat = 1.0 / max(abs(f_exb_meas - f_lab), 0.1)
+    t_loop = min(t_beat, max(int(max_loop_turns), 1) / f_lab) if f_lab > 0.0 else t_beat
+    return f_exb_meas, t_loop
 
 
 def animate_lab_vs_plasma_frame(
@@ -305,6 +307,17 @@ def animate_lab_vs_plasma_frame(
     time_txt = fig.suptitle(_suptitle_text(0.0), fontsize=12.0, fontweight="bold", y=0.975)
 
     n_fr = max(int(n_frames), 1)
+    f_fast = max(abs(f_lab), abs(f_exb_eff))
+    min_frames = int(np.ceil(8.0 * f_fast * t_loop_ms))
+    if min_frames > n_fr:
+        warnings.warn(
+            f"n_frames={n_fr} gives fewer than 8 frames per cycle at "
+            f"f={f_fast:.3f} kHz over t_loop={t_loop_ms:.3f} ms; "
+            f"raising n_frames to {min_frames} to prevent aliasing.",
+            UserWarning,
+            stacklevel=2,
+        )
+        n_fr = min_frames
     frames = []
     preview_idx = {0, n_fr // 4, n_fr // 2}
     preview_imgs = []

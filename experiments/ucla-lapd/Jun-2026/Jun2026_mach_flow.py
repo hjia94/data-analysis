@@ -25,7 +25,6 @@ figure. Mach number is the measured quantity and is stored alongside.
 
 import datetime
 import os
-import re
 import warnings
 
 import numpy as np

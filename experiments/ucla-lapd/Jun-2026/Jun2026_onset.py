@@ -35,7 +35,6 @@ the exact onset timing without re-reading raw HDF5 files.
 """
 
 import datetime
-import glob
 import os
 from typing import NamedTuple
 

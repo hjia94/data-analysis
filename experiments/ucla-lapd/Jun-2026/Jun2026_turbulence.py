@@ -70,7 +70,6 @@ tables.
 """
 
 import datetime
-import glob
 import os
 
 import numpy as np
@@ -93,7 +92,7 @@ from data_analysis.signal import (
     reynolds_shear_production,
     sliding_detrended_rms,
 )
-from data_analysis.utils import merge_save_npz
+from data_analysis.utils import find_run_hdf5, merge_save_npz
 
 import Jun2026_IV as jiv
 import Jun2026_mach_flow as jmf
@@ -894,10 +893,7 @@ def analyze_run32_transport_and_reynolds(data_dir=DATA_DIR, *, cal_npz=None,
     rr_n = np.hypot(px_n - cx, py_n - cy)
 
     # 2. Read raw Run 32 6-tip Mach fluctuations + stationary P29-R ref (from HDF5 wiring)
-    hits = sorted(glob.glob(os.path.join(data_dir, "32-*.hdf5")))
-    if not hits:
-        raise FileNotFoundError(f"no Run 32 HDF5 in {data_dir}")
-    ifn32 = hits[0]
+    ifn32 = find_run_hdf5(data_dir, "32")
     ch_map32 = _resolve_run32_channels(ifn32)
     run32 = open_lapd(ifn32)
     sh32 = parse_shunts(run32.description().raw)

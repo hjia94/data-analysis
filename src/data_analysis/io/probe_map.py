@@ -106,11 +106,20 @@ def mach_tip_channels(ifn, *, required_axes=None, with_scope=False, wiring=None)
     Returns:
         dict: ``{tip: chan}`` or ``{tip: (scope, chan)}``.
     """
+    seen = {}
     out = {}
     for (scope, chan), desc in (channel_wiring(ifn) if wiring is None else wiring).items():
         m = _MACH_TIP_RE.search(desc)
         if m:
-            out[m.group(1).upper()] = (scope, chan) if with_scope else chan
+            tip = m.group(1).upper()
+            if tip in seen:
+                prev_scope, prev_chan = seen[tip]
+                raise ValueError(
+                    f"{ifn}: duplicate Mach tip {tip!r} on "
+                    f"{prev_scope}:{prev_chan} and {scope}:{chan}"
+                )
+            seen[tip] = (scope, chan)
+            out[tip] = (scope, chan) if with_scope else chan
     if required_axes is not None:
         missing = [f"{a}{s}" for a in required_axes for s in "+-" if f"{a}{s}" not in out]
         if missing:

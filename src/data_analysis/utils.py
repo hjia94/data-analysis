@@ -266,7 +266,7 @@ def npz_settings_mismatch(
                 diffs.append(f"{field}: stored {got!r} != {val!r}")
         else:
             got = float(npz_data[k_use])
-            if not np.isclose(got, float(val), atol=1e-9, rtol=0.0):
+            if not np.isclose(got, float(val), rtol=1e-9, atol=1e-15):
                 diffs.append(f"{field}: stored {got:g} != {float(val):g}")
     return diffs
 

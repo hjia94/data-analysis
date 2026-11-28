@@ -25,7 +25,6 @@ synthesis comparison table.
 """
 
 import datetime
-import glob
 import os
 
 import numpy as np
@@ -43,7 +42,7 @@ from data_analysis.plasma.stability import (
     solve_radial_cylindrical_modes,
 )
 from data_analysis.signal import clip_time_window
-from data_analysis.utils import fmt_num, merge_save_npz, pack_nested_npz
+from data_analysis.utils import find_run_hdf5, fmt_num, merge_save_npz, pack_nested_npz
 
 import Jun2026_IV as jiv
 import Jun2026_modes as jmo
@@ -418,10 +417,7 @@ def extract_biasscope_dc_impedance(data_dir=DATA_DIR, runs=None, onset_table=Non
     out = {}
     for spec in specs:
         rnum = spec.run_num
-        hits = sorted(glob.glob(os.path.join(data_dir, f"{rnum}-*.hdf5")))
-        if not hits:
-            raise FileNotFoundError(f"no HDF5 for run {rnum} in {data_dir}")
-        run = open_lapd(hits[0])
+        run = open_lapd(find_run_hdf5(data_dir, rnum))
         tb = run.time_array(scope_name="biasscope")
         dt_b = float(tb[1] - tb[0])
         ip0, ip1 = clip_time_window(tb, *BIASSCOPE_PRE_MS)
@@ -707,10 +703,7 @@ def extract_lp_2d_dc_baseline(data_dir=DATA_DIR, runs=("26", "31"), *,
     """
     out = {}
     for rnum in runs:
-        hits = sorted(glob.glob(os.path.join(data_dir, f"{rnum}-*.hdf5")))
-        if not hits:
-            raise FileNotFoundError(f"no HDF5 for run {rnum} in {data_dir}")
-        ifn = hits[0]
+        ifn = find_run_hdf5(data_dir, rnum)
         run = open_lapd(ifn)
         pos_lp = jiv.read_lp_positions(ifn, motion_group_name=SHEATH_LP_MOTION_GROUP)
         tl = run.time_array(scope_name=SHEATH_LP_SCOPE)
