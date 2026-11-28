@@ -11,6 +11,7 @@ from data_analysis.plasma.stability import (
     chebyshev_diff_matrix,
     fit_smooth_radial_profile,
     local_braginskii_state,
+    pedersen_closure_diagnostics,
     solve_axial_braginskii_bvp,
     solve_local_braginskii,
     solve_local_cwm,
@@ -336,6 +337,35 @@ class TestLinearStabilitySolvers(unittest.TestCase):
         )
         self.assertLess(res_ins_cc["top"].f_hz, 0.0)
         self.assertGreater(res_ins_cc["top"].gamma_s, res_ins0["top"].gamma_s + 1e3)
+
+    def test_pedersen_closure_diagnostics_alfven_and_poulos_scaling(self):
+        # 800 G He plasma: L_pen scales as sigma_par^(1/2) / nu_in^(1/2) ~ T_e^(3/4) / nu_in^(1/2)
+        hot = pedersen_closure_diagnostics(
+            i_tot_a=55.0, er_v_m=145.0, ne_m3=5e18, te_ev=2.8, b0_t=0.08,
+            r_wall_m=0.035, l_par_m=14.0, nu_in_s=500.0,
+        )
+        cold = pedersen_closure_diagnostics(
+            i_tot_a=40.0, er_v_m=85.0, ne_m3=1.4e19, te_ev=0.6, b0_t=0.08,
+            r_wall_m=0.035, l_par_m=14.0, nu_in_s=2000.0,
+        )
+        # Alfven transit time scales as sqrt(n_e)
+        self.assertAlmostEqual(
+            cold["tau_alfven_s"] / hot["tau_alfven_s"],
+            np.sqrt(1.4e19 / 5e18),
+            places=6,
+        )
+        # Ion-neutral Pedersen conductivity falls well short of sigma_p_req in both regimes
+        self.assertLess(hot["sigma_p_in_over_req"], 0.05)
+        self.assertLess(cold["sigma_p_in_over_req"], 0.25)
+        # Parallel shorting beats ion-neutral Pedersen in both regimes
+        self.assertLess(hot["pedersen_to_parallel"], 0.02)
+        self.assertLess(cold["pedersen_to_parallel"], 0.5)
+        # Missing i_tot_a stays NaN (no silent default)
+        nan_i = pedersen_closure_diagnostics(
+            i_tot_a=np.nan, er_v_m=85.0, ne_m3=1.4e19, te_ev=0.6, b0_t=0.08, nu_in_s=2000.0,
+        )
+        self.assertTrue(np.isnan(nan_i["sigma_p_req_s_m"]))
+        self.assertTrue(np.isnan(nan_i["sigma_p_in_over_req"]))
 
 
 if __name__ == "__main__":

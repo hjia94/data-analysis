@@ -64,6 +64,7 @@ class TestMergeSaveNpz(unittest.TestCase):
                     "flag": True,
                     "count": 10,
                     "val": 2.5,
+                    "dt_s": 2.0e-7,
                     "tag": "hann",
                     "mat": np.eye(2),
                     "skipped": None,
@@ -75,11 +76,14 @@ class TestMergeSaveNpz(unittest.TestCase):
             self.assertEqual(payload["grp__b__y"].dtype, np.int64)
             merge_save_npz(path, payload)
 
-            want = {"flag": True, "count": 10, "val": 2.5, "tag": "hann", "mat": np.eye(2)}
+            want = {"flag": True, "count": 10, "val": 2.5, "dt_s": 2.0e-7, "tag": "hann", "mat": np.eye(2)}
             with np.load(path) as d:
                 self.assertEqual(npz_settings_mismatch(d, "02", want), [])
                 diffs = npz_settings_mismatch(d, "02", dict(want, count=11, tag="rect"))
                 self.assertEqual(len(diffs), 2)
+                # Relative tolerance catches small-scale float differences (e.g. target_dt_s)
+                dt_diffs = npz_settings_mismatch(d, "02", {"dt_s": 2.0005e-7})
+                self.assertEqual(len(dt_diffs), 1)
 
                 # Fallback prefix + alias support
                 dc_diffs = npz_settings_mismatch(
@@ -145,6 +149,13 @@ class TestMergeSaveNpz(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 mach_tip_channels("dummy.hdf5", required_axes=("X", "Y", "Z"))
+
+        dup_wiring = {**wiring, ("other", "C1"): "Isat, Mach@P33-X+"}
+        with mock.patch("data_analysis.io.probe_map.channel_wiring", return_value=dup_wiring):
+            with self.assertRaises(ValueError):
+                mach_tip_channels("dummy.hdf5", with_scope=False)
+            with self.assertRaises(ValueError):
+                mach_tip_channels("dummy.hdf5", with_scope=True)
 
 
 if __name__ == "__main__":

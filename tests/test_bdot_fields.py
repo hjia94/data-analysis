@@ -462,6 +462,48 @@ class TestBdotAndFields(unittest.TestCase):
         self.assertAlmostEqual(float(np.angle(xc)), dphi_true, delta=1e-2)
         self.assertAlmostEqual(float(g2), 1.0, delta=1e-6)
 
+    def test_divergence_2d_analytic_complex_and_solenoidal_polarity(self):
+        xs = np.linspace(-0.08, 0.08, 33)
+        ys = np.linspace(-0.06, 0.06, 25)
+        dx = float(xs[1] - xs[0])
+        dy = float(ys[1] - ys[0])
+        X, Y = np.meshgrid(xs, ys)
+
+        # Exact linear complex field: dFx/dx + dFy/dy == (2 + 1j) + (5 - 2j) == 7 - 1j
+        Fx_lin = (2.0 + 1.0j) * X + 3.0 * Y
+        Fy_lin = -1.5 * X + (5.0 - 2.0j) * Y
+        div_lin = fields.divergence_2d(Fx_lin, Fy_lin, dx, dy)
+        np.testing.assert_allclose(div_lin, 7.0 - 1.0j, atol=1e-11)
+
+        # Solenoidal Gaussian vortex: div B_perp == 0, while flipping By -> -By breaks div/curl << 1
+        env = np.exp(-(X ** 2 + Y ** 2) / (0.03 ** 2))
+        Bx = -Y * env * np.exp(0.4j)
+        By = +X * env * np.exp(0.4j)
+        div_ok = fields.divergence_2d(Bx, By, dx, dy)
+        _, _, curl_ok = fields.curl(Bx, By, 0.0, dx, dy, None)
+        div_bad = fields.divergence_2d(Bx, -By, dx, dy)
+        _, _, curl_bad = fields.curl(Bx, -By, 0.0, dx, dy, None)
+        inner = (slice(2, -2), slice(2, -2))
+        self.assertLess(np.linalg.norm(div_ok[inner]) / np.linalg.norm(curl_ok[inner]), 0.02)
+        self.assertGreater(np.linalg.norm(div_bad[inner]) / np.linalg.norm(curl_bad[inner]), 0.5)
+
+    def test_spectral_b_rms_eliminates_harmonic_inflation(self):
+        # Two-tone B(t) = A1 cos(w0 t) + A2 cos(2 w0 t):
+        # true time-RMS is sqrt((A1^2 + A2^2) / 2), whereas std(dB/dt) / w0
+        # inflates to sqrt((A1^2 + 4 A2^2) / 2).
+        dt = 1e-6
+        n = 5000  # 5.0 ms -> exact integer cycles for 4 kHz & 8 kHz (df = 200 Hz)
+        t = np.arange(n) * dt
+        f0 = 4000.0
+        w0 = 2.0 * np.pi * f0
+        a1, a2 = 2.0e-5, 1.5e-5
+        bdot_sig = -w0 * a1 * np.sin(w0 * t) - (2.0 * w0) * a2 * np.sin(2.0 * w0 * t)
+        b_rms = float(bdot.spectral_b_rms(bdot_sig[None, :], dt, f_min_hz=0.5 * f0)[0])
+        b_true = float(np.sqrt(0.5 * (a1 ** 2 + a2 ** 2)))
+        b_naive = float(np.std(bdot_sig) / w0)
+        self.assertAlmostEqual(b_rms, b_true, delta=1e-11)
+        self.assertGreater(b_naive, 1.3 * b_true)
+
 
 if __name__ == "__main__":
     unittest.main()

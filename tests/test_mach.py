@@ -6,6 +6,9 @@ import numpy as np
 
 from data_analysis.plasma.flow import (
     antisymmetric_rotation_profile,
+    find_flow_centre,
+    fit_exponential_relaxation,
+    polar_components,
     radial_flow_shear,
 )
 from data_analysis.plasma.mach import (
@@ -135,6 +138,59 @@ class TestMachAndFlow(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             radial_flow_shear(np.array([-2.0, -1.0, 0.0, 1.0, 2.0]), np.ones(5))
+
+    def test_find_flow_centre_and_polar_components_offcenter_rotation(self):
+        gx, gy = np.meshgrid(np.linspace(-10.0, 10.0, 41), np.linspace(-10.0, 10.0, 41))
+        px, py = gx.ravel(), gy.ravel()
+        cx_true, cy_true = 1.0, -0.5
+        dx, dy = px - cx_true, py - cy_true
+        rr = np.hypot(dx, dy)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ux_unit = np.where(rr > 0.0, -dy / rr, 0.0)
+            uy_unit = np.where(rr > 0.0, dx / rr, 0.0)
+
+        # Off-center CCW rotation (v_theta = +0.085) plus uniform DC offset (+0.030, -0.025)
+        v_th_true = 0.085
+        dc_x, dc_y = 0.030, -0.025
+        vx_raw = v_th_true * ux_unit + dc_x
+        vy_raw = v_th_true * uy_unit + dc_y
+        vx = vx_raw - dc_x
+        vy = vy_raw - dc_y
+
+        cx, cy, ratio = find_flow_centre(vx, vy, px, py)
+        np.testing.assert_allclose([cx, cy], [cx_true, cy_true], atol=1e-12)
+        self.assertLess(ratio, 1e-9)
+
+        vr, vth = polar_components(vx, vy, px, py, (cx, cy))
+        away = rr > 0.0
+        np.testing.assert_allclose(vr[away], 0.0, atol=1e-12)
+        np.testing.assert_allclose(vth[away], +v_th_true, atol=1e-12)
+        self.assertTrue(np.all(np.isnan(vr[~away])) and np.all(np.isnan(vth[~away])))
+
+        # Reversing flow flips v_theta sign (CW -> negative), and 2-D (npos, nbin) broadcasts
+        vr_2d, vth_2d = polar_components(
+            np.column_stack([vx, -vx]), np.column_stack([vy, -vy]), px, py, (cx, cy),
+        )
+        np.testing.assert_allclose(vr_2d[away], 0.0, atol=1e-12)
+        np.testing.assert_allclose(vth_2d[away, 0], +v_th_true, atol=1e-12)
+        np.testing.assert_allclose(vth_2d[away, 1], -v_th_true, atol=1e-12)
+
+    def test_fit_exponential_relaxation_recovers_decay_and_offset(self):
+        t = np.linspace(5.0, 8.0, 61)
+        tau_true = 0.55
+        amp_true = -0.22
+        off_true = 0.015
+        y = amp_true * np.exp(-(t - 5.1) / tau_true) + off_true
+        fit = fit_exponential_relaxation(t, y, t_start=5.1, t_end=7.9)
+        self.assertAlmostEqual(fit["tau"], tau_true, places=5)
+        self.assertAlmostEqual(fit["rate"], 1.0 / tau_true, places=5)
+        self.assertAlmostEqual(fit["amp"], amp_true, places=5)
+        self.assertAlmostEqual(fit["offset"], off_true, places=5)
+        self.assertGreater(fit["r2"], 0.999999)
+
+        # Too few finite points returns NaN gracefully
+        fit_empty = fit_exponential_relaxation(t[:2], y[:2], min_points=4)
+        self.assertTrue(np.isnan(fit_empty["tau"]))
 
 
 if __name__ == "__main__":

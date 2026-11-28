@@ -6,9 +6,12 @@ import numpy as np
 
 from data_analysis.plasma.profiles import (
     E_CHARGE_J_PER_EV,
+    HollowProfileMetrics,
     electron_pressure,
     floating_potential_from_iv,
+    hollow_profile_metrics,
     local_drift_scales,
+    orbit_smeared_profile,
     radial_profile_gradients,
     sheath_factor,
 )
@@ -94,6 +97,41 @@ class TestPlasmaProfiles(unittest.TestCase):
         trials = vp[None, :] + rng.normal(0.0, vp_err[None, :], size=(20000, x.size))
         mc_std = np.std(savgol_filter(trials, 5, 2, deriv=1, delta=1.0, axis=1), axis=0)
         np.testing.assert_allclose(g.er_err_v_per_cm, mc_std, rtol=0.03)
+
+    def test_1d_analytic_exponential_wall(self):
+        r = np.linspace(0.0, 8.0, 81)
+        prof = np.where(r <= 2.0, 1.0, np.where(r >= 4.5, 3.0, np.exp(0.4 * (r - 1.5))))
+        m_wall = (r >= 1.5) & (r <= 4.5)
+        prof[m_wall] = np.exp(0.4 * (r[m_wall] - 1.5))
+        m = hollow_profile_metrics(
+            r, prof, core_r_max_cm=2.0, ring_r_cm=(4.5, 7.0), wall_r_cm=(1.5, 4.5),
+            radial_edges_cm=np.array([0.0, 2.0, 4.5, 7.0]),
+        )
+        self.assertIsInstance(m, HollowProfileMetrics)
+        self.assertAlmostEqual(m.core_val, 1.0, places=6)
+        self.assertAlmostEqual(m.ring_val, 3.0, places=6)
+        self.assertAlmostEqual(m.hollowness, 3.0, places=6)
+        self.assertAlmostEqual(m.wall_inv_scale_cm, 0.4, places=6)
+        self.assertEqual(m.radial_profile.shape, (3,))
+        self.assertAlmostEqual(m.radial_profile[0], 1.0, places=6)
+        self.assertAlmostEqual(m.radial_profile[2], 3.0, places=6)
+
+    def test_nonpositive_core_returns_nan_hollowness(self):
+        r = np.array([0.0, 1.0, 2.0, 5.0, 6.0])
+        prof = np.array([-0.1, 0.0, 0.0, 2.0, 2.2])
+        m = hollow_profile_metrics(r, prof)
+        self.assertTrue(np.isnan(m.hollowness))
+
+    def test_orbit_smeared_profile_identity_and_apparent_filling(self):
+        r = np.linspace(0.0, 8.0, 161)
+        prof = 1.0 - 0.6 * np.exp(-(r / 2.5) ** 2)
+        np.testing.assert_allclose(orbit_smeared_profile(r, prof, 0.0), prof)
+        dr = 1.5
+        smeared = orbit_smeared_profile(r, prof, dr)
+        self.assertAlmostEqual(smeared[0], float(np.interp(dr, r, prof)), places=6)
+        h0 = hollow_profile_metrics(r, prof).hollowness
+        hs = hollow_profile_metrics(r, smeared).hollowness
+        self.assertLess(hs, h0)
 
 
 if __name__ == "__main__":
