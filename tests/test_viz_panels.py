@@ -37,6 +37,7 @@ from data_analysis.viz import (
     prepare_bdot_2d_fields,
     windowed_fft_amp,
 )
+from data_analysis.viz.animations import _resolve_loop_frequencies
 import Jun2026_figures as jfig
 import Jun2026_plot as jpl
 
@@ -259,6 +260,35 @@ class TestVizPanels(unittest.TestCase):
             with Image.open(prev_p) as pim:
                 self.assertGreater(pim.size[1], pim.size[0])
 
+    def test_animation_loop_snapping_warns_instead_of_distorting_and_title_is_sign_aware(self):
+        # Run-26-like ratio (~1.496) snaps cleanly to 3/2 in 2 lab turns with no warning
+        f_eff, t_loop = _resolve_loop_frequencies(4.11, 6.15, seamless_loop=True)
+        self.assertAlmostEqual(f_eff, 1.5 * 4.11, places=9)
+        self.assertAlmostEqual(t_loop, 2.0 / 4.11, places=9)
+
+        # Ratio 1.1 cannot snap within 5% in <=4 turns -> must warn and keep exact f_exb
+        with self.assertWarns(UserWarning):
+            f_eff_11, _ = _resolve_loop_frequencies(4.0, 4.4, seamless_loop=True)
+        self.assertAlmostEqual(f_eff_11, 4.4, places=9)
+
+        # Negative f_exb - f_lab must label plasma-frame rotation as CW (and never hardcode grad(Te))
+        xs, ys, Bx, By, Jz = _synthetic_dipole_grid(n=7)
+        captured_titles = []
+        orig_set_title = plt.Axes.set_title
+
+        def _spy_title(ax_self, label, *args, **kwargs):
+            captured_titles.append(label)
+            return orig_set_title(ax_self, label, *args, **kwargs)
+
+        with mock.patch.object(plt.Axes, "set_title", _spy_title):
+            animate_lab_vs_plasma_frame(
+                xs, ys, Bx, By, Jz,
+                f_lab_khz=4.0, f_exb_khz=2.0,
+                seamless_loop=True, n_frames=2, dpi=50, fine_n=17, out_gif=None,
+            )
+        self.assertTrue(any("CW" in t and "2.0 kHz" in t for t in captured_titles), captured_titles)
+        self.assertFalse(any("nabla T_e" in t for t in captured_titles), captured_titles)
+
 
 class _FakeLapdRun:
     """Minimal in-memory mock of open_lapd() for synthetic figure tests."""
@@ -453,6 +483,8 @@ class TestJun2026FiguresRegistryAndRecipes(unittest.TestCase):
                 on_d[f"{rnum}__gamma_q25_s"] = np.float64(np.nan if is_stable else 3800.0)
                 on_d[f"{rnum}__gamma_q75_s"] = np.float64(np.nan if is_stable else 5200.0)
                 on_d[f"{rnum}__f_peak_hz"] = np.float64(f_pk)
+                on_d[f"{rnum}__scope"] = np.array("scope" if rnum in ("28", "27", "30") else "machscope")
+                on_d[f"{rnum}__chan"] = np.array("C5" if rnum in ("28", "27", "30") else "C2")
                 open(os.path.join(tmp, f"{rnum}-dummy.hdf5"), "wb").close()
             onset_p = os.path.join(tmp, jon.OUT_NAME)
             np.savez(onset_p, **on_d)
@@ -489,6 +521,108 @@ class TestJun2026FiguresRegistryAndRecipes(unittest.TestCase):
                 save_fig=out_sg, show=False,
             )
             self.assertGreater(os.path.getsize(out_sg), 1000)
+
+    def test_resolve_onset_channel_and_dynamic_shear_gating_title(self):
+        # 1. _resolve_onset_channel reads from onset npz, else falls back to HDF5 channel_wiring
+        with tempfile.TemporaryDirectory() as tmp:
+            p_has = os.path.join(tmp, "onset_has.npz")
+            np.savez(p_has, **{"99__scope": np.array("customscope"), "99__chan": np.array("C7")})
+            with np.load(p_has, allow_pickle=True) as onf:
+                self.assertEqual(jfig._resolve_onset_channel(onf, "x.hdf5", "99"), ("customscope", "C7"))
+
+            p_empty = os.path.join(tmp, "onset_empty.npz")
+            np.savez(p_empty, dummy=np.int64(0))
+            fake_wiring = {("altscope", "C4"): "Isat, Mach@P33-X+"}
+            with np.load(p_empty, allow_pickle=True) as onf, \
+                 mock.patch("data_analysis.io.probe_map.channel_wiring", return_value=fake_wiring):
+                self.assertEqual(jfig._resolve_onset_channel(onf, "x.hdf5", "99"), ("altscope", "C4"))
+
+        # 2. plot_shear_gating panel (a) title tracks profile_run (e.g. Run 12 -> 35 ms)
+        with tempfile.TemporaryDirectory() as tmp:
+            r_cm = np.linspace(1.0, 12.0, 12)
+            mach_p = os.path.join(tmp, "mach.npz")
+            np.savez(
+                mach_p,
+                **{
+                    "12__r_cm": r_cm,
+                    "12__ref_bin_idx": np.int64(0),
+                    "12__dv_rot_km_s": (-1.2 * np.exp(-((r_cm - 4.0) / 2.5) ** 2))[:, None],
+                    "12__v_ExB_r_km_s": (1.3 * np.exp(-((r_cm - 4.0) / 2.5) ** 2))[:, None],
+                },
+            )
+            x_cm = np.linspace(-10.0, 10.0, 21)
+            r_abs = np.abs(x_cm - 1.0)
+            prof_p = os.path.join(tmp, "prof.npz")
+            np.savez(
+                prof_p,
+                **{
+                    "03__x_cm": x_cm, "03__x_center_cm": np.float64(1.0), "03__ref_sweep_idx": np.int64(0),
+                    "03__ne": (12e12 - 5e12 * np.exp(-(r_abs / 3.0) ** 2))[:, None],
+                    "03__Te": (2.4 - 0.8 * np.exp(-(r_abs / 3.5) ** 2))[:, None],
+                    "03__Vp": (8.0 + 4.0 * np.exp(-(r_abs / 3.0) ** 2))[:, None],
+                    "03__dln_ne_dr": np.full((x_cm.size, 1), +0.35),
+                    "03__dln_te_dr": np.full((x_cm.size, 1), +0.20),
+                    "03__er_r_v_cm": np.full((x_cm.size, 1), +0.80),
+                    "03__lambda": np.full((x_cm.size, 1), 3.5),
+                },
+            )
+            onset_p = os.path.join(tmp, "onset.npz")
+            np.savez(onset_p, **{"03__unstable_frac": np.float64(1.0), "03__gamma_med_s": np.float64(3500.0)})
+            captured_titles = []
+            orig_set_title = plt.Axes.set_title
+
+            def _spy_title(ax_self, label, *args, **kwargs):
+                captured_titles.append(label)
+                return orig_set_title(ax_self, label, *args, **kwargs)
+
+            with mock.patch.object(plt.Axes, "set_title", _spy_title):
+                jfig.plot_shear_gating(
+                    data_dir=tmp, mach_npz=mach_p, profiles_npz=prof_p, onset_npz=onset_p,
+                    pairs=(("03", "12", 35),), profile_run="12", save_fig=False, show=False,
+                )
+            self.assertIn("(a) Azimuthal Flow Profile (35 ms)", captured_titles)
+
+    def test_stability_print_summary_formats_stable_nan_as_dashes(self):
+        import Jun2026_stability as jst
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "stab.npz")
+            np.savez(
+                p,
+                l_par_m=np.float64(14.0), wall_width_cm=np.float64(4.0),
+                **{
+                    "puff__06__gas_puff_ms": np.float64(23.0),
+                    "puff__06__exp_unstable": np.bool_(False),
+                    "puff__06__exp_gamma_s": np.float64(np.nan),
+                    "puff__06__exp_f_plasma_exb_hz": np.float64(np.nan),
+                    "puff__06__exp_f_lab_hz": np.float64(np.nan),
+                    "puff__06__near_sweep_t_ms": np.float64(1.0),
+                    "puff__06__near_sweep_regime": np.array("pre_onset"),
+                    "puff__06__rad_kh_sens_max_gamma_s": np.float64(0.0),
+                    "puff__06__ax_ins_top_f_hz": np.float64(0.0),
+                    "puff__06__ax_ins_top_gamma_s": np.float64(-100.0),
+                    "puff__06__ax_cwm_ref_f_hz": np.float64(np.nan),
+                    "puff__06__ax_cwm_ref_gamma_s": np.float64(np.nan),
+                    "puff__06__ax_cwm_ref_dphi_ab_deg": np.float64(np.nan),
+                    "puff__06__ax_cwm_near_f_hz": np.float64(np.nan),
+                    "puff__06__ax_cwm_near_gamma_s": np.float64(np.nan),
+                    "puff__06__ax_cwm_near_dphi_ab_deg": np.float64(np.nan),
+                    "puff__06__ax_cwm_near_gsh1_gamma_s": np.float64(np.nan),
+                    "puff__06__ax_cwm_near_nu15_gamma_s": np.float64(np.nan),
+                    "puff__06__rad_cwm_nosh_f_lab_hz": np.float64(4000.0),
+                    "puff__06__rad_cwm_nosh_gamma_s": np.float64(8000.0),
+                    "puff__06__rad_cwm_sh_f_lab_hz": np.float64(4000.0),
+                    "puff__06__rad_cwm_sh_gamma_s": np.float64(1000.0),
+                    "puff__06__rad_cwm_sh_cent_f_lab_hz": np.float64(4000.0),
+                    "puff__06__rad_cwm_sh_cent_gamma_s": np.float64(1300.0),
+                },
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                jst.print_summary(p)
+            out = buf.getvalue()
+            self.assertNotIn("nan", out.lower())
+            self.assertIn("---", out)
 
     def test_label_hygiene_no_fixed_bias_isat(self):
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

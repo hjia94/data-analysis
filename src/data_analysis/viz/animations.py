@@ -8,6 +8,7 @@ normalization/unit scaling from :mod:`data_analysis.viz.panels`.
 from __future__ import annotations
 
 import os
+import warnings
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyArrowPatch
@@ -47,6 +48,42 @@ def _add_curved_arrow(ax, cx, cy, r, ang1_deg, ang2_deg, color, label, rad,
     )
 
 
+def _resolve_loop_frequencies(f_lab, f_exb_meas, *, seamless_loop,
+                              max_snap_rel_err=0.05, max_loop_turns=4):
+    """Compute ``(f_exb_eff, t_loop_ms)`` without silently distorting ``f_exb``.
+
+    When ``seamless_loop`` is True and ``f_lab > 0``, searches denominators
+    ``q = 1..max_loop_turns`` for the shortest rational ratio ``p / q``
+    (``p != q`` when ``f_exb_meas != f_lab``) whose relative shift from
+    ``f_exb_meas / f_lab`` is within ``max_snap_rel_err``. If no rational
+    within tolerance exists, emits a ``UserWarning`` and keeps the exact
+    ``f_exb_meas`` instead of silently distorting the rotation speed.
+    """
+    if seamless_loop and f_lab > 0.0 and f_exb_meas != 0.0:
+        ratio = f_exb_meas / f_lab
+        same_freq = abs(f_exb_meas - f_lab) <= 1e-9 * max(abs(f_lab), 1.0)
+        best = None
+        for q in range(1, max(int(max_loop_turns), 1) + 1):
+            p = int(round(ratio * q))
+            if p == 0 or (not same_freq and p == q):
+                continue
+            cand = p / q
+            rel_err = abs(cand - ratio) / abs(ratio)
+            if rel_err <= float(max_snap_rel_err):
+                best = (cand * f_lab, float(q) / f_lab)
+                break
+        if best is not None:
+            return best
+        warnings.warn(
+            f"seamless_loop could not snap f_exb/f_lab={ratio:.3f} within "
+            f"{max_snap_rel_err * 100:.1f}% using <= {max_loop_turns} lab turns; "
+            f"keeping exact f_exb={f_exb_meas:.3f} kHz.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return f_exb_meas, 1.0 / max(abs(f_exb_meas - f_lab), 0.1)
+
+
 def animate_lab_vs_plasma_frame(
     xs,
     ys,
@@ -59,19 +96,18 @@ def animate_lab_vs_plasma_frame(
     center=(0.0, 0.0),
     calibrated=True,
     seamless_loop=True,
+    max_snap_rel_err=0.05,
+    max_loop_turns=4,
     n_frames=60,
     fps=15,
     dpi=100,
     r_orbit_cm=3.2,
     fine_n=129,
     title_prefix="",
-    lab_title="Lab Frame\n(Mode lags behind CW $E\\times B$ flow)",
-    plasma_title_template=(
-        "Plasma Rest Frame (co-rotating with $E\\times B$)\n"
-        "(Mode moves CCW at {f_pl_abs:.1f} kHz — with $\\nabla T_e$)"
-    ),
+    lab_title=None,
+    plasma_title_template=None,
     lab_arrows=None,
-    plasma_arrows=None,
+    plasma_arrows=(),
     out_gif=None,
     preview_png=None,
 ):
@@ -90,22 +126,28 @@ def animate_lab_vs_plasma_frame(
         center: ``(cx, cy)`` rotation center [cm].
         calibrated: True if ``Jz`` is in A/m^2 and ``Bx, By`` in Tesla; False
             for relative units.
-        seamless_loop: If True and ``f_exb_khz > f_lab_khz``, snap ``f_exb``
-            to the nearest half-integer harmonic of ``f_lab`` for a seamless loop.
+        seamless_loop: If True, snap ``f_exb`` to a low-order rational multiple
+            of ``f_lab`` when within ``max_snap_rel_err``; otherwise warn and
+            keep exact ``f_exb_khz``.
+        max_snap_rel_err: Maximum allowed relative frequency shift for
+            ``seamless_loop`` snapping (default ``0.05`` = 5%).
+        max_loop_turns: Maximum number of lab-frame periods per seamless loop.
         n_frames: Number of frames in the GIF.
         fps: Playback frame rate [frames/s].
         dpi: Figure DPI for rendered frames.
         r_orbit_cm: Radius of the dashed fluid-marker orbit circle [cm].
         fine_n: Upsampled scalar grid resolution per axis for smooth ``imshow``.
         title_prefix: Leading suptitle text before ``"  —  t = X.XX ms"``.
-        lab_title: Title for the left (lab-frame) panel.
+        lab_title: Title for the left panel (auto-derived from ``f_exb`` vs
+            ``f_lab`` when None).
         plasma_title_template: Title template for the right panel (formatted
-            with ``f_pl_khz``, ``f_pl_abs``, ``f_lab_khz``, ``f_exb_khz``).
+            with ``f_pl_khz``, ``f_pl_abs``, ``f_pl_dir``, ``f_lab_khz``,
+            ``f_exb_khz``). Defaults to a sign-aware neutral title.
         lab_arrows: Optional sequence of curved-arrow spec tuples
             ``(r, ang1_deg, ang2_deg, color, label, rad, text_ang_deg, r_text)``.
             Pass ``None`` for default mode arrow; pass ``()`` to omit.
-        plasma_arrows: Same as ``lab_arrows`` for the right panel (``None``
-            draws default ``grad(Te)`` CCW and ``grad(ne)`` CW drift arrows).
+        plasma_arrows: Optional curved-arrow spec tuples for the right panel
+            (default ``()``; campaign callers pass profile-specific drift arrows).
         out_gif: Output ``.gif`` path (if None/empty, skips writing GIF).
         preview_png: Optional path to write a 3-frame vertical preview strip PNG.
 
@@ -118,14 +160,19 @@ def animate_lab_vs_plasma_frame(
     f_lab = float(f_lab_khz)
     f_exb_meas = float(f_exb_khz)
 
-    if seamless_loop and f_exb_meas > f_lab > 0.0:
-        half_mult = max(int(round(2.0 * f_exb_meas / f_lab)), 3)
-        f_exb_eff = 0.5 * half_mult * f_lab
-        t_loop_ms = 2.0 / f_lab
-    else:
-        f_exb_eff = f_exb_meas
-        t_loop_ms = 1.0 / max(abs(f_exb_eff - f_lab), 0.1)
+    f_exb_eff, t_loop_ms = _resolve_loop_frequencies(
+        f_lab, f_exb_meas,
+        seamless_loop=seamless_loop,
+        max_snap_rel_err=max_snap_rel_err,
+        max_loop_turns=max_loop_turns,
+    )
     f_pl_khz = f_exb_eff - f_lab
+    if f_pl_khz > 1e-9:
+        f_pl_dir = "CCW"
+    elif f_pl_khz < -1e-9:
+        f_pl_dir = "CW"
+    else:
+        f_pl_dir = "stationary"
 
     prep = prepare_bdot_2d_fields(Bx, By, Jz, calibrated=calibrated, phase_align=True)
     Jz_n = prep["Jz_plot"]
@@ -213,22 +260,37 @@ def animate_lab_vs_plasma_frame(
 
     if lab_arrows is None:
         lab_arrows = ((5.3, 165, 110, "0.15", f"Mode ({f_lab:.1f} kHz CW)", -0.28, 140, 6.9),)
-    if plasma_arrows is None:
-        plasma_arrows = (
-            (5.3, 110, 165, "#dc2626", r"$\nabla T_e$ drift (CCW)", 0.28, 142, 6.9),
-            (5.3, 250, 195, "#1d4ed8", r"$\nabla n_e$ drift (CW)", -0.28, 222, 6.9),
-        )
     for spec in lab_arrows:
         _add_curved_arrow(ax_l, cx, cy, *spec)
-    for spec in plasma_arrows:
+    for spec in (plasma_arrows or ()):
         _add_curved_arrow(ax_r, cx, cy, *spec)
+
+    if lab_title is None:
+        if f_pl_khz > 1e-9:
+            lab_title = "Lab Frame\n(Mode lags behind CW $E\\times B$ flow)"
+        elif f_pl_khz < -1e-9:
+            lab_title = "Lab Frame\n(Mode leads CW $E\\times B$ flow)"
+        else:
+            lab_title = "Lab Frame\n(Mode co-rotates with $E\\times B$ flow)"
+    if plasma_title_template is None:
+        if f_pl_dir == "stationary":
+            plasma_title_template = (
+                "Plasma Rest Frame (co-rotating with $E\\times B$)\n"
+                "(Mode stationary in plasma frame)"
+            )
+        else:
+            plasma_title_template = (
+                "Plasma Rest Frame (co-rotating with $E\\times B$)\n"
+                "(Mode moves {f_pl_dir} at {f_pl_abs:.1f} kHz)"
+            )
 
     ax_l.legend(loc="lower left", frameon=True, framealpha=0.88, fontsize=8.6)
     ax_r.legend(loc="lower left", frameon=True, framealpha=0.88, fontsize=8.6)
     ax_l.set_title(lab_title, fontweight="bold")
     ax_r.set_title(
         plasma_title_template.format(
-            f_pl_khz=f_pl_khz, f_pl_abs=abs(f_pl_khz), f_lab_khz=f_lab, f_exb_khz=f_exb_meas,
+            f_pl_khz=f_pl_khz, f_pl_abs=abs(f_pl_khz), f_pl_dir=f_pl_dir,
+            f_lab_khz=f_lab, f_exb_khz=f_exb_meas,
         ),
         fontweight="bold",
     )

@@ -1324,9 +1324,11 @@ def print_summary(npz_path=None):
                 float(d[f"puff__{r}__ax_cwm_near_dphi_ab_deg"]),
                 width=23,
             )
+            f_pl_exp = float(d[f"puff__{r}__exp_f_plasma_exb_hz"]) * 1e-3
+            f_pl_s = f"{f_pl_exp:+8.2f}" if np.isfinite(f_pl_exp) else f"{'---':>8}"
             print(
                 f"{r:>3} {float(d[f'puff__{r}__gas_puff_ms']):4.0f} {n_tag:>10} | "
-                f"{float(d[f'puff__{r}__exp_f_plasma_exb_hz'])*1e-3:+8.2f} {g_s} | "
+                f"{f_pl_s} {g_s} | "
                 f"{kh_max:+7.3f} | "
                 f"{float(d[f'puff__{r}__ax_ins_top_f_hz'])*1e-3:+6.2f} "
                 f"{float(d[f'puff__{r}__ax_ins_top_gamma_s'])*1e-3:+9.2f} | "
@@ -1351,9 +1353,11 @@ def print_summary(npz_path=None):
             g_nu = float(d[f"puff__{r}__ax_cwm_near_nu15_gamma_s"]) * 1e-3
             s_gsh = f"{g_gsh:+13.2f}" if np.isfinite(g_gsh) else f"{'no CWM':>13}"
             s_nu = f"{g_nu:+13.2f}" if np.isfinite(g_nu) else f"{'no CWM':>13}"
+            f_lab_exp = float(d[f"puff__{r}__exp_f_lab_hz"]) * 1e-3
+            f_lab_s = f"{f_lab_exp:9.2f}" if np.isfinite(f_lab_exp) else f"{'---':>9}"
             print(
                 f"{r:>3} {float(d[f'puff__{r}__gas_puff_ms']):4.0f} | "
-                f"{float(d[f'puff__{r}__exp_f_lab_hz'])*1e-3:9.2f} {g_s} | "
+                f"{f_lab_s} {g_s} | "
                 f"{s_gsh} | {s_nu} | "
                 f"{float(d[f'puff__{r}__rad_cwm_nosh_f_lab_hz'])*1e-3:+6.2f} "
                 f"{float(d[f'puff__{r}__rad_cwm_nosh_gamma_s'])*1e-3:+7.2f} | "

@@ -148,6 +148,54 @@ def _pick_representative_shot(onf, run_num):
     return int(sh[idx]), float(t_on[idx]), float(pk[idx])
 
 
+def _resolve_onset_channel(onf, hdf5_path, run_num, scope=None, chan=None):
+    """Resolve ``(scope, chan)`` for a run's stationary reference trace.
+
+    Preference order:
+    1. Explicit ``scope`` and ``chan`` overrides from the caller.
+    2. ``<run>__scope`` and ``<run>__chan`` stored in ``onset_summary_jun2026.npz``
+       (guarantees panel (a) matches the exact channel that produced ``shot_nums``
+       and panel (b)'s PSD).
+    3. HDF5 probe wiring table (:func:`data_analysis.io.probe_map.channel_wiring`)
+       matching ``P33`` ``Isat`` channels, falling back to
+       ``Jun2026_onset.ONSET_RUN_MAP``.
+    """
+    if scope is not None and chan is not None:
+        return str(scope), str(chan)
+
+    k_sc, k_ch = f"{run_num}__scope", f"{run_num}__chan"
+    if k_sc in onf.files and k_ch in onf.files:
+        return (
+            str(scope) if scope is not None else str(onf[k_sc]),
+            str(chan) if chan is not None else str(onf[k_ch]),
+        )
+
+    try:
+        from data_analysis.io.probe_map import channel_wiring
+
+        wiring = channel_wiring(hdf5_path)
+        for (w_scope, w_chan), desc in wiring.items():
+            d_lo = desc.lower()
+            if "p33" in d_lo and "isat" in d_lo:
+                if (scope is None or w_scope == scope) and (chan is None or w_chan == chan):
+                    return w_scope, w_chan
+    except (OSError, ValueError, KeyError):
+        pass
+
+    import Jun2026_onset as jon
+
+    if str(run_num) in jon.ONSET_RUN_MAP:
+        spec = jon.ONSET_RUN_MAP[str(run_num)]
+        return (
+            str(scope) if scope is not None else spec.scope,
+            str(chan) if chan is not None else spec.chan,
+        )
+    raise KeyError(
+        f"Cannot resolve stationary reference (scope, chan) for run {run_num}: "
+        f"missing '{k_sc}'/'{k_ch}' in onset npz and no matching P33 Isat wiring in {hdf5_path}"
+    )
+
+
 def _read_scope_shot(hdf5_path, scope, chan, shot_num, *, t_lim_ms=(-0.5, 5.5), target_dt_s=5e-6):
     """Read one downsampled voltage trace ``(t_ms, v_ds)`` from an LAPD HDF5 file."""
     run = open_lapd(hdf5_path)
@@ -460,9 +508,12 @@ def animate_mode_propagation(
 
     save_name = "fig3_mode_propagation" if str(run_num) == "26" else f"fig3_mode_propagation_run{run_num}"
     out_gif = _resolve_save(save_fig, save_name, ext=".gif")
+    f_lab_khz = meta["f0_hz"] * 1e-3
+    # Jun-2026 hollow-column drift directions (B0 along +z: grad(Te) electron drift is CCW, grad(ne) is CW)
+    drift_suffix = r" — with $\nabla T_e$" if f_exb_meas > f_lab_khz else ""
     return animate_lab_vs_plasma_frame(
         xs, ys, Bx, By, Jz,
-        f_lab_khz=meta["f0_hz"] * 1e-3,
+        f_lab_khz=f_lab_khz,
         f_exb_khz=f_exb_meas,
         center=(meta["center_x_cm"], meta["center_y_cm"]),
         calibrated=bool(meta["bdot_calibrated"]),
@@ -472,6 +523,14 @@ def animate_mode_propagation(
         dpi=dpi,
         r_orbit_cm=r_orbit_cm,
         title_prefix=f"Run {run_num} ({meta['b0_g']:.0f} G)",
+        plasma_title_template=(
+            "Plasma Rest Frame (co-rotating with $E\\times B$)\n"
+            f"(Mode moves {{f_pl_dir}} at {{f_pl_abs:.1f}} kHz{drift_suffix})"
+        ),
+        plasma_arrows=(
+            (5.3, 110, 165, "#dc2626", r"$\nabla T_e$ drift (CCW)", 0.28, 142, 6.9),
+            (5.3, 250, 195, "#1d4ed8", r"$\nabla n_e$ drift (CW)", -0.28, 222, 6.9),
+        ),
         out_gif=out_gif,
         preview_png=preview_png,
     )
@@ -487,8 +546,8 @@ def plot_puff_scaling(
     onset_npz=None,
     show_runs=PUFF_SHOW_RUNS,
     all_puffs=PUFF_ALL_RUNS,
-    scope="machscope",
-    chan="C2",
+    scope=None,
+    chan=None,
     t_lim_ms=(-0.5, 5.5),
     save_fig=True,
     show=False,
@@ -505,7 +564,9 @@ def plot_puff_scaling(
         spectra = []
         for rnum, puff, col in show_runs:
             shot, _, _ = _pick_representative_shot(onf, rnum)
-            t_ms, v = _read_scope_shot(_run_hdf5(ddir, rnum), scope, chan, shot, t_lim_ms=t_lim_ms)
+            hdf5_path = _run_hdf5(ddir, rnum)
+            r_scope, r_chan = _resolve_onset_channel(onf, hdf5_path, rnum, scope=scope, chan=chan)
+            t_ms, v = _read_scope_shot(hdf5_path, r_scope, r_chan, shot, t_lim_ms=t_lim_ms)
             m_bias = (t_ms >= 0.5) & (t_ms <= 4.5)
             if np.any(m_bias) and float(np.mean(v[m_bias])) < 0.0:
                 v = -v
@@ -592,8 +653,8 @@ def plot_b0_scaling(
     data_dir=None,
     onset_npz=None,
     b0_runs=B0_SCAN_RUNS,
-    scope="scope",
-    chan="C5",
+    scope=None,
+    chan=None,
     t_lim_ms=(-0.5, 5.5),
     save_fig=True,
     show=False,
@@ -610,7 +671,9 @@ def plot_b0_scaling(
         spectra = []
         for rnum, b0, col in b0_runs:
             shot, _, _ = _pick_representative_shot(onf, rnum)
-            t_ms, v = _read_scope_shot(_run_hdf5(ddir, rnum), scope, chan, shot, t_lim_ms=t_lim_ms)
+            hdf5_path = _run_hdf5(ddir, rnum)
+            r_scope, r_chan = _resolve_onset_channel(onf, hdf5_path, rnum, scope=scope, chan=chan)
+            t_ms, v = _read_scope_shot(hdf5_path, r_scope, r_chan, shot, t_lim_ms=t_lim_ms)
             m_bias = (t_ms >= 0.5) & (t_ms <= 4.5)
             if np.any(m_bias) and float(np.mean(v[m_bias])) < 0.0:
                 v = -v
@@ -692,6 +755,10 @@ def plot_shear_gating(
         v_mach_cw = -np.asarray(mf[f"{profile_run}__dv_rot_km_s"][:, ib], dtype=float)
         v_exb_cw = np.asarray(mf[f"{profile_run}__v_ExB_r_km_s"][:, ib], dtype=float)
         m_r = r_cm <= 12.0
+        prof_puff = next((p for _, mr, p in pairs if str(mr) == str(profile_run)), None)
+        if prof_puff is None and f"{profile_run}__gas_puff_ms" in mf.files:
+            prof_puff = float(mf[f"{profile_run}__gas_puff_ms"])
+        prof_lbl = f"{prof_puff:g} ms" if (prof_puff is not None and np.isfinite(prof_puff)) else f"Run {profile_run}"
 
         # (b) Strictly pre-onset 1-D radial CWM theory vs. measured growth rate
         puffs = np.array([p for _, _, p in pairs], dtype=float)
@@ -741,7 +808,7 @@ def plot_shear_gating(
     ax_a.set_ylabel(r"CW rotation speed $v_\theta$ [km/s]")
     ax_a.grid(alpha=0.25)
     ax_a.legend(loc="upper right", frameon=True, framealpha=0.92)
-    ax_a.set_title("(a) Azimuthal Flow Profile (30 ms)", fontweight="bold")
+    ax_a.set_title(f"(a) Azimuthal Flow Profile ({prof_lbl})", fontweight="bold")
 
     u = ~stable
     ax_b.plot(puffs, cwm_nosh, "^:", color="#64748b", lw=1.8, ms=5.8, label="Theory: CWM (no shear)")
