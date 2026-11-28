@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.patches import Circle, FancyBboxPatch
 import numpy as np
+from scipy.ndimage import map_coordinates
 
 
 def windowed_fft_amp(sig, dt_s, mask=None, pad_factor=8):
@@ -45,7 +46,98 @@ def windowed_fft_amp(sig, dt_s, mask=None, pad_factor=8):
     return freq_khz, spec
 
 
-def prepare_bdot_2d_fields(Bx, By, Jz, *, calibrated=True, phase_align=True):
+def upsample_grid_2d(xs, ys, arr, *, n=129, order=3, mode="nearest"):
+    """Spline-upsample a uniform 2-D grid ``arr(ny, nx)`` (real or complex).
+
+    Args:
+        xs, ys: 1-D uniform coordinate arrays of lengths ``nx``, ``ny``.
+        arr: 2-D real or complex array of shape ``(len(ys), len(xs))``.
+        n: Target samples per axis (default ``129``).
+        order: Spline interpolation order forwarded to ``scipy.ndimage.map_coordinates``.
+        mode: Boundary mode forwarded to ``map_coordinates``.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray]: ``(XF, YF, vals)`` on the ``(n, n)`` grid.
+    """
+    xs_a = np.asarray(xs, dtype=float)
+    ys_a = np.asarray(ys, dtype=float)
+    data = np.asarray(arr)
+    xf = np.linspace(float(xs_a[0]), float(xs_a[-1]), int(n))
+    yf = np.linspace(float(ys_a[0]), float(ys_a[-1]), int(n))
+    XF, YF = np.meshgrid(xf, yf)
+    ix = (XF - float(xs_a[0])) / float(xs_a[1] - xs_a[0])
+    iy = (YF - float(ys_a[0])) / float(ys_a[1] - ys_a[0])
+    if np.iscomplexobj(data):
+        re = map_coordinates(np.real(data), [iy, ix], order=order, mode=mode)
+        im = map_coordinates(np.imag(data), [iy, ix], order=order, mode=mode)
+        return XF, YF, re + 1j * im
+    vals = map_coordinates(np.asarray(data, dtype=float), [iy, ix], order=order, mode=mode)
+    return XF, YF, vals
+
+
+def radial_binned_quantiles(xs, ys, values, *, edges, center=(0.0, 0.0),
+                            min_count=3, q=(25.0, 75.0)):
+    """Compute radial-annulus median and quantile envelope of a 2-D gridded field.
+
+    Args:
+        xs, ys: 1-D coordinate arrays.
+        values: 2-D scalar array of shape ``(len(ys), len(xs))``.
+        edges: Monotonic 1-D sequence of radial annulus edges.
+        center: ``(cx, cy)`` origin for radial distance.
+        min_count: Minimum finite samples required to include an annulus.
+        q: ``(q_lo, q_hi)`` percentile pair (default IQR ``(25.0, 75.0)``).
+
+    Returns:
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ``(r_med, y_med, y_lo, y_hi)``.
+    """
+    XX, YY = np.meshgrid(np.asarray(xs, dtype=float), np.asarray(ys, dtype=float))
+    cx, cy = float(center[0]), float(center[1])
+    RR = np.hypot(XX - cx, YY - cy)
+    vals = np.asarray(values, dtype=float)
+    r_med, y_med, y_lo, y_hi = [], [], [], []
+    q_lo, q_hi = float(q[0]), float(q[1])
+    for a, b in zip(edges[:-1], edges[1:]):
+        m = (RR >= float(a)) & (RR < float(b)) & np.isfinite(vals)
+        if int(np.sum(m)) >= int(min_count):
+            r_med.append(float(np.median(RR[m])))
+            y_med.append(float(np.median(vals[m])))
+            y_lo.append(float(np.percentile(vals[m], q_lo)))
+            y_hi.append(float(np.percentile(vals[m], q_hi)))
+    return (
+        np.asarray(r_med, dtype=float),
+        np.asarray(y_med, dtype=float),
+        np.asarray(y_lo, dtype=float),
+        np.asarray(y_hi, dtype=float),
+    )
+
+
+def prepare_folded_cycle(phase_rad, wave):
+    """Map a ``[-pi, pi)`` phase-folded waveform onto a normalized closed ``[0, 1]`` cycle.
+
+    Sorts by phase shifted to ``[0, 1)``, subtracts the mean, scales by the
+    half peak-to-peak amplitude, and closes the cycle by appending ``(1.0, w[0])``.
+    """
+    ph = (np.asarray(phase_rad, dtype=float) + np.pi) / (2.0 * np.pi)
+    order = np.argsort(ph)
+    ph = ph[order]
+    w = np.asarray(wave, dtype=float)[order]
+    w = w - float(np.mean(w))
+    amp = 0.5 * float(np.max(w) - np.min(w))
+    w = w / max(amp, 1e-12)
+    return np.append(ph, 1.0), np.append(w, w[0])
+
+
+def prepare_bdot_2d_fields(
+    Bx,
+    By,
+    Jz,
+    *,
+    calibrated=True,
+    phase_align=True,
+    interior_phase_align=False,
+    j_unit_mode="auto",
+):
     """Normalize/scale 2-D complex or real ``(Bx, By, Jz)`` fields for plotting.
 
     Shared by :func:`draw_bdot_2d_map` and
@@ -55,10 +147,15 @@ def prepare_bdot_2d_fields(Bx, By, Jz, *, calibrated=True, phase_align=True):
 
     Args:
         Bx, By, Jz: 2-D arrays of shape ``(ny, nx)`` (complex phasors or real).
+            ``Bx`` and ``By`` may be ``None`` for ``Jz``-only maps.
         calibrated: True if ``Bx, By`` are in Tesla and ``Jz`` in A/m^2;
             False for uncalibrated relative units.
         phase_align: If True and ``Jz`` is complex, rotate ``(Bx, By, Jz)`` by
             ``exp(-i * angle(Jz[argmax |Jz|]))`` so peak ``Re[J_par]`` is positive.
+        interior_phase_align: If True, find the phase-alignment peak on
+            ``Jz[1:-1, 1:-1]`` (ignoring finite-difference edges).
+        j_unit_mode: ``"auto"`` (kA/m^2 when ``j_max >= 1e3``, else A/m^2),
+            ``"kA"``, or ``"A"`` when ``calibrated=True``.
 
     Returns:
         dict: ``Bx``, ``By``, ``Jz`` (phase-aligned raw arrays), ``Jz_plot``
@@ -66,31 +163,45 @@ def prepare_bdot_2d_fields(Bx, By, Jz, *, calibrated=True, phase_align=True):
         ``cb_label``, ``Bx_plot``, ``By_plot``, ``b_scale`` (95th percentile
         magnitude in display units), ``calibrated``.
     """
-    Bx_a = np.asarray(Bx)
-    By_a = np.asarray(By)
+    Bx_a = None if Bx is None else np.asarray(Bx)
+    By_a = None if By is None else np.asarray(By)
     Jz_a = np.asarray(Jz)
 
     if phase_align and np.iscomplexobj(Jz_a):
-        abs_j = np.abs(Jz_a)
+        ref_arr = (
+            Jz_a[1:-1, 1:-1]
+            if (interior_phase_align and Jz_a.shape[0] > 2 and Jz_a.shape[1] > 2)
+            else Jz_a
+        )
+        abs_j = np.abs(ref_arr)
         if np.any(np.isfinite(abs_j)):
-            ph_max = float(np.angle(Jz_a[np.unravel_index(int(np.nanargmax(abs_j)), Jz_a.shape)]))
+            ph_max = float(np.angle(ref_arr[np.unravel_index(int(np.nanargmax(abs_j)), ref_arr.shape)]))
             rot = np.exp(-1j * ph_max)
             Jz_a = Jz_a * rot
-            Bx_a = Bx_a * rot
-            By_a = By_a * rot
+            if Bx_a is not None:
+                Bx_a = Bx_a * rot
+            if By_a is not None:
+                By_a = By_a * rot
 
     j_max = float(np.nanmax(np.abs(Jz_a))) if np.any(np.isfinite(Jz_a)) else 0.0
     if not np.isfinite(j_max) or j_max <= 0.0:
         j_max = 1.0
 
     if calibrated:
-        j_scale, j_unit = (1e-3, r"kA/m$^2$") if j_max >= 1e3 else (1.0, r"A/m$^2$")
+        if j_unit_mode == "kA":
+            j_scale, j_unit = 1e-3, r"kA/m$^2$"
+        elif j_unit_mode == "A":
+            j_scale, j_unit = 1.0, r"A/m$^2$"
+        elif j_unit_mode == "auto":
+            j_scale, j_unit = (1e-3, r"kA/m$^2$") if j_max >= 1e3 else (1.0, r"A/m$^2$")
+        else:
+            raise ValueError(f"j_unit_mode must be 'auto', 'kA', or 'A', got {j_unit_mode!r}")
         Jz_plot = Jz_a * j_scale
         j_vlim = j_max * j_scale
         cb_label = rf"$\mathrm{{Re}}[J_\parallel]$ [{j_unit}]"
         # Convert Tesla -> Gauss for quiver display
-        Bx_plot = Bx_a * 1e4
-        By_plot = By_a * 1e4
+        Bx_plot = None if Bx_a is None else (Bx_a * 1e4)
+        By_plot = None if By_a is None else (By_a * 1e4)
     else:
         j_scale, j_unit = 1.0 / j_max, ""
         Jz_plot = Jz_a / j_max
@@ -99,9 +210,12 @@ def prepare_bdot_2d_fields(Bx, By, Jz, *, calibrated=True, phase_align=True):
         Bx_plot = Bx_a
         By_plot = By_a
 
-    b_mag = np.hypot(np.abs(Bx_plot), np.abs(By_plot))
-    b_scale = float(np.nanpercentile(b_mag, 95)) if np.any(np.isfinite(b_mag)) else 0.0
-    if not np.isfinite(b_scale):
+    if Bx_plot is not None and By_plot is not None:
+        b_mag = np.hypot(np.abs(Bx_plot), np.abs(By_plot))
+        b_scale = float(np.nanpercentile(b_mag, 95)) if np.any(np.isfinite(b_mag)) else 0.0
+        if not np.isfinite(b_scale):
+            b_scale = 0.0
+    else:
         b_scale = 0.0
 
     return {
@@ -571,106 +685,151 @@ def draw_bdot_2d_map(
     *,
     calibrated=True,
     phase_align=True,
+    interior_phase_align=False,
+    j_unit_mode="auto",
     j_vlim=None,
+    upsample_n=None,
+    contour_levels=None,
     cmap="RdBu_r",
     add_colorbar=True,
+    cb_label=None,
     cbar_kw=None,
+    show_quiver=True,
     quiver_scale_mult=14.0,
     quiver_width=0.0042,
     quiver_alpha=0.82,
     show_quiverkey=True,
     quiverkey_val=None,
+    quiverkey_box=(0.72, 0.025, 0.25, 0.065),
+    quiverkey_xy=(0.80, 0.058),
     circles=(),
     markers=(),
     note_lines=None,
+    xlim=None,
+    ylim=None,
     xlabel=r"$x$ [cm]",
     ylabel=r"$y$ [cm]",
     title=None,
     legend_loc="upper left",
+    legend_kw=None,
 ):
-    """Draw a 2-D ``Re[J_par]`` pcolormesh + ``B_perp`` quiver map on ``ax``.
+    """Draw a 2-D ``Re[J_par]`` pcolormesh + optional contours & ``B_perp`` quiver map.
 
     Args:
         ax: Target matplotlib ``Axes``.
         xs, ys: 1-D coordinate arrays in cm.
         Bx, By, Jz: 2-D arrays of shape ``(len(ys), len(xs))`` (complex phasors
-            or real snapshots).
+            or real snapshots). ``Bx``/``By`` may be ``None`` for ``Jz``-only maps.
         calibrated: True for calibrated SI inputs (``Bx, By`` in Tesla -> quiver
             in Gauss with quiver-key box; ``Jz`` in A/m^2 -> A/m^2 or kA/m^2);
             False for normalized relative units.
         phase_align: Rotate complex phasors so peak ``Re[J_par]`` is positive.
+        interior_phase_align: Use ``Jz[1:-1, 1:-1]`` to choose alignment phase.
+        j_unit_mode: ``"auto"``, ``"kA"``, or ``"A"`` when ``calibrated=True``.
         j_vlim: Optional explicit symmetric color limit ``(-j_vlim, +j_vlim)``.
+        upsample_n: Optional int (e.g. ``129``) to bicubic-upsample ``Jz`` for
+            smooth ``pcolormesh`` and contours while keeping ``quiver`` on ``(xs, ys)``.
+        contour_levels: Optional sequence of scalar levels for solid (``>0``)
+            and dashed (``<0``) black contour overlays on ``Re[J_par]``.
         cmap: Diverging colormap name.
         add_colorbar: If True, add a colorbar attached to ``ax``.
+        cb_label: Optional override for colorbar label text.
         cbar_kw: Optional dict forwarded to ``fig.colorbar(...)``.
+        show_quiver: Draw ``(Bx, By)`` quiver overlay when ``Bx`` and ``By`` are provided.
         quiver_scale_mult: Multiplier on 95th-percentile ``|B_perp|`` for quiver scale.
         quiver_width: Quiver shaft width.
         quiver_alpha: Quiver arrow opacity.
         show_quiverkey: Draw rounded white quiver-key box when ``calibrated=True``.
         quiverkey_val: Explicit quiver-key reference value in Gauss (auto if None).
+        quiverkey_box: ``(x, y, w, h)`` in axes coords for the quiver-key backdrop.
+        quiverkey_xy: ``(x, y)`` in axes coords for ``ax.quiverkey``.
         circles: Sequence of dicts ``{"radius": r, "center": (cx, cy), "ec": ...,
             "ls": ..., "lw": ..., "label": ...}`` for electrode/orbit overlays.
         markers: Sequence of dicts ``{"x": x, "y": y, "marker": ..., "ms": ...,
             "color": ..., "mec": ..., "mew": ..., "label": ...}`` for probe dots.
         note_lines: Optional sequence of strings placed in bottom-left white box.
+        xlim, ylim: Optional ``(lo, hi)`` axis limits (default grid extent).
         xlabel, ylabel, title: Labels and title.
-        legend_loc: Legend location if any circles/markers carry labels.
+        legend_loc: Legend location if any circles/markers carry labels (None suppresses).
+        legend_kw: Optional dict merged into ``ax.legend(...)``.
 
     Returns:
         dict: ``{"im", "quiver", "colorbar", "j_vlim", "cb_label"}``.
     """
     xs_a = np.asarray(xs, dtype=float)
     ys_a = np.asarray(ys, dtype=float)
-    prep = prepare_bdot_2d_fields(Bx, By, Jz, calibrated=calibrated, phase_align=phase_align)
+    prep = prepare_bdot_2d_fields(
+        Bx, By, Jz,
+        calibrated=calibrated,
+        phase_align=phase_align,
+        interior_phase_align=interior_phase_align,
+        j_unit_mode=j_unit_mode,
+    )
 
-    Jz_r = np.real(prep["Jz_plot"])
-    Bx_r = np.real(prep["Bx_plot"])
-    By_r = np.real(prep["By_plot"])
+    if upsample_n is not None:
+        XJ, YJ, Jz_up = upsample_grid_2d(xs_a, ys_a, prep["Jz_plot"], n=int(upsample_n))
+        Jz_r = np.real(Jz_up)
+    else:
+        XJ, YJ = np.meshgrid(xs_a, ys_a)
+        Jz_r = np.real(prep["Jz_plot"])
+
     vlim = float(j_vlim) if j_vlim is not None else float(prep["j_vlim"])
     if not np.isfinite(vlim) or vlim <= 0.0:
         vlim = 1.0
 
-    XX, YY = np.meshgrid(xs_a, ys_a)
-    im = ax.pcolormesh(XX, YY, Jz_r, cmap=cmap, vmin=-vlim, vmax=vlim, shading="auto")
+    im = ax.pcolormesh(XJ, YJ, Jz_r, cmap=cmap, vmin=-vlim, vmax=vlim, shading="auto")
+    if contour_levels is not None:
+        pos_lvls = [lv for lv in contour_levels if lv > 0]
+        neg_lvls = [lv for lv in contour_levels if lv < 0]
+        if pos_lvls:
+            ax.contour(XJ, YJ, Jz_r, levels=pos_lvls, colors="k", linestyles="-", linewidths=0.85, alpha=0.72)
+        if neg_lvls:
+            ax.contour(XJ, YJ, Jz_r, levels=neg_lvls, colors="k", linestyles="--", linewidths=0.85, alpha=0.72)
 
+    lbl_cb = prep["cb_label"] if cb_label is None else cb_label
     cb = None
     if add_colorbar:
         ckw = {"fraction": 0.046, "pad": 0.03, "shrink": 0.84}
         if isinstance(cbar_kw, dict):
             ckw.update(cbar_kw)
         cb = ax.get_figure().colorbar(im, ax=ax, **ckw)
-        cb.set_label(prep["cb_label"])
+        cb.set_label(lbl_cb)
 
     qv = None
-    if calibrated:
-        bscale_g = float(np.nanpercentile(np.hypot(Bx_r, By_r), 95)) if np.any(np.isfinite(Bx_r)) else 0.0
-        if np.isfinite(bscale_g) and bscale_g > 0.0:
-            qv = ax.quiver(
-                XX, YY, Bx_r, By_r,
-                color="k", scale=bscale_g * quiver_scale_mult,
-                width=quiver_width, alpha=quiver_alpha,
-            )
-            if show_quiverkey:
-                key_g = float(quiverkey_val) if quiverkey_val is not None else (0.2 if bscale_g >= 0.15 else 0.1)
-                ax.add_patch(FancyBboxPatch(
-                    (0.72, 0.025), 0.25, 0.065,
-                    boxstyle="round,pad=0.012", transform=ax.transAxes,
-                    fc="white", ec="none", alpha=0.88, zorder=7,
-                ))
-                qk = ax.quiverkey(
-                    qv, 0.80, 0.058, key_g, f"{key_g:g} G",
-                    labelpos="E", coordinates="axes",
-                    fontproperties={"size": 9.4, "weight": "bold"},
+    if show_quiver and prep["Bx_plot"] is not None and prep["By_plot"] is not None:
+        XX, YY = np.meshgrid(xs_a, ys_a)
+        Bx_r = np.real(prep["Bx_plot"])
+        By_r = np.real(prep["By_plot"])
+        if calibrated:
+            bscale_g = float(np.nanpercentile(np.hypot(Bx_r, By_r), 95)) if np.any(np.isfinite(Bx_r)) else 0.0
+            if np.isfinite(bscale_g) and bscale_g > 0.0:
+                qv = ax.quiver(
+                    XX, YY, Bx_r, By_r,
+                    color="k", scale=bscale_g * quiver_scale_mult,
+                    width=quiver_width, alpha=quiver_alpha,
                 )
-                qk.set_zorder(8)
-    else:
-        bscale = float(np.nanpercentile(np.hypot(Bx_r, By_r), 95)) if np.any(np.isfinite(Bx_r)) else 0.0
-        if np.isfinite(bscale) and bscale > 0.0:
-            qv = ax.quiver(
-                XX, YY, Bx_r / bscale, By_r / bscale,
-                color="k", scale=quiver_scale_mult,
-                width=quiver_width, alpha=quiver_alpha,
-            )
+                if show_quiverkey:
+                    key_g = float(quiverkey_val) if quiverkey_val is not None else (0.2 if bscale_g >= 0.15 else 0.1)
+                    bx0, by0, bw, bh = quiverkey_box
+                    ax.add_patch(FancyBboxPatch(
+                        (bx0, by0), bw, bh,
+                        boxstyle="round,pad=0.012", transform=ax.transAxes,
+                        fc="white", ec="none", alpha=0.88, zorder=7,
+                    ))
+                    qk = ax.quiverkey(
+                        qv, quiverkey_xy[0], quiverkey_xy[1], key_g, f"{key_g:g} G",
+                        labelpos="E", coordinates="axes",
+                        fontproperties={"size": 9.4, "weight": "bold"},
+                    )
+                    qk.set_zorder(8)
+        else:
+            bscale = float(np.nanpercentile(np.hypot(Bx_r, By_r), 95)) if np.any(np.isfinite(Bx_r)) else 0.0
+            if np.isfinite(bscale) and bscale > 0.0:
+                qv = ax.quiver(
+                    XX, YY, Bx_r / bscale, By_r / bscale,
+                    color="k", scale=quiver_scale_mult,
+                    width=quiver_width, alpha=quiver_alpha,
+                )
 
     has_legend = False
     for c in circles:
@@ -708,8 +867,8 @@ def draw_bdot_2d_map(
         )
 
     ax.set_aspect("equal")
-    ax.set_xlim(float(xs_a[0]), float(xs_a[-1]))
-    ax.set_ylim(float(ys_a[0]), float(ys_a[-1]))
+    ax.set_xlim(*(xlim if xlim is not None else (float(xs_a[0]), float(xs_a[-1]))))
+    ax.set_ylim(*(ylim if ylim is not None else (float(ys_a[0]), float(ys_a[-1]))))
     if xlabel:
         ax.set_xlabel(xlabel)
     if ylabel:
@@ -718,11 +877,14 @@ def draw_bdot_2d_map(
     if note_lines:
         ax.text(
             0.04, 0.04, "\n".join(note_lines),
-            transform=ax.transAxes, fontsize=9.8, va="bottom",
-            bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.86),
+            transform=ax.transAxes, fontsize=9.4, va="bottom",
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.88),
         )
     if has_legend and legend_loc is not None:
-        ax.legend(loc=legend_loc, frameon=True, framealpha=0.90)
+        lkw = {"loc": legend_loc, "frameon": True, "framealpha": 0.90}
+        if isinstance(legend_kw, dict):
+            lkw.update(legend_kw)
+        ax.legend(**lkw)
     if title:
         ax.set_title(title, fontweight="bold")
 
@@ -731,8 +893,72 @@ def draw_bdot_2d_map(
         "quiver": qv,
         "colorbar": cb,
         "j_vlim": vlim,
-        "cb_label": prep["cb_label"],
+        "cb_label": lbl_cb,
     }
+
+
+def draw_polar_phasor_scatter(
+    ax,
+    series,
+    *,
+    rlim=1.05,
+    rticks=(0.25, 0.50, 0.75, 1.00),
+    rlabel_position=112,
+    title=None,
+    title_kw=None,
+    legend_kw=None,
+    grid_alpha=0.28,
+):
+    """Draw complex amplitude/phase groups on a signed-angle polar ``Axes``.
+
+    Configures ``0 deg`` at East, CCW positive angles labelled in ``(-180, +180]``,
+    horizontal ``0 deg / 180 deg`` reference rays, and plots each scatter group
+    dict containing ``"r"`` and ``"deg"`` (plus standard ``ax.scatter`` kwargs).
+
+    Returns:
+        list[matplotlib.collections.PathCollection]: Scatter artists.
+    """
+    ax.set_theta_zero_location("E")
+    ax.set_theta_direction(1)
+    ax.set_rlim(0.0, float(rlim))
+    if rticks is not None:
+        ax.set_rticks(list(rticks))
+    ax.set_rlabel_position(float(rlabel_position))
+    ax.tick_params(axis="y", labelsize=8.6, colors="0.35")
+    ax.set_thetagrids(
+        [0, 45, 90, 135, 180, 225, 270, 315],
+        labels=[
+            r"$0^\circ$", r"$+45^\circ$", r"$+90^\circ$", r"$+135^\circ$",
+            r"$\pm 180^\circ$", r"$-135^\circ$", r"$-90^\circ$", r"$-45^\circ$",
+        ],
+        fontsize=9.2,
+    )
+    ax.grid(alpha=grid_alpha)
+    ax.plot([0.0, 0.0], [0.0, float(rlim)], color="0.5", ls=":", lw=1.0, zorder=1)
+    ax.plot([np.pi, np.pi], [0.0, float(rlim)], color="0.5", ls=":", lw=1.0, zorder=1)
+
+    artists = []
+    has_label = False
+    for item in series:
+        cfg = dict(item)
+        r_vals = np.atleast_1d(np.asarray(cfg.pop("r"), dtype=float))
+        th_vals = np.radians(np.atleast_1d(np.asarray(cfg.pop("deg"), dtype=float)))
+        if cfg.get("label"):
+            has_label = True
+        artists.append(ax.scatter(th_vals, r_vals, **cfg))
+
+    if has_label and legend_kw is not False:
+        lkw = {"loc": "upper center", "bbox_to_anchor": (0.50, -0.10), "ncol": 2,
+               "frameon": True, "framealpha": 0.92, "fontsize": 8.5, "columnspacing": 1.1}
+        if isinstance(legend_kw, dict):
+            lkw.update(legend_kw)
+        ax.legend(**lkw)
+    if title:
+        tkw = {"fontweight": "bold", "pad": 14}
+        if isinstance(title_kw, dict):
+            tkw.update(title_kw)
+        ax.set_title(title, **tkw)
+    return artists
 
 
 def draw_pulse_and_zoom(

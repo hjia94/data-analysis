@@ -640,6 +640,28 @@ def configure_publication_style():
         'ytick.right': True,
     })
 
+
+def clean_axes_rc(*, legend_fontsize=8.6):
+    """Return an ``rc_context`` dict for clean open-spine panels (no top/right frame).
+
+    Intended for ``with plt.rc_context(clean_axes_rc()):`` so open-spine
+    figures never leak rcParams mutations into other figures in a batch run.
+    """
+    return {
+        'font.size': 9.5,
+        'axes.titlesize': 10.5,
+        'axes.labelsize': 10.0,
+        'xtick.labelsize': 9.0,
+        'ytick.labelsize': 9.0,
+        'legend.fontsize': float(legend_fontsize),
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+        'xtick.direction': 'out',
+        'ytick.direction': 'out',
+        'xtick.top': False,
+        'ytick.right': False,
+    }
+
 #==============================================================================
 # Plane Maps and Animation
 #==============================================================================

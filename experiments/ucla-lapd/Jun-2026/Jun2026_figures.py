@@ -24,6 +24,8 @@ from matplotlib.gridspec import GridSpec
 import numpy as np
 
 from data_analysis.io import open_lapd
+from data_analysis.plasma.flow import fit_exponential_relaxation
+from data_analysis.plasma.profiles import orbit_smeared_profile
 from data_analysis.plasma.stability import (
     fit_smooth_radial_profile,
     solve_radial_cylindrical_modes,
@@ -32,14 +34,18 @@ from data_analysis.signal.core import downsample_blockmean
 from data_analysis.utils import find_run_hdf5 as _run_hdf5
 from data_analysis.viz import (
     animate_lab_vs_plasma_frame,
+    clean_axes_rc,
     configure_publication_style,
     draw_bdot_2d_map,
     draw_ne_te_profile,
+    draw_polar_phasor_scatter,
     draw_psd_overlay,
     draw_pulse_and_zoom,
     draw_stacked_traces,
     fig_path,
     finalize_figure,
+    prepare_folded_cycle,
+    radial_binned_quantiles,
     windowed_fft_amp,
 )
 
@@ -831,6 +837,644 @@ def plot_shear_gating(
 
 
 # =========================================================================== #
+#  Finding #3 figures (2-D B-dot structure/polarization & sheath closure)
+# =========================================================================== #
+
+def plot_bdot_structure_pol(
+    *,
+    data_dir=None,
+    bdot_npz=None,
+    save_fig=True,
+    show=False,
+    dpi=220,
+):
+    """3-panel calibrated 2-D ``f_0``/``2f_0`` ``J_par`` structure and radial polarization flip."""
+    import Jun2026_bdot_2d as jb2
+
+    ddir = data_dir or jb2.DATA_DIR
+    bdot_path = bdot_npz or os.path.join(ddir, jb2.OUT_NAME)
+
+    with np.load(bdot_path, allow_pickle=True) as bd:
+        x26, y26 = bd["26__x_cm"], bd["26__y_cm"]
+        el26_1 = bd["26__h1__ellipticity"]
+        el26_2 = bd["26__h2__ellipticity"]
+        c26_1 = (float(bd["26__h1__center_x_cm"]), float(bd["26__h1__center_y_cm"]))
+        c26_2 = (float(bd["26__h2__center_x_cm"]), float(bd["26__h2__center_y_cm"]))
+        b0_26 = float(bd["26__b0_g"])
+
+        x31, y31 = bd["31__x_cm"], bd["31__y_cm"]
+        f0_31 = float(bd["31__f0_hz"]) * 1e-3
+        b0_31 = float(bd["31__b0_g"])
+        Jz31_1 = bd["31__h1__Jz"]
+        Jz31_2 = bd["31__h2__Jz"]
+        el31_1 = bd["31__h1__ellipticity"]
+        c31_1 = (float(bd["31__h1__center_x_cm"]), float(bd["31__h1__center_y_cm"]))
+
+    fig = plt.figure(figsize=(15.0, 4.65))
+    gs = GridSpec(1, 3, figure=fig, width_ratios=[1.14, 1.14, 1.06], wspace=0.38)
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_b = fig.add_subplot(gs[0, 1])
+    ax_c = fig.add_subplot(gs[0, 2])
+
+    plate_circles = (
+        {"radius": 2.54, "ec": "#16a34a", "ls": "-", "lw": 1.65, "label": '2" / 4" plates'},
+        {"radius": 5.08, "ec": "#16a34a", "ls": "--", "lw": 1.45},
+    )
+    common_kw = dict(
+        calibrated=True,
+        phase_align=True,
+        interior_phase_align=True,
+        j_unit_mode="kA",
+        upsample_n=129,
+        show_quiver=False,
+        cbar_kw={"fraction": 0.046, "pad": 0.03, "shrink": 0.86},
+        circles=plate_circles,
+        xlim=(-6.5, 7.5),
+        ylim=(-6.5, 7.5),
+        legend_kw={"fontsize": 8.8, "framealpha": 0.92},
+    )
+    res_a = draw_bdot_2d_map(
+        ax_a, x31, y31, None, None, Jz31_1,
+        j_vlim=1.20,
+        contour_levels=(-0.80, -0.40, 0.40, 0.80),
+        title=rf"(a) $f_0 = {f0_31:.1f}$ kHz ($m_J = -1$, {b0_31:.0f} G)",
+        legend_loc="upper left",
+        **common_kw,
+    )
+    res_b = draw_bdot_2d_map(
+        ax_b, x31, y31, None, None, Jz31_2,
+        j_vlim=0.34,
+        contour_levels=(-0.22, -0.10, 0.10, 0.22),
+        ylabel=None,
+        title=rf"(b) $2f_0 = {2 * f0_31:.1f}$ kHz ($m_J = -2$, {b0_31:.0f} G)",
+        legend_loc=None,
+        **common_kw,
+    )
+    for res_p in (res_a, res_b):
+        if res_p["colorbar"] is not None:
+            res_p["colorbar"].set_label(r"$\mathrm{Re}[J_\parallel]$ [kA/m$^2$]", fontsize=9.6)
+            res_p["colorbar"].ax.tick_params(labelsize=8.8)
+
+    edges = (0.0, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 8.0)
+    curves = (
+        (x26, y26, c26_1, el26_1, "#1d4ed8", "o-", rf"Experiment: {b0_26:.0f} G, $f_0$"),
+        (x26, y26, c26_2, el26_2, "#ea580c", "^--", rf"Experiment: {b0_26:.0f} G, $2f_0$"),
+        (x31, y31, c31_1, el31_1, "#0f766e", "s-", rf"Experiment: {b0_31:.0f} G, $f_0$"),
+    )
+    ax_c.axhline(0.0, color="0.45", ls=":", lw=1.0, zorder=1)
+    for x, y, center, el, col, fmt, lbl in curves:
+        rm, pm, q25, q75 = radial_binned_quantiles(x, y, el, edges=edges, center=center)
+        ax_c.fill_between(rm, q25, q75, color=col, alpha=0.13, lw=0)
+        ax_c.plot(rm, pm, fmt, color=col, lw=2.0, ms=5.5, label=lbl, zorder=3)
+
+    ax_c.text(0.25, +0.97, "RHCP (CCW)", color="0.30", fontsize=8.8, va="top", ha="left")
+    ax_c.text(7.55, -0.97, "LHCP (CW)", color="0.30", fontsize=8.8, va="bottom", ha="right")
+    ax_c.set_xlim(0.0, 7.8)
+    ax_c.set_ylim(-1.08, 1.08)
+    ax_c.set_xlabel(r"Radius from mode center $r$ [cm]", fontsize=10.2)
+    ax_c.set_ylabel(r"Ellipticity $P = (|B_R|^2 - |B_L|^2) / (|B_R|^2 + |B_L|^2)$", fontsize=9.8)
+    ax_c.grid(alpha=0.22)
+    ax_c.legend(loc="lower right", bbox_to_anchor=(0.99, 0.14), frameon=True, framealpha=0.92, fontsize=8.6)
+    ax_c.set_title("(c) Radial Circular Polarization Flip", fontsize=10.8, fontweight="bold")
+
+    fig.subplots_adjust(left=0.055, right=0.985, top=0.90, bottom=0.14)
+    finalize_figure(fig, save_fig=_resolve_save(save_fig, "fig3_1_bdot_structure_pol"), show=show, dpi=dpi, tight_layout=False)
+
+
+def plot_sheath_closure_bench(
+    *,
+    data_dir=None,
+    bdot_npz=None,
+    stability_npz=None,
+    save_fig=True,
+    show=False,
+    dpi=220,
+):
+    """2-panel DC bias turn-on polarity proof and polar calibrated sheath-closure benchmark."""
+    import Jun2026_bdot_2d as jb2
+    import Jun2026_stability as jst
+
+    ddir = data_dir or jb2.DATA_DIR
+    bdot_path = bdot_npz or os.path.join(ddir, jb2.OUT_NAME)
+    stab_path = stability_npz or os.path.join(ddir, jst.OUT_NAME)
+
+    with np.load(bdot_path, allow_pickle=True) as bd:
+        x26, y26 = bd["26__x_cm"], bd["26__y_cm"]
+        b0_26 = float(bd["26__b0_g"])
+        Jz_on = bd["26__dc__Jz_on"]
+        dB_on = bd["26__dc__dB_on"]
+        I_on = float(bd["26__dc__I_int_on"])
+        I_off = float(bd["26__dc__I_int_off"])
+        dBz_on = float(bd["26__dc__dBz_core_on"]) * 1e4
+        dBz_off = float(bd["26__dc__dBz_core_off"]) * 1e4
+
+    with np.load(stab_path, allow_pickle=True) as st:
+        exp_800_ring = (
+            float(st["sheath__exp_26__ring_coh_j_over_isat_ratio_dc_scaled"]),
+            float(st["sheath__exp_26__ring_coh_dphi_j_isat_deg"]),
+        )
+        exp_800_core = (
+            float(st["sheath__exp_26__core_j_over_isat_ratio_dc_scaled"]),
+            float(st["sheath__exp_26__core_dphi_j_isat_deg"]),
+        )
+        exp_600_ring = (
+            float(st["sheath__exp_31__ring_coh_j_over_isat_ratio_dc_scaled"]),
+            float(st["sheath__exp_31__ring_coh_dphi_j_isat_deg"]),
+        )
+        exp_600_core = (
+            float(st["sheath__exp_31__core_j_over_isat_ratio_dc_scaled"]),
+            float(st["sheath__exp_31__core_dphi_j_isat_deg"]),
+        )
+        bvp_hollow = [
+            (
+                float(st[f"sheath__{btag}__{mtag}_j_over_isat_p28_p29"]),
+                float(st[f"sheath__{btag}__{mtag}_dphi_j_isat_p28_p29_deg"]),
+            )
+            for btag in ("bvp_800G", "bvp_600G")
+            for mtag in ("conducting_1", "flt_rext", "bsh_rext")
+        ]
+        bvp_peaked = [
+            (
+                float(st[f"sheath__eta_flip__{mtag}_peaked_j_over_isat_sheath"]),
+                float(st[f"sheath__eta_flip__{mtag}_peaked_dphi_j_isat_sheath_deg"]),
+            )
+            for mtag in ("conducting_1", "flt_rext", "bsh_rext")
+        ]
+
+    fig = plt.figure(figsize=(13.0, 5.6))
+    gs = GridSpec(1, 2, figure=fig, width_ratios=[1.12, 1.0], wspace=0.25)
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_b = fig.add_subplot(gs[0, 1], projection="polar")
+
+    draw_bdot_2d_map(
+        ax_a, x26, y26, dB_on[0], dB_on[1], Jz_on,
+        calibrated=True,
+        phase_align=False,
+        j_unit_mode="kA",
+        j_vlim=7.0,
+        upsample_n=129,
+        cb_label=r"$\Delta J_{z,\mathrm{on}}$ [kA/m$^2$]",
+        cbar_kw={"fraction": 0.046, "pad": 0.03, "shrink": 0.88},
+        quiver_scale_mult=16.5,
+        quiver_width=0.0044,
+        quiver_alpha=0.84,
+        quiverkey_val=1.0,
+        quiverkey_box=(0.68, 0.025, 0.29, 0.075),
+        quiverkey_xy=(0.77, 0.062),
+        circles=(
+            {"radius": 2.54, "ec": "#16a34a", "ls": "-", "lw": 1.6, "label": '2" / 4" / 6" plates'},
+            {"radius": 5.08, "ec": "#16a34a", "ls": "--", "lw": 1.4},
+            {"radius": 7.62, "ec": "#16a34a", "ls": ":", "lw": 1.3},
+        ),
+        note_lines=(
+            f"$I_{{\\mathrm{{on}}}} = {I_on:+.1f}$ A,  $I_{{\\mathrm{{off}}}} = {I_off:+.1f}$ A",
+            f"$\\Delta B_z = {dBz_on:+.2f}$ / ${dBz_off:+.2f}$ G",
+        ),
+        xlim=(-7.5, 7.5),
+        ylim=(-7.5, 7.5),
+        title=rf"(a) Experiment: DC Bias Turn-On Step ({b0_26:.0f} G)",
+        legend_kw={"fontsize": 8.8},
+    )
+
+    polar_series = (
+        {
+            "r": [r for r, _ in bvp_hollow],
+            "deg": [deg for _, deg in bvp_hollow],
+            "s": 80, "facecolors": "none", "edgecolors": "#dc2626", "linewidths": 1.9,
+            "marker": "D", "zorder": 4,
+            "label": "Theory: 1D CWM BVP (hollow profile)",
+        },
+        {
+            "r": [r for r, _ in bvp_peaked],
+            "deg": [deg for _, deg in bvp_peaked],
+            "s": 84, "facecolors": "none", "edgecolors": "0.38", "linewidths": 1.7,
+            "marker": "^", "zorder": 4,
+            "label": "Theory: 1D CWM BVP (peak profile)",
+        },
+        {
+            "r": exp_800_ring[0], "deg": exp_800_ring[1],
+            "s": 100, "color": "#1d4ed8", "edgecolors": "k", "linewidths": 0.8,
+            "marker": "o", "zorder": 5, "label": "Experiment: 800 G",
+        },
+        {
+            "r": exp_800_core[0], "deg": exp_800_core[1],
+            "s": 105, "facecolors": "#bfdbfe", "edgecolors": "#1d4ed8", "linewidths": 1.2,
+            "hatch": ".....", "marker": "o", "zorder": 5,
+        },
+        {
+            "r": exp_600_ring[0], "deg": exp_600_ring[1],
+            "s": 96, "color": "#0f766e", "edgecolors": "k", "linewidths": 0.8,
+            "marker": "s", "zorder": 5, "label": "Experiment: 600 G",
+        },
+        {
+            "r": exp_600_core[0], "deg": exp_600_core[1],
+            "s": 102, "facecolors": "#99f6e4", "edgecolors": "#0f766e", "linewidths": 1.2,
+            "hatch": ".....", "marker": "s", "zorder": 5,
+        },
+    )
+    draw_polar_phasor_scatter(
+        ax_b, polar_series,
+        title=r"(b) Sheath Closure: $r = (|\delta J_\parallel|/J_{\mathrm{sat}})/(|\delta I_{\mathrm{sat}}|/I_{\mathrm{sat}})$, $\theta = \Delta\phi(J_\parallel - I_{\mathrm{sat}})$",
+        title_kw={"fontsize": 9.8},
+    )
+
+    fig.subplots_adjust(left=0.055, right=0.96, top=0.88, bottom=0.22)
+    finalize_figure(fig, save_fig=_resolve_save(save_fig, "fig3_2_sheath_closure_bench"), show=show, dpi=dpi, tight_layout=False)
+
+
+# =========================================================================== #
+#  Finding #4 figures (Alfven spin-down & slow-tail Pedersen shortfall)
+# =========================================================================== #
+
+def plot_alfven_spindown(
+    *,
+    data_dir=None,
+    spindown_npz=None,
+    save_fig=True,
+    show=False,
+    dpi=220,
+):
+    """2-panel fast post-bias flow unwinding and Alfvén transit-time scaling."""
+    import Jun2026_spindown as jsd
+
+    ddir = data_dir or jsd.DATA_DIR
+    sd_path = spindown_npz or os.path.join(ddir, jsd.OUT_NAME)
+
+    runs_all = ("06", "00", "01", "02", "03", "04", "05")
+    sel_runs = (
+        ("06", "23 ms", "#1f77b4", "-"),
+        ("01", "25 ms", "#00897b", "-"),
+        ("02", "30 ms", "#d95f02", "-"),
+        ("05", "45 ms", "#c62828", "-"),
+    )
+    offsets = {
+        23: (6, -11), 24: (-16, 8), 25: (6, -11),
+        30: (-20, 7), 35: (-14, 8), 40: (5, -12), 45: (-20, 7),
+    }
+
+    with np.load(sd_path, allow_pickle=True) as d:
+        t_off_ms = float(d["turnoff__v2_t50_med_ms"])
+        puffs_all = np.array([float(d[f"puff__{r}__gas_puff_ms"]) for r in runs_all])
+        tau_f_all = np.array([float(d[f"puff__{r}__tau_fast_us"]) for r in runs_all])
+        tau_a_all = np.array([float(d[f"puff__{r}__tau_alfven_s"]) * 1e6 for r in runs_all])
+        fast_traces = []
+        for r, lbl, col, ls in sel_runs:
+            tf_us = (d[f"puff__{r}__t_fast_ms"] - t_off_ms) * 1e3
+            mf = d[f"puff__{r}__m_rot_fast"]
+            m = (tf_us >= -45.0) & (tf_us <= 175.0)
+            fast_traces.append((tf_us[m], mf[m], lbl, col, ls))
+
+    with plt.rc_context(clean_axes_rc(legend_fontsize=8.6)):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.8, 4.15), constrained_layout=True)
+
+        for tf_us, mf, lbl, col, ls in fast_traces:
+            ax1.plot(tf_us, mf, ls=ls, color=col, lw=2.0, label=f"Experiment: {lbl}")
+        ax1.axvline(0.0, color="#333333", lw=1.1, ls="--")
+        ax1.axhline(0.0, color="#888888", lw=0.8, ls=":")
+        ax1.text(3.0, -0.575, "Bias off", fontsize=8.3, color="#333333", va="bottom", ha="left")
+        ax1.set_xlabel(r"Time After Bias Turn-Off $t - t_{\mathrm{off}}$ [$\mu$s]")
+        ax1.set_ylabel(r"Azimuthal Flow $M_\theta$")
+        ax1.set_title("(a) Fast Post-Bias Flow Unwinding", loc="left", fontweight="bold")
+        ax1.set_xlim(-40, 175)
+        ax1.set_ylim(-0.60, 0.14)
+        ax1.grid(True, alpha=0.25, ls=":")
+        ax1.legend(frameon=False, loc="lower right")
+
+        ta_line = np.linspace(32, 66, 100)
+        ax2.plot(ta_line, ta_line, color="#777777", ls="--", lw=1.5, label=r"Theory: $\tau_A = L_\parallel / v_A$")
+        ax2.plot(ta_line, 0.55 * ta_line, color="#1f77b4", ls=":", lw=1.7, label=r"Model: $0.55\,\tau_A$")
+        ax2.plot(tau_a_all, tau_f_all, "o-", color="#111111", lw=1.8, ms=6.5, zorder=5,
+                 label=r"Experiment: $\tau_{\mathrm{fast}}$")
+        for pf, ta, tf in zip(puffs_all, tau_a_all, tau_f_all):
+            dx, dy = offsets[int(pf)]
+            ax2.annotate(f"{int(pf)} ms", (ta, tf), xytext=(dx, dy), textcoords="offset points",
+                         fontsize=8.2, color="#333333")
+        ax2.set_xlabel(r"Alfvén Transit Time $\tau_A = L_\parallel / v_A$ [$\mu$s]")
+        ax2.set_ylabel(r"Fast Spin-Down Time $\tau_{\mathrm{fast}}$ [$\mu$s]")
+        ax2.set_title(r"(b) Spin-Down Scaling with $\tau_A \propto \sqrt{n_e}$", loc="left", fontweight="bold")
+        ax2.set_xlim(33, 66)
+        ax2.set_ylim(0, 68)
+        ax2.grid(True, alpha=0.25, ls=":")
+        ax2.legend(frameon=False, loc="upper left")
+
+        finalize_figure(fig, save_fig=_resolve_save(save_fig, "fig5_1_alfven_spindown"), show=show, dpi=dpi, tight_layout=False)
+
+
+def plot_slow_tail_pedersen(
+    *,
+    data_dir=None,
+    spindown_npz=None,
+    save_fig=True,
+    show=False,
+    dpi=220,
+):
+    """2-panel slow post-overshoot relaxation and classical ion-neutral Pedersen shortfall."""
+    import Jun2026_spindown as jsd
+
+    ddir = data_dir or jsd.DATA_DIR
+    sd_path = spindown_npz or os.path.join(ddir, jsd.OUT_NAME)
+
+    runs_ped = ("00", "01", "02", "03", "04", "05")
+    sel_slow = (
+        ("00", "24 ms", "#1f77b4"),
+        ("01", "25 ms", "#00897b"),
+        ("02", "30 ms", "#d95f02"),
+        ("03", "35 ms", "#c62828"),
+    )
+
+    with np.load(sd_path, allow_pickle=True) as d:
+        t_off_ms = float(d["turnoff__v2_t50_med_ms"])
+        puffs_ped = np.array([float(d[f"puff__{r}__gas_puff_ms"]) for r in runs_ped])
+        sig_req = np.array([float(d[f"puff__{r}__sigma_p_req_s_m"]) for r in runs_ped])
+        sig_in_up = np.array([float(d[f"puff__{r}__sigma_p_in_upper_s_m"]) for r in runs_ped])
+
+        # Re-fit from the exact slow-tail peak (captures 24 ms peak at 5.78 ms past 5.70 ms cap)
+        fits_by_run = {}
+        slow_curves = {}
+        for i, r in enumerate(runs_ped):
+            ts = np.asarray(d[f"puff__{r}__t_slow_ms"], dtype=float)
+            ms = np.asarray(d[f"puff__{r}__m_rot_slow"], dtype=float)
+            m_late = float(d[f"puff__{r}__m_late"])
+            t_pk = float(ts[int(np.argmax(ms))])
+            fit = fit_exponential_relaxation(
+                ts, ms, t_start=t_pk, t_end=7.90, tau_bounds=(0.05, 10.0), offset_init=m_late,
+            )
+            fits_by_run[r] = (t_pk, fit)
+            slow_curves[r] = (ts, ms)
+            tau_stored = float(d[f"puff__{r}__tau_slow_ms"])
+            sig_in_up[i] = sig_in_up[i] * (tau_stored / fit["tau"])
+
+    with plt.rc_context(clean_axes_rc(legend_fontsize=8.5)):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.8, 4.15), constrained_layout=True)
+
+        for idx, (r, lbl, col) in enumerate(sel_slow):
+            ts, ms = slow_curves[r]
+            t_pk, fit = fits_by_run[r]
+            dt_ms = ts - t_off_ms
+            ax1.plot(dt_ms, ms, "-", color=col, lw=2.1, alpha=0.9,
+                     label=rf"Experiment: {lbl} ($\tau = {fit['tau']:.2f}$ ms)")
+            m_fit = (ts >= t_pk) & (ts <= 7.90)
+            y_fit = fit["offset"] + fit["amp"] * np.exp(-(ts[m_fit] - t_pk) / fit["tau"])
+            ax1.plot(dt_ms[m_fit], y_fit, "--", color="#222222", lw=1.05, alpha=0.7,
+                     label="Model: Exponential fit" if idx == len(sel_slow) - 1 else None)
+
+        ax1.set_xlabel(r"Time After Bias Turn-Off $t - t_{\mathrm{off}}$ [ms]")
+        ax1.set_ylabel(r"Azimuthal Flow $M_\theta$")
+        ax1.set_title("(a) Slow Post-Overshoot Relaxation", loc="left", fontweight="bold")
+        ax1.set_xlim(0.1, 2.9)
+        ax1.set_ylim(0.015, 0.155)
+        ax1.grid(True, alpha=0.25, ls=":")
+        ax1.legend(frameon=False, loc="upper right")
+
+        ax2.plot(puffs_ped, sig_req, "o-", color="#111111", lw=2.2, ms=6.2,
+                 label=r"Experiment: Required $\sigma_{P,\mathrm{req}}$")
+        ax2.plot(puffs_ped, sig_in_up, "v-", color="#1f77b4", lw=2.0, ms=6.5,
+                 label=r"Upper bound: Ion-neutral $\sigma_{P,in}$")
+        ax2.fill_between(puffs_ped, 0.0, sig_in_up, color="#1f77b4", alpha=0.14)
+        ax2.set_xlabel("Gas Puff [ms]")
+        ax2.set_ylabel(r"Pedersen Conductivity $\sigma_P$ [S/m]")
+        ax2.set_title("(b) Classical Ion-Neutral Pedersen Shortfall", loc="left", fontweight="bold")
+        ax2.set_xlim(22.5, 46.5)
+        ax2.set_ylim(0.0, 0.175)
+        ax2.set_xticks([25, 30, 35, 40, 45])
+        ax2.grid(True, alpha=0.25, ls=":")
+        ax2.legend(frameon=False, loc="center right")
+
+        finalize_figure(fig, save_fig=_resolve_save(save_fig, "fig5_2_slow_tail_pedersen"), show=show, dpi=dpi, tight_layout=False)
+
+
+# =========================================================================== #
+#  Finding #5 figures (hollow clamping, Reynolds/Maxwell stress, steepening)
+# =========================================================================== #
+
+def plot_hollow_clamping(
+    *,
+    data_dir=None,
+    relaxation_npz=None,
+    save_fig=True,
+    show=False,
+    dpi=220,
+):
+    """3-panel hollow-core clamping, 2-D radial wobble bound, and axial/``B_0`` scaling."""
+    import Jun2026_relaxation as jrx
+
+    ddir = data_dir or jrx.DATA_DIR
+    rx_path = relaxation_npz or os.path.join(ddir, jrx.OUT_NAME)
+
+    sel_h = (
+        ("08", "23 ms (stable)", "#1f77b4", "--"),
+        ("11", "30 ms (strong)", "#d95f02", "-"),
+        ("12", "35 ms (strong)", "#c62828", "-"),
+        ("14", "45 ms (weak)", "#00897b", "--"),
+    )
+    b0_runs = ("28", "27", "30")
+    b0s = np.array([600.0, 800.0, 1000.0])
+
+    with np.load(rx_path, allow_pickle=True) as d:
+        h_traces = []
+        for rnum, lbl, col, ls in sel_h:
+            t = np.asarray(d[f"mach_{rnum}__t_ms"], dtype=float)
+            h = np.asarray(d[f"mach_{rnum}__H_t"], dtype=float)
+            ton = float(d[f"mach_{rnum}__t_onset_med_ms"])
+            h_traces.append((rnum, t, h, ton, lbl, col, ls))
+
+        edges = np.asarray(d["plane_26__radial_edges_cm"], dtype=float)
+        r_mid = 0.5 * (edges[:-1] + edges[1:])
+        p_pre = np.asarray(d["plane_26__r_prof_norm_pre_onset"], dtype=float)
+        p_late = np.asarray(d["plane_26__r_prof_norm_late_sat"], dtype=float)
+        h_pre = float(d["plane_26__H_pre_onset"])
+        h_late = float(d["plane_26__H_late_sat"])
+        dr_med = float(d["plane_26__delta_r_orbit_est_cm"])
+        dr_p90 = float(d["plane_26__delta_r_orbit_p90_cm"])
+
+        p29_pre = np.array([float(d[f"b0_{r}_p29__H_pre_onset"]) for r in b0_runs])
+        p29_lat = np.array([float(d[f"b0_{r}_p29__H_late_sat"]) for r in b0_runs])
+        p25_pre = np.array([float(d[f"b0_{r}_p25__H_pre_onset"]) for r in b0_runs])
+        p25_lat = np.array([float(d[f"b0_{r}_p25__H_late_sat"]) for r in b0_runs])
+
+    r_fine = np.linspace(0.0, float(edges[-1]), 161)
+    p_fine = np.interp(r_fine, r_mid, p_pre)
+    p_sm_med = orbit_smeared_profile(r_fine, p_fine, dr_med)
+    p_sm_p90 = orbit_smeared_profile(r_fine, p_fine, dr_p90)
+
+    with plt.rc_context(clean_axes_rc(legend_fontsize=8.3)):
+        fig, axes = plt.subplots(1, 3, figsize=(13.2, 4.05), constrained_layout=True)
+
+        ax = axes[0]
+        for rnum, t, h, ton, lbl, col, ls in h_traces:
+            m = (t >= -0.5) & (t <= 6.2)
+            ax.plot(t[m], h[m], ls=ls, color=col, lw=2.0, label=f"Experiment: {lbl}")
+            if np.isfinite(ton) and rnum in ("11", "12"):
+                h_on = float(np.interp(ton, t, h))
+                ax.plot(ton, h_on, "o", color=col, mfc="white", mec=col, mew=1.8, ms=6.0, zorder=6)
+        ax.axhline(1.0, color="#777777", lw=0.9, ls=":")
+        ax.axvline(0.0, color="#444444", lw=0.9, ls=":")
+        ax.axvline(5.0, color="#444444", lw=0.9, ls=":")
+        ax.set_xlabel("Time Relative to Bias Start [ms]")
+        ax.set_ylabel(r"Hollowness $H = I_{\mathrm{ring}} / I_{\mathrm{core}}$")
+        ax.set_title("(a) Hollow-Core Clamping (P33)", loc="left", fontweight="bold")
+        ax.set_xlim(-0.5, 6.0)
+        ax.set_ylim(0.85, 2.85)
+        ax.grid(True, alpha=0.25, ls=":")
+        ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.47, 0.08))
+
+        ax = axes[1]
+        ax.plot(r_mid, p_pre, "o-", color="#111111", lw=2.0, ms=5.8,
+                label=rf"Experiment: Pre-onset ($H = {h_pre:.2f}$)")
+        ax.plot(r_mid, p_late, "s-", color="#c62828", lw=2.1, ms=5.8,
+                label=rf"Experiment: Late sat. ($H = {h_late:.2f}$)")
+        ax.plot(r_fine, p_sm_med, "--", color="#1f77b4", lw=1.7,
+                label=rf"Model: Rigid wobble ($\delta r = {dr_med:.2f}$ cm)")
+        ax.plot(r_fine, p_sm_p90, ":", color="#1f77b4", lw=1.5,
+                label=rf"Model: Rigid wobble p90 (${dr_p90:.2f}$ cm)")
+        ax.fill_between(r_fine, p_sm_med, p_sm_p90, color="#1f77b4", alpha=0.12)
+        ax.axhline(1.0, color="#777777", lw=0.9, ls=":")
+        ax.set_xlabel("Radius from 2-D Core Center [cm]")
+        ax.set_ylabel(r"Normalized $\langle I_{\mathrm{sat}}(r) \rangle_\theta / I_{\mathrm{ring}}$")
+        ax.set_title("(b) 2-D Radial Profile & Wobble Bound (P29)", loc="left", fontweight="bold")
+        ax.set_xlim(0.0, 8.0)
+        ax.set_ylim(0.25, 1.18)
+        ax.grid(True, alpha=0.25, ls=":")
+        ax.legend(frameon=False, loc="lower right")
+
+        ax = axes[2]
+        ax.plot(b0s, p29_pre, "o--", color="#1f77b4", mfc="white", mew=1.8, lw=1.7, ms=6.2,
+                label="Experiment: P29 pre-onset")
+        ax.plot(b0s, p29_lat, "o-", color="#1f77b4", lw=2.2, ms=6.2,
+                label="Experiment: P29 late sat.")
+        ax.plot(b0s, p25_pre, "s--", color="#d95f02", mfc="white", mew=1.8, lw=1.7, ms=6.0,
+                label="Experiment: P25 pre-onset")
+        ax.plot(b0s, p25_lat, "s-", color="#d95f02", lw=2.2, ms=6.0,
+                label="Experiment: P25 late sat.")
+        ax.axhline(1.0, color="#777777", lw=0.9, ls=":")
+        ax.set_xlabel(r"Magnetic Field $B_0$ [G]")
+        ax.set_ylabel(r"Hollowness $H = I_{\mathrm{ring}} / I_{\mathrm{core}}$")
+        ax.set_title(r"(c) Axial Localization & $B_0$ Scaling", loc="left", fontweight="bold")
+        ax.set_xlim(540, 1060)
+        ax.set_ylim(0.85, 2.55)
+        ax.set_xticks([600, 800, 1000])
+        ax.grid(True, alpha=0.25, ls=":")
+        ax.legend(frameon=False, loc="upper right")
+
+        finalize_figure(fig, save_fig=_resolve_save(save_fig, "fig6_1_hollow_clamping"), show=show, dpi=dpi, tight_layout=False)
+
+
+def plot_reynolds_maxwell_stress(
+    *,
+    data_dir=None,
+    turbulence_npz=None,
+    save_fig=True,
+    show=False,
+    dpi=220,
+):
+    """Single-panel radial Reynolds vs. Maxwell stress profile (opposite to KH)."""
+    import Jun2026_turbulence as jtb
+
+    ddir = data_dir or jtb.DATA_DIR
+    tb_path = turbulence_npz or os.path.join(ddir, jtb.OUT_NAME)
+
+    with np.load(tb_path, allow_pickle=True) as d:
+        r_cm = np.asarray(d["r32__r_mids_cm"], dtype=float)
+        cs2 = np.asarray(d["r32__cs1_band_m_s"], dtype=float) ** 2
+        R_rt = np.asarray(d["em_26__reynolds_stress_m2_s2"], dtype=float) * 1e-4
+        M_rt = np.asarray(d["em_26__maxwell_stress_m2_s2"], dtype=float) * 1e-4
+        R_err_0p5 = np.abs(np.asarray(d["r32__rs_grad_art_d0p5"], dtype=float)) * cs2 * 1e-4
+
+    with plt.rc_context(clean_axes_rc(legend_fontsize=8.6)):
+        fig, ax = plt.subplots(1, 1, figsize=(6.2, 4.25), constrained_layout=True)
+
+        ax.axhline(0.0, color="#333333", lw=1.0, ls="-")
+        h_re = ax.errorbar(
+            r_cm, R_rt, yerr=R_err_0p5, fmt="o-", color="#111111", lw=2.2, ms=6.5,
+            capsize=3.5, elinewidth=1.4, capthick=1.2,
+            label=r"Experiment: Reynolds stress $R_{r\theta}$",
+        )
+        (h_mx,) = ax.plot(
+            r_cm, M_rt, "s-", color="#1f77b4", lw=2.0, ms=6.0,
+            label=r"Experiment: Maxwell stress $M_{r\theta}$",
+        )
+        ax.text(6.65, 5.85, r"$R_{r\theta} > 0$: feeds mean shear flow ($\mathcal{P}_{\mathrm{shear}} < 0$)",
+                ha="right", va="top", fontsize=8.4, color="#444444", style="italic")
+        ax.text(6.65, -0.82, r"$R_{r\theta} < 0$: extracts energy from shear flow (KH)",
+                ha="right", va="bottom", fontsize=8.4, color="#444444", style="italic")
+
+        ax.set_xlabel("Radius from Flow Center [cm]")
+        ax.set_ylabel(r"Cross-Field Stress [$10^4$ m$^2$/s$^2$]")
+        ax.set_title("Reynolds vs. Maxwell Stress (Opposite to KH)", loc="left", fontweight="bold")
+        ax.set_xlim(1.5, 6.8)
+        ax.set_ylim(-1.05, 6.35)
+        ax.grid(True, alpha=0.25, ls=":")
+        ax.legend(handles=[h_re, h_mx], frameon=False, loc="upper right", bbox_to_anchor=(1.0, 0.87))
+
+        finalize_figure(fig, save_fig=_resolve_save(save_fig, "fig6_2_reynolds_maxwell_stress"), show=show, dpi=dpi, tight_layout=False)
+
+
+def plot_wave_steepening(
+    *,
+    data_dir=None,
+    turbulence_npz=None,
+    save_fig=True,
+    show=False,
+    dpi=220,
+):
+    """2-panel phase-folded sawtooth steepening and orthogonal wall-curvature puff scan."""
+    import Jun2026_turbulence as jtb
+
+    ddir = data_dir or jtb.DATA_DIR
+    tb_path = turbulence_npz or os.path.join(ddir, jtb.OUT_NAME)
+    runs_p = ("00", "01", "02", "03", "04")
+
+    with np.load(tb_path, allow_pickle=True) as d:
+        ph_02_c, w_02_c = prepare_folded_cycle(d["spec_02__folded_phase_rad"], d["spec_02__folded_wave"])
+        _, w_04_c = prepare_folded_cycle(d["spec_02__folded_phase_rad"], d["spec_04__folded_wave"])
+        ph_32_c, w_mr_c = prepare_folded_cycle(d["r32__steep_phase_rad"], d["r32__steep_mr_folded_waves"][3])
+        slp_30 = float(d["spec_02__slope_ratio_med"])
+        slp_mr = float(d["r32__steep_mr_slope_ratio"][3])
+        slp_40 = float(d["spec_04__slope_ratio_med"])
+
+        puffs = np.array([float(d[f"spec_{r}__gas_puff_ms"]) for r in runs_p])
+        steep = np.array([float(d[f"spec_{r}__steepening_comp"]) for r in runs_p])
+        curv = np.array([float(d[f"spec_{r}__curvature_comp"]) for r in runs_p])
+
+    with plt.rc_context(clean_axes_rc(legend_fontsize=8.4)):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.8, 4.15), constrained_layout=True)
+
+        ph_ref = np.linspace(0.0, 1.0, 200)
+        ax1.plot(ph_ref, -np.cos(2.0 * np.pi * ph_ref), ":", color="#888888", lw=1.4,
+                 label="Reference: Pure cosine")
+        ax1.plot(ph_02_c, w_02_c, "-", color="#c62828", lw=2.3,
+                 label=rf"Experiment: 30 ms $I_{{\mathrm{{sat}}}}$ ({slp_30:.1f}$\times$ rise)")
+        ax1.plot(ph_32_c, w_mr_c, "-", color="#00897b", lw=2.0,
+                 label=rf"Experiment: 35 ms $\tilde{{M}}_r$ ({slp_mr:.1f}$\times$ rise)")
+        ax1.plot(ph_02_c, w_04_c, "--", color="#1f77b4", lw=1.9,
+                 label=rf"Experiment: 40 ms $I_{{\mathrm{{sat}}}}$ ({slp_40:.1f}$\times$ sym.)")
+        ax1.axhline(0.0, color="#aaaaaa", lw=0.7, ls=":")
+        ax1.set_xlabel(r"Wave Phase [cycles]")
+        ax1.set_ylabel("Normalized Waveform")
+        ax1.set_title("(a) Phase-Folded Sawtooth Steepening", loc="left", fontweight="bold")
+        ax1.set_xlim(0.0, 1.0)
+        ax1.set_ylim(-1.25, 1.75)
+        ax1.grid(True, alpha=0.25, ls=":")
+        ax1.legend(frameon=False, loc="upper left")
+
+        ax2.axhline(0.0, color="#333333", lw=0.9, ls="-")
+        ax2.plot(puffs, steep, "o-", color="#c62828", lw=2.2, ms=6.5,
+                 label=r"Experiment: Waveform steepening $(A_2/A_1)\sin\beta$")
+        ax2.plot(puffs, curv, "s--", color="#1f77b4", lw=1.9, ms=6.0,
+                 label=r"Experiment: Wall curvature $(A_2/A_1)\cos\beta$")
+        ax2.set_xlabel("Gas Puff [ms]")
+        ax2.set_ylabel("Second-Harmonic Component")
+        ax2.set_title("(b) Waveform Steepening vs. Wall Curvature", loc="left", fontweight="bold")
+        ax2.set_xlim(22.5, 41.5)
+        ax2.set_ylim(-0.42, 0.56)
+        ax2.set_xticks([24, 25, 30, 35, 40])
+        ax2.grid(True, alpha=0.25, ls=":")
+        ax2.legend(frameon=False, loc="lower left")
+
+        finalize_figure(fig, save_fig=_resolve_save(save_fig, "fig6_3_wave_steepening"), show=show, dpi=dpi, tight_layout=False)
+
+
+# =========================================================================== #
 #  Turbulence steepening figure (migrated from Jun2026_plot.py)
 # =========================================================================== #
 
@@ -1013,6 +1657,48 @@ FIGURES: dict[str, FigureSpec] = {
         "fig2_3_shear_gating.png",
         "Finding #2",
         "Strictly pre-onset azimuthal flow profile and 1-D radial CWM theory vs. experiment",
+    ),
+    "fig3_1_bdot_structure_pol": FigureSpec(
+        plot_bdot_structure_pol,
+        "fig3_1_bdot_structure_pol.png",
+        "Finding #3",
+        "Calibrated 2-D f0/2f0 J_par structure and radial circular polarization flip",
+    ),
+    "fig3_2_sheath_closure_bench": FigureSpec(
+        plot_sheath_closure_bench,
+        "fig3_2_sheath_closure_bench.png",
+        "Finding #3",
+        "DC bias turn-on polarity proof and polar calibrated sheath-closure benchmark",
+    ),
+    "fig5_1_alfven_spindown": FigureSpec(
+        plot_alfven_spindown,
+        "fig5_1_alfven_spindown.png",
+        "Finding #4",
+        "Fast post-bias azimuthal flow unwinding and Alfven transit-time scaling",
+    ),
+    "fig5_2_slow_tail_pedersen": FigureSpec(
+        plot_slow_tail_pedersen,
+        "fig5_2_slow_tail_pedersen.png",
+        "Finding #4",
+        "Slow post-overshoot relaxation and classical ion-neutral Pedersen shortfall",
+    ),
+    "fig6_1_hollow_clamping": FigureSpec(
+        plot_hollow_clamping,
+        "fig6_1_hollow_clamping.png",
+        "Finding #5",
+        "Hollow-core clamping, 2-D radial wobble bound, and axial/B0 scaling",
+    ),
+    "fig6_2_reynolds_maxwell_stress": FigureSpec(
+        plot_reynolds_maxwell_stress,
+        "fig6_2_reynolds_maxwell_stress.png",
+        "Finding #5",
+        "Radial Reynolds vs. Maxwell stress profile (opposite sign to KH)",
+    ),
+    "fig6_3_wave_steepening": FigureSpec(
+        plot_wave_steepening,
+        "fig6_3_wave_steepening.png",
+        "Finding #5",
+        "Phase-folded sawtooth steepening and orthogonal wall-curvature puff scan",
     ),
     "turbulence_steepening": FigureSpec(
         plot_turbulence_steepening,

@@ -11,12 +11,17 @@ import numpy as np
 
 from data_analysis.viz import (
     animate_lab_vs_plasma_frame,
+    clean_axes_rc,
     draw_bdot_2d_map,
     draw_ne_te_profile,
+    draw_polar_phasor_scatter,
     draw_psd_overlay,
     draw_pulse_and_zoom,
     draw_stacked_traces,
     prepare_bdot_2d_fields,
+    prepare_folded_cycle,
+    radial_binned_quantiles,
+    upsample_grid_2d,
     windowed_fft_amp,
 )
 from data_analysis.viz.animations import _resolve_loop_frequencies
@@ -51,6 +56,35 @@ class TestVizMathHelpers(unittest.TestCase):
 
         prep_u = prepare_bdot_2d_fields(Bx, By, Jz, calibrated=False, phase_align=True)
         self.assertAlmostEqual(prep_u["j_vlim"], 1.0)
+
+        prep_ka_forced = prepare_bdot_2d_fields(None, None, Jz * 0.1, calibrated=True, j_unit_mode="kA")
+        self.assertAlmostEqual(prep_ka_forced["j_scale"], 1e-3)
+        self.assertIsNone(prep_ka_forced["Bx_plot"])
+
+    def test_upsample_radial_quantiles_and_folded_cycle_math(self):
+        xs = np.linspace(-4.0, 4.0, 9)
+        ys = np.linspace(-4.0, 4.0, 9)
+        XX, YY = np.meshgrid(xs, ys)
+        lin_c = (2.0 * XX - 3.0 * YY) + 1j * (XX + YY)
+        XF, YF, vals_lin = upsample_grid_2d(xs, ys, lin_c, n=25, order=1)
+        np.testing.assert_allclose(vals_lin, (2.0 * XF - 3.0 * YF) + 1j * (XF + YF), atol=1e-10)
+        # Cubic upsampling interpolates every input grid node exactly
+        _, _, vals_cub = upsample_grid_2d(xs, ys, lin_c, n=25, order=3)
+        np.testing.assert_allclose(vals_cub[::3, ::3], lin_c, atol=1e-10)
+
+        RR = np.hypot(XX - 1.0, YY + 0.5)
+        rm, ym, ylo, yhi = radial_binned_quantiles(xs, ys, 2.0 * RR, edges=[0.0, 2.0, 4.0, 6.0], center=(1.0, -0.5))
+        self.assertEqual(rm.size, 3)
+        np.testing.assert_allclose(ym, 2.0 * rm, atol=1e-12)
+        self.assertTrue(np.all(ylo <= ym) and np.all(ym <= yhi))
+
+        ph = np.linspace(-np.pi, np.pi, 32, endpoint=False)
+        wave = 1.5 - 3.0 * np.cos(ph)
+        cy, w = prepare_folded_cycle(ph, wave)
+        self.assertAlmostEqual(cy[0], 0.0, places=12)
+        self.assertAlmostEqual(cy[-1], 1.0, places=12)
+        self.assertAlmostEqual(w[0], w[-1], places=12)
+        self.assertAlmostEqual(float(np.max(w) - np.min(w)), 2.0, places=12)
 
     def test_resolve_loop_frequencies_snaps_within_tol_and_warns_otherwise(self):
         f_eff, t_loop = _resolve_loop_frequencies(4.11, 6.15, seamless_loop=True)
@@ -106,12 +140,23 @@ class TestVizMathHelpers(unittest.TestCase):
         fig3, ax3 = plt.subplots()
         res_map = draw_bdot_2d_map(
             ax3, xs, xs, Bx, By, Jz,
+            upsample_n=25, contour_levels=(-0.5, 0.5),
             circles=[{"radius": 2.5, "label": "2 in"}],
             markers=[{"x": 0.0, "y": 0.0, "label": "center"}],
             note_lines=["test"],
         )
         self.assertIn("im", res_map)
         plt.close(fig3)
+
+        with plt.rc_context(clean_axes_rc()):
+            fig4, ax4 = plt.subplots(subplot_kw={"projection": "polar"})
+            arts = draw_polar_phasor_scatter(
+                ax4,
+                [{"r": [0.5, 0.7], "deg": [15.0, -30.0], "label": "Experiment"}],
+                title="polar",
+            )
+            self.assertEqual(len(arts), 1)
+            plt.close(fig4)
 
         with tempfile.TemporaryDirectory() as tmp:
             gif_path = os.path.join(tmp, "mode.gif")
