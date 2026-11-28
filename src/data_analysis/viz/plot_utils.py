@@ -527,7 +527,8 @@ def plot_stft(tarr, freq_arr, stft_matrix, ax=None, fig=None, log_norm=True,
 # Figure Finalisation and Output
 #==============================================================================
 
-def finalize_figure(fig, save_fig=None, show=False, compact_axes=None, dpi=150):
+def finalize_figure(fig, save_fig=None, show=False, compact_axes=None, dpi=150,
+                    tight_layout=True):
     """Save and/or show a finished figure, then release it.
 
     Args:
@@ -540,8 +541,11 @@ def finalize_figure(fig, save_fig=None, show=False, compact_axes=None, dpi=150):
             ``tight_layout`` (which would otherwise re-space them); see
             :func:`pack_shared_x`.
         dpi (int): Resolution for the saved figure.
+        tight_layout (bool): Run ``fig.tight_layout()`` before saving; set
+            False for custom ``GridSpec``/``subplots_adjust`` layouts.
     """
-    fig.tight_layout()
+    if tight_layout:
+        fig.tight_layout()
     if compact_axes is not None:
         pack_shared_x(compact_axes)
     if save_fig is not None:
