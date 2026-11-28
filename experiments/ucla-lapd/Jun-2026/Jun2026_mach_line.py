@@ -36,7 +36,7 @@ from tqdm import tqdm
 import Jun2026_IV as jiv
 import Jun2026_mach_flow as jmf
 from data_analysis.io import open_lapd, parse_shunts, position_shots
-from data_analysis.io.probe_map import channel_wiring
+from data_analysis.io.probe_map import mach_tip_channels
 from data_analysis.plasma.flow import (antisymmetric_rotation_profile,
                                        radial_flow_shear)
 from data_analysis.plasma.langmuir import load_plasma_data, load_sweep_axes
@@ -66,10 +66,6 @@ MACH_TO_IV = {"08": "06", "09": "00", "10": "01", "11": "02",
 #: discovered per run (:func:`discover_axes`) and ordered by this, never fixed.
 AXIS_ORDER = ("X", "Y", "Z")
 
-# Tip name at the end of a wiring description: 'Isat, Mach@P33-X+' -> 'X+'.
-# Same rule as Jun2026_mach_flow/cal: splitting on '-' fails, the sign is a '-'.
-_TIP_RE = re.compile(r"([XYZ][+-])\s*$", re.IGNORECASE)
-
 #: Assumed electron temperature [eV] and ion mass [proton masses; He = 4]. NOT
 #: measured in these runs -- see the module docstring.
 TE_EV = jmf.TE_EV
@@ -84,24 +80,8 @@ def line_npz_path(ifn):
 
 
 def tip_channels(ifn):
-    """``{'X+': ('machscope', 'C1'), ...}`` for every Mach tip the run wires.
-
-    Carries the **scope** with each channel, not just the channel: the scope
-    group's name drifts across the campaign (``machscope`` on the 00-14 line
-    runs, a single ``scope`` on 16+), so it is resolved from the wiring per run
-    (:func:`mach_scope`), never fixed. Unlike :func:`Jun2026_mach_flow.tip_channels`
-    this also demands no fixed set of six -- a line run wires only the axes it
-    measured -- so completeness is judged per axis by :func:`discover_axes`.
-
-    Never a hardcoded C1=X+ table: a swapped +/- assignment inverts R and flips
-    the sign of every flow vector, which looks entirely plausible.
-    """
-    out = {}
-    for (scope, chan), desc in channel_wiring(ifn).items():
-        m = _TIP_RE.search(desc)
-        if m:
-            out[m.group(1).upper()] = (scope, chan)
-    return out
+    """``{'X+': ('machscope', 'C1'), ...}`` for every Mach tip the run wires."""
+    return mach_tip_channels(ifn, with_scope=True)
 
 
 def mach_scope(chans):

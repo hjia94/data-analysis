@@ -46,7 +46,11 @@ from data_analysis.plasma.profiles import (
     radial_profile_gradients,
     sheath_factor,
 )
-from data_analysis.utils import merge_save_npz
+from data_analysis.utils import (
+    merge_save_npz,
+    pack_npz_entries,
+    prepare_incremental_npz,
+)
 
 import Jun2026_onset as jon
 
@@ -364,24 +368,6 @@ def _run_settings_dict(x_center_cm, smooth_window, smooth_poly, vf_smooth_sample
     }
 
 
-def _run_settings_mismatch(npz_data, run_num, want):
-    diffs = []
-    for field, val in want.items():
-        k = f"{run_num}__{field}"
-        if k not in npz_data.files:
-            diffs.append(f"{field}: missing in npz (requested {val:g})")
-            continue
-        if isinstance(val, int):
-            got = int(npz_data[k])
-            if got != val:
-                diffs.append(f"{field}: stored {got} != requested {val}")
-        else:
-            got = float(npz_data[k])
-            if not np.isclose(got, val, atol=1e-9, rtol=0.0):
-                diffs.append(f"{field}: stored {got:g} != requested {val:g}")
-    return diffs
-
-
 def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None,
               *, x_center_cm=X_CENTER_CM, smooth_window=SMOOTH_WINDOW,
               smooth_poly=SMOOTH_POLY, vf_smooth_samples=VF_SMOOTH_SAMPLES,
@@ -393,30 +379,10 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None,
     onset_path = onset_npz or os.path.join(data_dir, jon.OUT_NAME)
     onset_table = jon.load_onset_table(onset_path) if os.path.isfile(onset_path) else {}
     want = _run_settings_dict(x_center_cm, smooth_window, smooth_poly, vf_smooth_samples)
-
-    if overwrite and runs is None and os.path.isfile(out_path):
-        os.remove(out_path)
-
-    existing_runs = set()
-    drop_keys = []
-    if os.path.isfile(out_path):
-        with np.load(out_path) as d:
-            existing_runs = {
-                k.split("__", 1)[0] for k in d.files if k.endswith("__ref_sweep_idx")
-            }
-            if overwrite:
-                prefixes = tuple(f"{s.run_num}__" for s in specs)
-                drop_keys = [k for k in d.files if k.startswith(prefixes)]
-                existing_runs -= {s.run_num for s in specs}
-            else:
-                for spec in specs:
-                    if spec.run_num in existing_runs:
-                        diffs = _run_settings_mismatch(d, spec.run_num, want)
-                        if diffs:
-                            raise ValueError(
-                                f"{out_path}: stored run '{spec.run_num}' differs "
-                                f"from requested settings ({'; '.join(diffs)}); "
-                                "pass overwrite=True to regenerate")
+    existing_runs, drop_keys = prepare_incremental_npz(
+        out_path, [s.run_num for s in specs], "__ref_sweep_idx",
+        overwrite=overwrite, full_overwrite=(runs is None), want=want,
+    )
 
     payload = {
         "updated": np.str_(datetime.datetime.now().isoformat(timespec="seconds")),
@@ -430,20 +396,8 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None,
             x_center_cm=x_center_cm, smooth_window=smooth_window,
             smooth_poly=smooth_poly, vf_smooth_samples=vf_smooth_samples,
         )
-        p = spec.run_num
-        for k, v in res.items():
-            if isinstance(v, str):
-                payload[f"{p}__{k}"] = np.str_(v)
-            elif isinstance(v, (bool, np.bool_)):
-                payload[f"{p}__{k}"] = np.bool_(v)
-            elif isinstance(v, (int, np.integer)):
-                payload[f"{p}__{k}"] = np.int64(v)
-            elif isinstance(v, (float, np.floating)):
-                payload[f"{p}__{k}"] = np.float64(v)
-            else:
-                payload[f"{p}__{k}"] = np.asarray(v)
-        for sk, sv in want.items():
-            payload[f"{p}__{sk}"] = np.int64(sv) if isinstance(sv, int) else np.float64(sv)
+        payload.update(pack_npz_entries(spec.run_num, res))
+        payload.update(pack_npz_entries(spec.run_num, want))
         ran_any = True
 
     if ran_any or not os.path.isfile(out_path):

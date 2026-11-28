@@ -30,7 +30,7 @@ import numpy as np
 
 from data_analysis.io import open_lapd, parse_shunts
 from data_analysis.io.paths import output_path
-from data_analysis.io.probe_map import channel_wiring
+from data_analysis.io.probe_map import mach_tip_channels
 from data_analysis.plasma.mach import (FLOW_SIGN_PLUS_FACING_AXIS,
                                        K_HUTCHINSON, area_ratio, combine_log,
                                        face_ratio, fit_calibration,
@@ -66,9 +66,6 @@ ORIENTATION = {
 }
 N_FLOW = 2                               # lab components resolved: M_1, M_2
 
-# Tip name at the end of a wiring description: 'MP@P33, Isat-X-' -> 'X-'.
-_TIP_RE = re.compile(r"([XYZ][+-])\s*$", re.IGNORECASE)
-
 
 def load_run(run, keep_full=()):
     """Read one run, windowed -> ``(currents, tarr_win, shunts, tip_channels, full)``.
@@ -89,18 +86,7 @@ def load_run(run, keep_full=()):
     path = os.path.join(DATA_DIR, FILE_FMT.format(run=run))
     r = open_lapd(path)
     shunts = parse_shunts(r.description().raw)
-
-    tip_channels = {}
-    for (_scope, chan), desc in channel_wiring(path).items():
-        # Match the tip at the end of 'MP@P33, Isat-X-'. Splitting on '-' does
-        # not work: the trailing sign is itself a '-'.
-        m = _TIP_RE.search(desc)
-        if m:
-            tip_channels[m.group(1).upper()] = chan
-
-    missing = [f"{a}{s}" for a in AXES for s in "+-" if f"{a}{s}" not in tip_channels]
-    if missing:
-        raise ValueError(f"run {run}: no channel found for {missing}")
+    tip_channels = mach_tip_channels(path, required_axes=AXES)
     no_shunt = [t for t in tip_channels if t not in shunts]
     if no_shunt:
         # Never default: the tips differ (300 ohm on X-, 75/43 elsewhere), so a

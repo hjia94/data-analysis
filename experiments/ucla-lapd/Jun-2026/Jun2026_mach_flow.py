@@ -35,7 +35,7 @@ import Jun2026_IV as jiv
 import Jun2026_plot as jpl
 from Jun2026_slider import slider_path
 from data_analysis.io import open_lapd, parse_shunts, position_shots
-from data_analysis.io.probe_map import channel_wiring
+from data_analysis.io.probe_map import channel_wiring, mach_tip_channels
 from data_analysis.plasma.flow import (find_flow_centre as _fit_centre,
                                        polar_components)
 from data_analysis.plasma.mach import (FLOW_SIGN_PLUS_FACING_AXIS,
@@ -96,10 +96,6 @@ PRE_BIAS_MS = (-2.0, -0.5)
 
 NPZ_SUFFIX = "-mach-flow-data.npz"
 
-# Tip name at the end of a wiring description: 'Isat, Mach@P33-X+' -> 'X+'.
-# Same rule as Jun2026_mach_cal: splitting on '-' fails, the sign is a '-'.
-_TIP_RE = re.compile(r"([XYZ][+-])\s*$", re.IGNORECASE)
-
 
 def flow_npz_path(ifn=IFN):
     """Co-located npz beside the raw HDF5, named from the run number."""
@@ -126,20 +122,8 @@ def load_calibration(path=CAL_NPZ):
 
 
 def tip_channels(ifn):
-    """``{'X+': 'C1', ...}`` from the run's own wiring descriptions.
-
-    Never a hardcoded C1=X+ table: a swapped +/- assignment inverts R and flips
-    the sign of every flow vector, which looks entirely plausible on a map.
-    """
-    out = {}
-    for (_scope, chan), desc in channel_wiring(ifn).items():
-        m = _TIP_RE.search(desc)
-        if m:
-            out[m.group(1).upper()] = chan
-    missing = [f"{a}{s}" for a in AXES for s in "+-" if f"{a}{s}" not in out]
-    if missing:
-        raise ValueError(f"{ifn}: no channel found for {missing}")
-    return out
+    """``{'X+': 'C1', ...}`` from the run's own wiring descriptions."""
+    return mach_tip_channels(ifn, required_axes=AXES, with_scope=False, wiring=channel_wiring(ifn))
 
 
 def snap_to_planned(pos):

@@ -50,7 +50,12 @@ from data_analysis.signal import (
     fit_exponential_growth,
     sliding_detrended_rms,
 )
-from data_analysis.utils import merge_save_npz
+from data_analysis.utils import (
+    find_run_hdf5 as run_ifn,
+    merge_save_npz,
+    pack_npz_entries,
+    prepare_incremental_npz,
+)
 
 # --- Campaign defaults ------------------------------------------------------
 DATA_DIR = r"D:\data\LAPD\jun2026-jia"
@@ -109,16 +114,6 @@ ONSET_RUNS = (
     OnsetRunSpec("30", "b0_scan", "scope", "C5", 1000.0, "P33 MP-X+"),
 )
 ONSET_RUN_MAP = {spec.run_num: spec for spec in ONSET_RUNS}
-
-
-def run_ifn(data_dir, run_num):
-    """Resolve the raw HDF5 for a zero-padded run number (e.g. ``"02"``)."""
-    hits = sorted(glob.glob(os.path.join(data_dir, f"{run_num}-*.hdf5")))
-    if not hits:
-        raise FileNotFoundError(f"no HDF5 for run {run_num} in {data_dir}")
-    if len(hits) > 1:
-        raise ValueError(f"multiple HDF5 files for run {run_num}: {hits}")
-    return hits[0]
 
 
 def _select_shots(all_shots, max_shots):
@@ -348,25 +343,6 @@ def _run_settings_dict(max_shots):
     }
 
 
-def _run_settings_mismatch(npz_data, run_num, want):
-    """Return human-readable diffs between a stored run and requested settings."""
-    diffs = []
-    for field, val in want.items():
-        k = f"{run_num}__{field}"
-        if k not in npz_data.files:
-            diffs.append(f"{field}: missing in npz (requested {val:g})")
-            continue
-        if isinstance(val, int):
-            got = int(npz_data[k])
-            if got != val:
-                diffs.append(f"{field}: stored {got} != requested {val}")
-        else:
-            got = float(npz_data[k])
-            if not np.isclose(got, val, atol=1e-9, rtol=0.0):
-                diffs.append(f"{field}: stored {got:g} != requested {val:g}")
-    return diffs
-
-
 def batch_all(data_dir=DATA_DIR, runs=None, max_shots=DEFAULT_MAX_SHOTS,
               out_path=None, overwrite=False):
     """Run onset/growth/frequency extraction across :data:`ONSET_RUNS` -> npz path.
@@ -383,62 +359,26 @@ def batch_all(data_dir=DATA_DIR, runs=None, max_shots=DEFAULT_MAX_SHOTS,
              else tuple(ONSET_RUN_MAP[r] for r in runs))
     out_path = out_path or os.path.join(data_dir, OUT_NAME)
     want = _run_settings_dict(max_shots)
-
-    if overwrite and runs is None and os.path.isfile(out_path):
-        os.remove(out_path)
-
-    existing_runs = set()
-    drop_keys = []
-    if os.path.isfile(out_path):
-        with np.load(out_path) as d:
-            existing_runs = {
-                k.split("__", 1)[0] for k in d.files if k.endswith("__t_onset_med_ms")
-            }
-            if overwrite:
-                # Partial overwrite: drop only the requested runs' old keys (and
-                # legacy top-level settings so they cannot contradict per-run
-                # metadata), preserving all unrequested runs intact.
-                target_prefixes = tuple(f"{s.run_num}__" for s in specs)
-                drop_keys = [k for k in d.files if k.startswith(target_prefixes)]
-                existing_runs -= {s.run_num for s in specs}
-            else:
-                for spec in specs:
-                    if spec.run_num in existing_runs:
-                        diffs = _run_settings_mismatch(d, spec.run_num, want)
-                        if diffs:
-                            raise ValueError(
-                                f"{out_path}: stored run '{spec.run_num}' differs "
-                                f"from requested settings ({'; '.join(diffs)}); "
-                                "pass overwrite=True to regenerate")
-
+    existing_runs, drop_keys = prepare_incremental_npz(
+        out_path, [s.run_num for s in specs], "__t_onset_med_ms",
+        overwrite=overwrite, full_overwrite=(runs is None), want=want,
+    )
     # Drop legacy file-level setting keys if present; settings live per run.
     drop_keys.extend(["onset_thresh", "win_ms", "step_ms", "t_min_onset_ms", "sustain_bins"])
 
     payload = {
         "updated": np.str_(datetime.datetime.now().isoformat(timespec="seconds")),
     }
-
     ran_any = False
     for spec in tqdm(specs, desc="Onset batch", unit="run"):
         if spec.run_num in existing_runs:
             continue
         res = analyze_run(spec, data_dir=data_dir, max_shots=max_shots)
-        p = spec.run_num
-        for k, v in res.items():
-            if isinstance(v, str):
-                payload[f"{p}__{k}"] = np.str_(v)
-            elif isinstance(v, (int, np.integer)):
-                payload[f"{p}__{k}"] = np.int64(v)
-            elif isinstance(v, (float, np.floating)):
-                payload[f"{p}__{k}"] = np.float64(v)
-            else:
-                payload[f"{p}__{k}"] = np.asarray(v)
-        for sk, sv in want.items():
-            payload[f"{p}__{sk}"] = np.int64(sv) if isinstance(sv, int) else np.float64(sv)
+        payload.update(pack_npz_entries(spec.run_num, res))
+        payload.update(pack_npz_entries(spec.run_num, want))
         ran_any = True
 
     if ran_any or not os.path.isfile(out_path):
-        # Drop only obsolete keys not rewritten by the fresh payload.
         stale_keys = [k for k in drop_keys if k not in payload]
         merge_save_npz(out_path, payload, drop_keys=stale_keys)
         print(f"\nWrote {out_path}")

@@ -43,7 +43,7 @@ from data_analysis.plasma.stability import (
     solve_radial_cylindrical_modes,
 )
 from data_analysis.signal import clip_time_window
-from data_analysis.utils import merge_save_npz
+from data_analysis.utils import fmt_num, merge_save_npz, pack_nested_npz
 
 import Jun2026_IV as jiv
 import Jun2026_modes as jmo
@@ -1257,27 +1257,12 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, l_par_m=DEFAULT_L_PAR_M,
         "n_nodes": np.int64(n_nodes),
     }
 
-    def _pack(prefix, nested):
-        for key_id, fields in nested.items():
-            for k, v in fields.items():
-                name = f"{prefix}__{key_id}__{k}"
-                if isinstance(v, str):
-                    payload[name] = np.str_(v)
-                elif isinstance(v, (bool, np.bool_)):
-                    payload[name] = np.bool_(v)
-                elif isinstance(v, (int, np.integer)):
-                    payload[name] = np.int64(v)
-                elif isinstance(v, (float, np.floating)):
-                    payload[name] = np.float64(v)
-                else:
-                    payload[name] = np.asarray(v)
-
-    _pack("puff", puff_res)
-    _pack("b0", b0_res)
+    payload.update(pack_nested_npz("puff", puff_res))
+    payload.update(pack_nested_npz("b0", b0_res))
     if biased_res:
-        _pack("biased", biased_res)
+        payload.update(pack_nested_npz("biased", biased_res))
     if sheath_res:
-        _pack("sheath", sheath_res)
+        payload.update(pack_nested_npz("sheath", sheath_res))
 
     merge_save_npz(out_path, payload)
     print(f"\nWrote {out_path}")
@@ -1324,8 +1309,7 @@ def print_summary(npz_path=None):
                 float(d[f"puff__{r}__ax_cwm_near_dphi_ab_deg"]),
                 width=23,
             )
-            f_pl_exp = float(d[f"puff__{r}__exp_f_plasma_exb_hz"]) * 1e-3
-            f_pl_s = f"{f_pl_exp:+8.2f}" if np.isfinite(f_pl_exp) else f"{'---':>8}"
+            f_pl_s = fmt_num(d[f"puff__{r}__exp_f_plasma_exb_hz"], "+8.2f", scale=1e-3)
             print(
                 f"{r:>3} {float(d[f'puff__{r}__gas_puff_ms']):4.0f} {n_tag:>10} | "
                 f"{f_pl_s} {g_s} | "
@@ -1353,8 +1337,7 @@ def print_summary(npz_path=None):
             g_nu = float(d[f"puff__{r}__ax_cwm_near_nu15_gamma_s"]) * 1e-3
             s_gsh = f"{g_gsh:+13.2f}" if np.isfinite(g_gsh) else f"{'no CWM':>13}"
             s_nu = f"{g_nu:+13.2f}" if np.isfinite(g_nu) else f"{'no CWM':>13}"
-            f_lab_exp = float(d[f"puff__{r}__exp_f_lab_hz"]) * 1e-3
-            f_lab_s = f"{f_lab_exp:9.2f}" if np.isfinite(f_lab_exp) else f"{'---':>9}"
+            f_lab_s = fmt_num(d[f"puff__{r}__exp_f_lab_hz"], "9.2f", scale=1e-3)
             print(
                 f"{r:>3} {float(d[f'puff__{r}__gas_puff_ms']):4.0f} | "
                 f"{f_lab_s} {g_s} | "

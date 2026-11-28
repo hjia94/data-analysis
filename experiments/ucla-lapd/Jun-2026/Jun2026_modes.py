@@ -50,7 +50,11 @@ from data_analysis.plasma.modes import (
     plasma_frame_dispersion,
 )
 from data_analysis.signal import avg_cross_spectrum, clip_time_window
-from data_analysis.utils import merge_save_npz
+from data_analysis.utils import (
+    find_run_hdf5 as _run_ifn,
+    merge_save_npz,
+    pack_nested_npz,
+)
 
 import Jun2026_mach_line as jml
 import Jun2026_onset as jon
@@ -98,15 +102,6 @@ BIASSCOPE_WINDOW_MS = (1.5, 4.5) # in machscope (bias-relative) time [ms]
 BIASSCOPE_TARGET_DT_S = 1e-5     # 100 kHz anti-aliased working grid
 BIASSCOPE_NPERSEG = 256          # df = 390.6 Hz at 100 kHz
 BIASSCOPE_MAX_SHOTS = 60
-
-
-def _run_ifn(data_dir, run_num):
-    hits = sorted(glob.glob(os.path.join(data_dir, f"{run_num}-*.hdf5")))
-    if not hits:
-        raise FileNotFoundError(f"no HDF5 for run {run_num} in {data_dir}")
-    if len(hits) > 1:
-        raise ValueError(f"multiple HDF5 files for run {run_num}: {hits}")
-    return hits[0]
 
 
 def _require_xcorr(ifn, ch_a, ch_b, npz_path):
@@ -744,26 +739,8 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, include_biasscope=True,
         "r32_center_ratio": np.float64(r32_ratio),
     }
 
-    def _pack(prefix, nested):
-        for rnum, fields in nested.items():
-            for k, v in fields.items():
-                key = f"{prefix}__{rnum}__{k}"
-                if isinstance(v, np.ndarray):
-                    payload[key] = v
-                elif isinstance(v, str):
-                    payload[key] = np.str_(v)
-                elif isinstance(v, (bool, np.bool_)):
-                    payload[key] = np.bool_(v)
-                elif isinstance(v, (int, np.integer)):
-                    payload[key] = np.int64(v)
-                else:
-                    payload[key] = np.float64(v)
-
-    _pack("az", az)
-    _pack("ax", ax)
-    _pack("bdot", bdot_amp)
-    _pack("bias", bias_coh)
-    _pack("disp", disp)
+    for pfx, nested in (("az", az), ("ax", ax), ("bdot", bdot_amp), ("bias", bias_coh), ("disp", disp)):
+        payload.update(pack_nested_npz(pfx, nested))
 
     merge_save_npz(out_path, payload)
     print(f"\nWrote {out_path}")

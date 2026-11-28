@@ -57,7 +57,7 @@ from data_analysis.signal import (
     shot_phase_consistency,
     summed_bicoherence,
 )
-from data_analysis.utils import merge_save_npz
+from data_analysis.utils import merge_save_npz, npz_settings_mismatch
 
 import Jun2026_modes as jmo
 import Jun2026_onset as jon
@@ -508,21 +508,8 @@ _SETTINGS_META_KEYS = (
 
 def _validate_existing_settings(existing, expected, path):
     """Ensure incremental merges do not mix incompatible bicoherence settings."""
-    mismatches = []
-    for k in _SETTINGS_META_KEYS:
-        if k not in existing:
-            mismatches.append(f"{k}: missing in existing archive")
-            continue
-        cur = expected[k]
-        old = existing[k]
-        if isinstance(cur, str):
-            ok = str(old) == cur
-        elif isinstance(cur, (int, np.integer)):
-            ok = int(old) == int(cur)
-        else:
-            ok = bool(np.isclose(float(old), float(cur), rtol=1e-9, atol=1e-12))
-        if not ok:
-            mismatches.append(f"{k}: stored={old!r} vs current={cur!r}")
+    want = {k: expected[k] for k in _SETTINGS_META_KEYS}
+    mismatches = npz_settings_mismatch(existing, "", want)
     if mismatches:
         raise ValueError(
             f"existing {path} was built with different settings ({'; '.join(mismatches)}); "

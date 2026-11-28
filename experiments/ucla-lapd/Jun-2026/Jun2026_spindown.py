@@ -61,7 +61,7 @@ from data_analysis.plasma.stability import (
     solve_radial_cylindrical_modes,
 )
 from data_analysis.signal import clip_time_window
-from data_analysis.utils import merge_save_npz
+from data_analysis.utils import merge_save_npz, pack_nested_npz, pack_npz_entries
 
 import Jun2026_IV as jiv
 import Jun2026_mach_flow as jmf
@@ -442,25 +442,10 @@ def batch_all(data_dir=DATA_DIR, out_path=None, *, overwrite=False):
         "b0_t": np.float64(DEFAULT_B0_T),
     }
 
-    def _pack(prefix, d_in):
-        for k, v in d_in.items():
-            name = f"{prefix}__{k}"
-            if isinstance(v, str):
-                payload[name] = np.str_(v)
-            elif isinstance(v, (bool, np.bool_)):
-                payload[name] = np.bool_(v)
-            elif isinstance(v, (int, np.integer)):
-                payload[name] = np.int64(v)
-            elif isinstance(v, (float, np.floating)):
-                payload[name] = np.float64(v)
-            else:
-                payload[name] = np.asarray(v)
-
-    _pack("turnoff", turnoff)
+    payload.update(pack_npz_entries("turnoff", turnoff))
     if r32:
-        _pack("run32", r32)
-    for riv, fields in full.items():
-        _pack(f"puff__{riv}", fields)
+        payload.update(pack_npz_entries("run32", r32))
+    payload.update(pack_nested_npz("puff", full))
 
     merge_save_npz(out_path, payload)
     print(f"\nWrote {out_path}")

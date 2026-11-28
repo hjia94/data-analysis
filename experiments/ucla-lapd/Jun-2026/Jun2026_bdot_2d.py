@@ -62,7 +62,12 @@ from data_analysis.plasma.fields import (
 )
 from data_analysis.plasma.modes import fit_azimuthal_mode
 from data_analysis.signal import clip_time_window
-from data_analysis.utils import merge_save_npz
+from data_analysis.utils import (
+    find_run_hdf5 as _run_ifn,
+    merge_save_npz,
+    pack_npz_entries as _pack_npz_entries,
+    prepare_incremental_npz,
+)
 
 import Jun2026_IV as jiv
 import Jun2026_onset as jon
@@ -132,15 +137,6 @@ BDOT_2D_RUNS = (
     Bdot2DRunSpec("31", 600.0, 3529.0),
 )
 BDOT_2D_RUN_MAP = {s.run_num: s for s in BDOT_2D_RUNS}
-
-
-def _run_ifn(data_dir, run_num):
-    hits = sorted(glob.glob(os.path.join(data_dir, f"{run_num}-*.hdf5")))
-    if not hits:
-        raise FileNotFoundError(f"no HDF5 for run {run_num} in {data_dir}")
-    if len(hits) > 1:
-        raise ValueError(f"multiple HDF5 files for run {run_num}: {hits}")
-    return hits[0]
 
 
 def _resolve_bdot_calibration(bdot_cal=None, bdot_area_m2=None):
@@ -1094,56 +1090,6 @@ def _run_settings_dict(tmin_ms, tmax_ms, window, b_sign_z, by_sign,
     }
 
 
-def _run_settings_mismatch(npz_data, run_num, want):
-    diffs = []
-    for field, val in want.items():
-        k = f"{run_num}__{field}"
-        if k not in npz_data.files:
-            diffs.append(f"{field}: missing")
-            continue
-        if val is None:
-            continue
-        if isinstance(val, np.ndarray):
-            got = np.asarray(npz_data[k])
-            if got.shape != val.shape or not np.allclose(got, val, rtol=1e-6, atol=1e-12, equal_nan=True):
-                diffs.append(f"{field}: stored array differs from requested")
-        elif isinstance(val, bool):
-            if bool(npz_data[k]) != val:
-                diffs.append(f"{field}: stored {bool(npz_data[k])} != {val}")
-        elif isinstance(val, int):
-            if int(npz_data[k]) != val:
-                diffs.append(f"{field}: stored {int(npz_data[k])} != {val}")
-        elif isinstance(val, str):
-            if str(npz_data[k]) != val:
-                diffs.append(f"{field}: stored {str(npz_data[k])!r} != {val!r}")
-        else:
-            if not np.isclose(float(npz_data[k]), val, atol=1e-9, rtol=0.0):
-                diffs.append(f"{field}: stored {float(npz_data[k]):g} != {val:g}")
-    return diffs
-
-
-def _pack_npz_entries(prefix, mapping):
-    """Pack a dict of Python/NumPy scalars & arrays under ``{prefix}__{k}``."""
-    packed = {}
-    for k, v in mapping.items():
-        if v is None:
-            continue
-        key = f"{prefix}__{k}"
-        if isinstance(v, np.ndarray):
-            packed[key] = v
-        elif isinstance(v, str):
-            packed[key] = np.str_(v)
-        elif isinstance(v, (bool, np.bool_)):
-            packed[key] = np.bool_(v)
-        elif isinstance(v, (int, np.integer)):
-            packed[key] = np.int64(v)
-        elif isinstance(v, (float, np.floating)):
-            packed[key] = np.float64(v)
-        else:
-            packed[key] = np.asarray(v)
-    return packed
-
-
 def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
               tmin_ms=DEFAULT_TMIN_MS, tmax_ms=DEFAULT_TMAX_MS,
               window=DEFAULT_WINDOW, b_sign_z=DEFAULT_B_SIGN_Z,
@@ -1169,43 +1115,24 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
         bdot_atten_db=bdot_atten_db, channel_signs=channel_signs,
     )
 
-    existing_runs = set()
-    drop_keys = []
-    if os.path.isfile(out_path):
-        with np.load(out_path) as d:
-            existing_runs = {
-                k.split("__", 1)[0] for k in d.files if k.endswith("__f0_hz")
-            }
-            if overwrite:
-                prefixes = tuple(f"{s.run_num}__" for s in specs)
-                drop_keys = [k for k in d.files if k.startswith(prefixes)]
-                existing_runs -= {s.run_num for s in specs}
-            else:
-                for spec in specs:
-                    if spec.run_num in existing_runs:
-                        run_want = want
-                        if want["bdot_gain"] is None or want["bdot_atten_db"] is None:
-                            try:
-                                ifn = _run_ifn(data_dir, spec.run_num)
-                            except FileNotFoundError:
-                                ifn = None
-                            if ifn is not None:
-                                parsed_chain = _read_bdot_chain(open_lapd(ifn))
-                                g_exp, a_exp = _resolve_bdot_gain(
-                                    parsed_chain,
-                                    calibrated=True,
-                                    bdot_gain=bdot_gain,
-                                    bdot_atten_db=bdot_atten_db,
-                                    run_num=spec.run_num,
-                                )
-                                run_want = dict(want, bdot_gain=g_exp, bdot_atten_db=a_exp)
-                        diffs = _run_settings_mismatch(d, spec.run_num, run_want)
-                        if diffs:
-                            raise ValueError(
-                                f"{out_path}: stored run '{spec.run_num}' differs "
-                                f"from requested settings ({'; '.join(diffs)}); "
-                                "pass overwrite=True to regenerate"
-                            )
+    def _want_for_run(_d, rnum):
+        if want["bdot_gain"] is not None and want["bdot_atten_db"] is not None:
+            return want
+        try:
+            ifn = _run_ifn(data_dir, rnum)
+        except FileNotFoundError:
+            return want
+        g_exp, a_exp = _resolve_bdot_gain(
+            _read_bdot_chain(open_lapd(ifn)),
+            calibrated=True, bdot_gain=bdot_gain, bdot_atten_db=bdot_atten_db,
+            run_num=rnum,
+        )
+        return dict(want, bdot_gain=g_exp, bdot_atten_db=a_exp)
+
+    existing_runs, drop_keys = prepare_incremental_npz(
+        out_path, [s.run_num for s in specs], "__f0_hz",
+        overwrite=overwrite, want_for_run=_want_for_run,
+    )
 
     payload = {
         "updated": np.str_(datetime.datetime.now().isoformat(timespec="seconds")),
@@ -1223,9 +1150,8 @@ def batch_all(data_dir=DATA_DIR, runs=None, onset_npz=None, out_path=None, *,
             bdot_gain=bdot_gain, bdot_atten_db=bdot_atten_db,
             channel_signs=channel_signs, probe_to_lab=probe_to_lab,
         )
-        p = spec.run_num
-        payload.update(_pack_npz_entries(p, res))
-        payload.update(_pack_npz_entries(p, want))
+        payload.update(_pack_npz_entries(spec.run_num, res))
+        payload.update(_pack_npz_entries(spec.run_num, want))
         ran_any = True
 
     if ran_any or not os.path.isfile(out_path):
@@ -1273,48 +1199,16 @@ def batch_dc_bias_steps(
         "bdot_probe_id": str(probe_id),
         "bdot_channel_signs": np.asarray(channel_signs, dtype=np.int64),
     }
-
-    existing_dc_runs = set()
-    drop_keys = []
-    if os.path.isfile(out_path):
-        with np.load(out_path) as d:
-            existing_dc_runs = {
-                k.split("__", 1)[0] for k in d.files if k.endswith("__dc__I_int_on")
-            }
-            if overwrite:
-                prefixes = tuple(f"{s.run_num}__dc__" for s in specs)
-                drop_keys = [k for k in d.files if k.startswith(prefixes)]
-                existing_dc_runs -= {s.run_num for s in specs}
-            else:
-                for spec in specs:
-                    if spec.run_num not in existing_dc_runs:
-                        continue
-                    diffs = []
-                    for field, val in dc_want.items():
-                        k_dc = f"{spec.run_num}__dc__{field}"
-                        k_run = f"{spec.run_num}__{'by_sign' if field == 'by_sign_used' else field}"
-                        k_use = k_dc if k_dc in d.files else (k_run if k_run in d.files else None)
-                        if k_use is None:
-                            continue
-                        if isinstance(val, np.ndarray):
-                            got = np.asarray(d[k_use])
-                            if got.shape != val.shape or not np.allclose(got, val, rtol=1e-6, atol=1e-12):
-                                diffs.append(f"{field}: stored {got.tolist()} != {val.tolist()}")
-                        elif isinstance(val, bool):
-                            if bool(d[k_use]) != val:
-                                diffs.append(f"{field}: stored {bool(d[k_use])} != {val}")
-                        elif isinstance(val, int):
-                            if int(d[k_use]) != val:
-                                diffs.append(f"{field}: stored {int(d[k_use])} != {val}")
-                        elif isinstance(val, str):
-                            if str(d[k_use]) != val:
-                                diffs.append(f"{field}: stored {str(d[k_use])!r} != {val!r}")
-                    if diffs:
-                        raise ValueError(
-                            f"{out_path}: stored DC step for run '{spec.run_num}' differs "
-                            f"from requested settings ({'; '.join(diffs)}); "
-                            "pass overwrite=True to regenerate"
-                        )
+    existing_dc_runs, drop_keys = prepare_incremental_npz(
+        out_path, [s.run_num for s in specs], "__dc__I_int_on",
+        overwrite=overwrite, prefix_fmt="{r}__dc__", want=dc_want,
+        mismatch_kwargs={
+            "allow_missing_keys": True,
+            "fallback_prefix_fmt": "{r}__",
+            "fallback_aliases": {"by_sign_used": "by_sign"},
+        },
+        label="DC step for run",
+    )
 
     payload = {
         "updated": np.str_(datetime.datetime.now().isoformat(timespec="seconds")),

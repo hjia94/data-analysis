@@ -55,7 +55,7 @@ from data_analysis.signal import (
     detect_onset_time,
     sliding_detrended_rms,
 )
-from data_analysis.utils import merge_save_npz
+from data_analysis.utils import find_run_hdf5 as _run_ifn, merge_save_npz
 
 import Jun2026_IV as jiv
 import Jun2026_mach_flow as jmf
@@ -171,13 +171,6 @@ def _find_2d_core_center(x_u, y_u, vals, r_search_cm=3.5, k_lowest=5):
     k = min(int(k_lowest), idx.size)
     order = idx[np.argsort(vals[idx])[:k]]
     return float(np.mean(x_u[order])), float(np.mean(y_u[order]))
-
-
-def _run_ifn(data_dir, rnum):
-    hits = sorted(glob.glob(os.path.join(data_dir, f"{rnum}-*.hdf5")))
-    if not hits:
-        raise FileNotFoundError(f"no HDF5 for run {rnum} in {data_dir}")
-    return hits[0]
 
 
 def _nanmean_rows(arr):

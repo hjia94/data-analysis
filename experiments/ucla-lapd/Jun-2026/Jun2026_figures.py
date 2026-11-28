@@ -30,6 +30,7 @@ from data_analysis.plasma.stability import (
     solve_radial_cylindrical_modes,
 )
 from data_analysis.signal.core import downsample_blockmean
+from data_analysis.utils import find_run_hdf5 as _run_hdf5
 from data_analysis.viz import (
     animate_lab_vs_plasma_frame,
     configure_publication_style,
@@ -85,16 +86,6 @@ def _resolve_save(save_fig, name, *, ext=".png"):
         if parent:
             os.makedirs(parent, exist_ok=True)
     return path
-
-
-def _run_hdf5(data_dir, run_num):
-    """Locate the single HDF5 file for ``run_num`` inside ``data_dir``."""
-    hits = sorted(glob.glob(os.path.join(data_dir, f"{run_num}-*.hdf5")))
-    if not hits:
-        raise FileNotFoundError(f"no HDF5 for run {run_num} in {data_dir}")
-    if len(hits) > 1:
-        raise ValueError(f"multiple HDF5 files for run {run_num}: {hits}")
-    return hits[0]
 
 
 def _shot_xy(pos, shot):
