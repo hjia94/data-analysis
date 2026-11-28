@@ -17,8 +17,8 @@ from .lapd_hdf5 import (open_lapd, LapdRun, LapdSession, compare_runs,
 from .network_analyzer import (read_NA_data, read_e5100a_csv,
                                read_e5100a_binary, load_bdot_vna_dir)
 from .probe_map import (AmbiguousProbeMap, STATIONARY, UNMAPPED,
-                        motion_group_for_channel, moving_group,
-                        probe_channel_map)
+                        mach_tip_channels, motion_group_for_channel,
+                        moving_group, probe_channel_map)
 from .prompts import choose_from_list
 
 __all__ = [
@@ -41,6 +41,7 @@ __all__ = [
     "read_e5100a_binary",
     "load_bdot_vna_dir",
     "probe_channel_map",
+    "mach_tip_channels",
     "motion_group_for_channel",
     "moving_group",
     "AmbiguousProbeMap",

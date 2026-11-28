@@ -64,6 +64,9 @@ _PORT_RE = re.compile(r"[pP](\d{1,2})(?!\d)")
 # `Bdot_scope_C1` -- all `<prefix>_C<n>`.
 _CHAN_RE = re.compile(r"\s*(\w+?)_(C\d+)\s*=\s*(.+?)\s*$")
 _SECTION_RE = re.compile(r"\s*\[(\w+)\]\s*$")
+# Mach tip suffix at the end of a wiring description: 'MP@P33, Isat-X-' -> 'X-'.
+# Splitting on '-' fails because the trailing sign is itself a '-'.
+_MACH_TIP_RE = re.compile(r"([XYZ][+-])\s*$", re.IGNORECASE)
 
 
 class AmbiguousProbeMap(ValueError):
@@ -82,6 +85,37 @@ class AmbiguousProbeMap(ValueError):
             f"{where} is claimed by {len(self.candidates)} motion groups: "
             f"{self.candidates}. Name one explicitly to disambiguate."
         )
+
+
+def mach_tip_channels(ifn, *, required_axes=None, with_scope=False, wiring=None):
+    """Map Mach-probe tip names (``'X+'``, ``'X-'``, ...) to digitizer channels.
+
+    Reads the run's recorded wiring via :func:`channel_wiring` (never a
+    hardcoded ``C1=X+`` table, where a swapped ``+/-`` assignment silently
+    inverts ``R`` and flips every flow vector).
+
+    Args:
+        ifn (str): Path to the LAPD HDF5 file.
+        required_axes (iterable of str, optional): Axes (e.g. ``("X", "Y", "Z")``)
+            whose ``+`` and ``-`` tips must all be present; raises
+            :class:`ValueError` listing any missing tips.
+        with_scope (bool): If True, values are ``(scope, chan)`` tuples; if
+            False (default), values are bare channel names ``'C1'``.
+        wiring (dict, optional): Pre-fetched ``channel_wiring(ifn)`` mapping.
+
+    Returns:
+        dict: ``{tip: chan}`` or ``{tip: (scope, chan)}``.
+    """
+    out = {}
+    for (scope, chan), desc in (channel_wiring(ifn) if wiring is None else wiring).items():
+        m = _MACH_TIP_RE.search(desc)
+        if m:
+            out[m.group(1).upper()] = (scope, chan) if with_scope else chan
+    if required_axes is not None:
+        missing = [f"{a}{s}" for a in required_axes for s in "+-" if f"{a}{s}" not in out]
+        if missing:
+            raise ValueError(f"{ifn}: no channel found for {missing}")
+    return out
 
 
 def ports_in(text):
